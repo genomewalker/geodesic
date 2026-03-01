@@ -47,6 +47,7 @@ struct Config {
     bool copy_reps = false;
     bool debug = false;
     bool keep_intermediates = false;
+    bool report_only = false;
 
     // Logging verbosity: 0=quiet, 1=normal (default), 2=verbose, 3=debug
     int verbosity = 1;

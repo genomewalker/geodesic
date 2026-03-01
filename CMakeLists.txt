@@ -75,6 +75,7 @@ add_executable(geodesic
     src/io/fasta_reader.cpp
     src/io/gz_reader.cpp
     src/io/results_writer.cpp
+    src/io/report_writer.cpp
     src/db/schema.cpp
     src/db/db_manager.cpp
     src/db/operations.cpp

@@ -7,6 +7,7 @@
 #include "db/embedding_store.hpp"
 #include "db/operations.hpp"
 #include "db/schema.hpp"
+#include "io/report_writer.hpp"
 #include "io/results_writer.hpp"
 #include "io/tsv_reader.hpp"
 
@@ -446,6 +447,9 @@ int run_pipeline(Config& cfg) {
 
     ResultsWriter writer(results_dir, cfg.prefix);
     writer.write_all(db);
+
+    ReportWriter report_writer(results_dir, cfg.prefix, cfg.timestamp);
+    report_writer.write(db);
 
     if (!cfg.keep_intermediates) {
         db::schema::prune_intermediate_tables(db.thread_connection());

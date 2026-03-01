@@ -126,7 +126,8 @@ TaxonResult process_taxon(
     int thread_budget,
     db::DBManager& db,
     GenomeCache& cache,
-    db::EmbeddingStore* emb_store) {
+    db::EmbeddingStore* emb_store,
+    bool in_batch_txn) {
     try {
         const int threads = (thread_budget > 0) ? thread_budget : cfg.threads;
         // -----------------------------------------------------------
@@ -330,13 +331,13 @@ TaxonResult process_taxon(
             div_stats.diversity_n_pairs  = div_pairs;
 
             auto& conn = db.thread_connection();
-            conn.Query("BEGIN TRANSACTION");
+            if (!in_batch_txn) conn.Query("BEGIN TRANSACTION");
             db::ops::insert_result(db, r);
             db::ops::insert_genomes_derep(db, taxon.taxonomy, all_accessions,
                                           representatives, ani_to_rep_map);
             db::ops::insert_diversity_stats(db, div_stats);
             db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
-            conn.Query("COMMIT");
+            if (!in_batch_txn) conn.Query("COMMIT");
             return r;
         }
 
@@ -614,8 +615,16 @@ std::vector<TaxonResult> process_tiny_batch(
     GenomeCache& cache) {
     std::vector<TaxonResult> results;
     results.reserve(taxa.size());
-    for (const Taxon* t : taxa)
-        results.push_back(process_taxon(*t, cfg, 1, db, cache, nullptr));
+    auto& conn = db.thread_connection();
+    conn.Query("BEGIN TRANSACTION");
+    try {
+        for (const Taxon* t : taxa)
+            results.push_back(process_taxon(*t, cfg, 1, db, cache, nullptr, /*in_batch_txn=*/true));
+        conn.Query("COMMIT");
+    } catch (...) {
+        conn.Query("ROLLBACK");
+        throw;
+    }
     return results;
 }
 
