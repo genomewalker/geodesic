@@ -37,565 +37,6 @@ static std::string fmt_d(double v, int prec = 4) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Help page HTML (Three.js 3D sphere visualization)
-// ─────────────────────────────────────────────────────────────────────────────
-static const char* HELP_HTML = R"GEODESIC(<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>geodesic — algorithm</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#000005;--panel:#080d18;--s2:#0c1220;--b1:#182038;--b2:#1e2d4a;
-  --t1:#c4d0e8;--t2:#7a8fb0;--t3:#3d5070;
-  --teal:#00d4a3;--teal-d:rgba(0,212,163,.1);
-  --amber:#f0a030;--blue:#4a9eff;
-}
-html,body{height:100%;overflow:hidden}
-body{background:var(--bg);color:var(--t1);font-family:'Outfit',sans-serif;display:flex}
-@import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;600&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap');
-.panel{
-  width:340px;min-width:340px;background:var(--panel);border-right:1px solid var(--b1);
-  display:flex;flex-direction:column;overflow:hidden;z-index:10;
-}
-.panel-header{
-  padding:24px 24px 16px;border-bottom:1px solid var(--b1);flex-shrink:0;
-}
-.logo{
-  font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:500;color:var(--teal);
-  letter-spacing:-.02em;
-}
-.logo-sub{margin-top:4px;font-size:11px;color:var(--t3);letter-spacing:.08em;text-transform:uppercase}
-.steps{flex:1;overflow-y:auto;padding:16px 0}
-.steps::-webkit-scrollbar{width:4px}
-.steps::-webkit-scrollbar-track{background:transparent}
-.steps::-webkit-scrollbar-thumb{background:var(--b2);border-radius:2px}
-.step{
-  padding:14px 24px;border-left:2px solid transparent;cursor:pointer;
-  transition:all .15s;opacity:.45;
-}
-.step.active{border-left-color:var(--teal);opacity:1;background:rgba(0,212,163,.04)}
-.step:hover{opacity:.8}
-.step-num{
-  font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--teal);
-  letter-spacing:.12em;margin-bottom:4px;
-}
-.step-title{font-size:13px;font-weight:600;color:var(--t1);margin-bottom:6px}
-.step-body{font-size:12px;color:var(--t2);line-height:1.6;display:none}
-.step.active .step-body{display:block}
-.step-eq{
-  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--amber);
-  background:rgba(240,160,48,.08);border:1px solid rgba(240,160,48,.15);
-  border-radius:4px;padding:6px 10px;margin-top:8px;line-height:1.7;
-}
-.controls{padding:16px 24px;border-top:1px solid var(--b1);flex-shrink:0}
-.ctrl-row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
-.ctrl-row:last-child{margin-bottom:0}
-.btn{
-  background:var(--s2);border:1px solid var(--b1);border-radius:6px;
-  padding:7px 14px;color:var(--t2);font-family:'Outfit',sans-serif;
-  font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;
-  white-space:nowrap;
-}
-.btn:hover{color:var(--t1);border-color:var(--b2)}
-.btn.primary{color:var(--teal);border-color:rgba(0,212,163,.3);background:var(--teal-d)}
-.btn.primary:hover{background:rgba(0,212,163,.18)}
-.btn:disabled{opacity:.35;cursor:not-allowed}
-.step-nav{display:flex;align-items:center;gap:8px;flex:1}
-.step-label{
-  flex:1;text-align:center;font-family:'JetBrains Mono',monospace;
-  font-size:11px;color:var(--t3);
-}
-.info-grid{
-  display:grid;grid-template-columns:1fr 1fr;gap:1px;
-  background:var(--b1);border:1px solid var(--b1);border-radius:8px;overflow:hidden;
-  margin-top:12px;
-}
-.info-cell{background:var(--panel);padding:10px 12px}
-.info-key{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--t3);margin-bottom:2px}
-.info-val{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:500;color:var(--teal)}
-.canvas-wrap{flex:1;position:relative;overflow:hidden}
-#sphere-canvas{width:100%;height:100%;display:block}
-.canvas-label{
-  position:absolute;top:20px;right:24px;
-  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--t3);
-  letter-spacing:.08em;text-transform:uppercase;
-}
-.legend{
-  position:absolute;bottom:24px;right:24px;
-  display:flex;flex-direction:column;gap:6px;
-}
-.legend-item{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--t2)}
-.legend-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.back-link{
-  position:absolute;top:20px;left:20px;
-  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--t3);
-  text-decoration:none;transition:color .15s;letter-spacing:.04em;
-}
-.back-link:hover{color:var(--teal)}
-</style>
-</head>
-<body>
-<aside class="panel">
-  <div class="panel-header">
-    <div class="logo">geodesic</div>
-    <div class="logo-sub">Algorithm Visualization</div>
-  </div>
-  <div class="steps" id="steps">
-    <div class="step active" data-step="0">
-      <div class="step-num">01 / OPH SKETCHING</div>
-      <div class="step-title">Genome Embedding</div>
-      <div class="step-body">
-        Each genome is processed with One-Permutation Hashing (OPH): all k-mers (k=21) are hashed into m=10,000 bins. The minimum hash value per bin forms the genome's signature.
-        <div class="step-eq">P[sig_A[t] = sig_B[t]] = J(A,B)</div>
-        This is an unbiased estimator of the Jaccard similarity between the k-mer sets of any two genomes.
-      </div>
-    </div>
-    <div class="step" data-step="1">
-      <div class="step-num">02 / COUNTSKETCH</div>
-      <div class="step-title">Sphere Projection</div>
-      <div class="step-body">
-        The OPH signature (10,000 bins) is compressed to a 256-dimensional unit vector via CountSketch: each bin maps to a random dimension with a ±1 sign flip. Normalizing places the genome on the unit sphere S²⁵⁵.
-        <div class="step-eq">E[u·v] = J(A,B)<br>ANI = (2J / (1+J))^(1/k) × 100</div>
-        The dot product is an unbiased Jaccard estimator — no calibration needed.
-      </div>
-    </div>
-    <div class="step" data-step="2">
-      <div class="step-num">03 / HNSW INDEX</div>
-      <div class="step-title">Fast Nearest Neighbors</div>
-      <div class="step-body">
-        All genome vectors are inserted into a Hierarchical Navigable Small World graph. This enables sub-linear approximate nearest-neighbor queries on the sphere — finding the k closest genomes to any query point in O(log n) time instead of O(n).
-        <div class="step-eq">isolation(g) = mean distance to<br>k nearest neighbors</div>
-        Isolation scores guide representative selection: genomes in sparse regions are more likely to be selected.
-      </div>
-    </div>
-    <div class="step" data-step="3">
-      <div class="step-num">04 / FARTHEST POINT SAMPLING</div>
-      <div class="step-title">Select Representatives</div>
-      <div class="step-body">
-        FPS greedily places each new representative as far as possible from all already-selected ones. This is a 2-approximation to the k-center problem: the maximum coverage radius is at most twice optimal.
-        <div class="step-eq">next_rep = argmax_g min_r d(g, r)</div>
-        Click <strong style="color:var(--teal)">Add Representative</strong> to step through the selection, or use Auto-play.
-      </div>
-    </div>
-    <div class="step" data-step="4">
-      <div class="step-num">05 / THOMSON MERGE</div>
-      <div class="step-title">Electrostatic Equilibrium</div>
-      <div class="step-body">
-        After FPS, representatives within <code style="color:var(--amber)">min_rep_distance</code> of each other are coalesced via Union-Find. In Thomson mode, remaining reps drift under mutual Coulomb repulsion to maximize their minimum pairwise separation.
-        <div class="step-eq">U = Σ_{i≠j} 1/‖r_i − r_j‖</div>
-        The equilibrium configuration maximally tiles the sphere — the continuous Thomson problem.
-      </div>
-    </div>
-  </div>
-  <div class="controls">
-    <div class="ctrl-row">
-      <div class="step-nav">
-        <button class="btn" id="btn-prev">←</button>
-        <span class="step-label" id="step-indicator">1 / 5</span>
-        <button class="btn" id="btn-next">→</button>
-      </div>
-    </div>
-    <div class="ctrl-row">
-      <button class="btn primary" id="btn-action">▶ Add Representative</button>
-      <button class="btn" id="btn-reset">Reset</button>
-    </div>
-    <div class="ctrl-row">
-      <button class="btn" id="btn-autoplay" style="flex:1">Auto-play FPS</button>
-      <button class="btn" id="btn-thomson" style="flex:1">Thomson Mode</button>
-    </div>
-    <div class="info-grid">
-      <div class="info-cell">
-        <div class="info-key">Representatives</div>
-        <div class="info-val" id="info-reps">0 / 80</div>
-      </div>
-      <div class="info-cell">
-        <div class="info-key">Coverage radius</div>
-        <div class="info-val" id="info-radius">—</div>
-      </div>
-      <div class="info-cell">
-        <div class="info-key">Thomson energy</div>
-        <div class="info-val" id="info-energy">—</div>
-      </div>
-      <div class="info-cell">
-        <div class="info-key">Angular dist</div>
-        <div class="info-val" id="info-dist">—</div>
-      </div>
-    </div>
-  </div>
-</aside>
-
-<div class="canvas-wrap">
-  <canvas id="sphere-canvas"></canvas>
-  <a href="javascript:history.back()" class="back-link">← report</a>
-  <div class="canvas-label" id="canvas-label">UNIT SPHERE S²⁵⁵</div>
-  <div class="legend">
-    <div class="legend-item">
-      <div class="legend-dot" style="background:#2a5090"></div>
-      <span>Genome embedding</span>
-    </div>
-    <div class="legend-item">
-      <div class="legend-dot" style="background:#00d4a3"></div>
-      <span>Representative</span>
-    </div>
-    <div class="legend-item">
-      <div class="legend-dot" style="background:#f0a030"></div>
-      <span>Coverage boundary</span>
-    </div>
-  </div>
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
-<script>
-(function(){
-'use strict';
-
-const N_GENOMES = 80;
-const canvas = document.getElementById('sphere-canvas');
-const wrap = canvas.parentElement;
-
-// ── Renderer ──────────────────────────────────────────────────────────────
-const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:false});
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setClearColor(0x000005, 1);
-
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
-camera.position.set(0, 0.5, 2.8);
-
-const controls = new THREE.OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.06;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.4;
-controls.minDistance = 1.5;
-controls.maxDistance = 6;
-
-function resize() {
-  const w = wrap.clientWidth, h = wrap.clientHeight;
-  renderer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-}
-resize();
-new ResizeObserver(resize).observe(wrap);
-
-// ── Stars ─────────────────────────────────────────────────────────────────
-{
-  const geo = new THREE.BufferGeometry();
-  const pos = new Float32Array(1200 * 3);
-  for (let i = 0; i < 1200; i++) {
-    const phi = Math.random() * Math.PI * 2;
-    const theta = Math.acos(Math.random() * 2 - 1);
-    const r = 60 + Math.random() * 80;
-    pos[i*3]   = r * Math.sin(theta) * Math.cos(phi);
-    pos[i*3+1] = r * Math.sin(theta) * Math.sin(phi);
-    pos[i*3+2] = r * Math.cos(theta);
-  }
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({color:0x334466, size:0.15, sizeAttenuation:true})));
-}
-
-// ── Sphere wireframe ──────────────────────────────────────────────────────
-const sphereObj = new THREE.Mesh(
-  new THREE.SphereGeometry(1, 48, 36),
-  new THREE.MeshBasicMaterial({color:0x152040, wireframe:true, transparent:true, opacity:0.12})
-);
-scene.add(sphereObj);
-
-// Solid inner sphere (very subtle)
-scene.add(new THREE.Mesh(
-  new THREE.SphereGeometry(0.998, 32, 24),
-  new THREE.MeshBasicMaterial({color:0x030610, transparent:true, opacity:0.6})
-));
-
-// ── Generate genome positions ─────────────────────────────────────────────
-function randOnSphere() {
-  // Marsaglia method
-  let x, y, s;
-  do { x = Math.random()*2-1; y = Math.random()*2-1; s = x*x+y*y; } while (s >= 1);
-  const sq = Math.sqrt(1 - s);
-  return new THREE.Vector3(2*x*sq, 2*y*sq, 1-2*s).normalize();
-}
-
-// Generate clustered genome positions (more realistic)
-const CLUSTER_CENTERS = 8;
-const centers = Array.from({length:CLUSTER_CENTERS}, randOnSphere);
-const genomePos = Array.from({length:N_GENOMES}, (_, i) => {
-  // 60% near clusters, 40% scattered
-  if (Math.random() < 0.65) {
-    const c = centers[i % CLUSTER_CENTERS];
-    const v = randOnSphere();
-    return c.clone().lerp(v, 0.18 + Math.random()*0.25).normalize();
-  }
-  return randOnSphere();
-});
-
-// ── Genome points (BufferGeometry, updated on state change) ───────────────
-const genomeGeo = new THREE.BufferGeometry();
-const gPos = new Float32Array(N_GENOMES * 3);
-genomePos.forEach((p,i) => { gPos[i*3]=p.x; gPos[i*3+1]=p.y; gPos[i*3+2]=p.z; });
-genomeGeo.setAttribute('position', new THREE.BufferAttribute(gPos, 3));
-const genomePoints = new THREE.Points(genomeGeo,
-  new THREE.PointsMaterial({color:0x1a4878, size:0.03, sizeAttenuation:true, transparent:true, opacity:0.9})
-);
-scene.add(genomePoints);
-
-// ── Representatives (instanced spheres) ───────────────────────────────────
-const repGroup = new THREE.Group();
-scene.add(repGroup);
-const flashGroup = new THREE.Group();
-scene.add(flashGroup);
-
-// ── Connection lines ───────────────────────────────────────────────────────
-const lineGroup = new THREE.Group();
-scene.add(lineGroup);
-
-// ── State ─────────────────────────────────────────────────────────────────
-const selected = [];          // indices into genomePos
-const repPositions = [];      // Three.Vector3 (may diverge from genomePos in Thomson)
-let thomsonActive = false;
-let autoplayTimer = null;
-let currentStep = 0;
-let thomsonEnergy = 0;
-
-// ── FPS algorithm ─────────────────────────────────────────────────────────
-function fpsStep() {
-  if (selected.length === 0) {
-    const idx = Math.floor(Math.random() * N_GENOMES);
-    selected.push(idx);
-    repPositions.push(genomePos[idx].clone());
-    animateNewRep(genomePos[idx]);
-    updateScene();
-    return;
-  }
-  let best = -1, bestDist = -1;
-  for (let i = 0; i < N_GENOMES; i++) {
-    if (selected.includes(i)) continue;
-    let minD = Infinity;
-    for (const rp of repPositions) {
-      const d = genomePos[i].distanceTo(rp);
-      if (d < minD) minD = d;
-    }
-    if (minD > bestDist) { bestDist = minD; best = i; }
-  }
-  if (best >= 0) {
-    selected.push(best);
-    repPositions.push(genomePos[best].clone());
-    animateNewRep(genomePos[best]);
-    updateScene();
-  }
-}
-
-function animateNewRep(pos) {
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.04, 10, 8),
-    new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:1})
-  );
-  mesh.position.copy(pos);
-  flashGroup.add(mesh);
-  // Ring
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.04, 0.055, 24),
-    new THREE.MeshBasicMaterial({color:0x00d4a3, transparent:true, opacity:0.9, side:THREE.DoubleSide})
-  );
-  ring.position.copy(pos);
-  ring.lookAt(camera.position);
-  flashGroup.add(ring);
-
-  const t0 = performance.now();
-  const dur = 900;
-  function tick() {
-    const p = Math.min((performance.now()-t0)/dur, 1);
-    mesh.material.opacity = 1 - p;
-    ring.material.opacity = (1-p)*0.9;
-    ring.scale.setScalar(1 + p * 1.4);
-    if (p < 1) requestAnimationFrame(tick);
-    else { flashGroup.remove(mesh); flashGroup.remove(ring); }
-  }
-  requestAnimationFrame(tick);
-}
-
-// ── Scene update ───────────────────────────────────────────────────────────
-function updateScene() {
-  // Update genome colors (blue = unselected, slightly brighter near a rep)
-  genomePoints.material.color.setHex(0x1a4878);
-
-  // Rebuild rep meshes
-  while (repGroup.children.length) repGroup.remove(repGroup.children[0]);
-  repPositions.forEach(rp => {
-    const m = new THREE.Mesh(
-      new THREE.SphereGeometry(0.038, 12, 10),
-      new THREE.MeshBasicMaterial({color:0x00d4a3})
-    );
-    m.position.copy(rp);
-    repGroup.add(m);
-    // Glow halo
-    const glow = new THREE.Mesh(
-      new THREE.SphereGeometry(0.055, 12, 10),
-      new THREE.MeshBasicMaterial({color:0x00d4a3, transparent:true, opacity:0.12})
-    );
-    glow.position.copy(rp);
-    repGroup.add(glow);
-  });
-
-  // Connection lines
-  while (lineGroup.children.length) lineGroup.remove(lineGroup.children[0]);
-  if (repPositions.length > 0) {
-    genomePos.forEach((gp, i) => {
-      if (selected.includes(i)) return;
-      let nearest = repPositions[0], nearD = gp.distanceTo(repPositions[0]);
-      repPositions.forEach(rp => { const d = gp.distanceTo(rp); if (d < nearD) { nearD = d; nearest = rp; } });
-      const geo = new THREE.BufferGeometry().setFromPoints([gp.clone().multiplyScalar(1.01), nearest.clone().multiplyScalar(1.01)]);
-      lineGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({color:0x1a3a60, transparent:true, opacity:0.45})));
-    });
-  }
-
-  updateInfo();
-}
-
-function updateInfo() {
-  document.getElementById('info-reps').textContent = selected.length + ' / ' + N_GENOMES;
-  if (repPositions.length > 0) {
-    // Max coverage radius = max min-dist from any genome to nearest rep
-    let maxMinD = 0;
-    genomePos.forEach((gp, i) => {
-      if (selected.includes(i)) { return; }
-      let minD = Infinity;
-      repPositions.forEach(rp => { const d = gp.distanceTo(rp); if (d < minD) minD = d; });
-      if (minD > maxMinD) maxMinD = minD;
-    });
-    document.getElementById('info-radius').textContent = maxMinD.toFixed(3) + ' rad';
-    document.getElementById('info-dist').textContent = (maxMinD * 180 / Math.PI).toFixed(1) + '°';
-  } else {
-    document.getElementById('info-radius').textContent = '—';
-    document.getElementById('info-dist').textContent = '—';
-  }
-  if (thomsonActive) {
-    document.getElementById('info-energy').textContent = thomsonEnergy.toFixed(1);
-  }
-}
-
-// ── Thomson simulation ─────────────────────────────────────────────────────
-function thomsonStep() {
-  const n = repPositions.length;
-  if (n < 2) return;
-  const forces = repPositions.map(() => new THREE.Vector3());
-  let energy = 0;
-  for (let i = 0; i < n; i++) {
-    for (let j = i+1; j < n; j++) {
-      const diff = repPositions[i].clone().sub(repPositions[j]);
-      const d2 = diff.lengthSq();
-      energy += 1 / Math.sqrt(d2);
-      const f = diff.divideScalar(d2 * Math.sqrt(d2) + 1e-8);
-      forces[i].add(f);
-      forces[j].sub(f);
-    }
-  }
-  thomsonEnergy = energy;
-  repPositions.forEach((rp, i) => {
-    rp.addScaledVector(forces[i], 0.0008);
-    rp.normalize();
-  });
-  // Sync back to rep meshes
-  let k = 0;
-  repGroup.children.forEach(m => {
-    m.position.copy(repPositions[Math.floor(k/2)]);
-    k++;
-  });
-  updateScene();
-}
-
-// ── Reset ─────────────────────────────────────────────────────────────────
-function reset() {
-  selected.length = 0;
-  repPositions.length = 0;
-  thomsonActive = false;
-  clearTimeout(autoplayTimer);
-  autoplayTimer = null;
-  document.getElementById('btn-autoplay').textContent = 'Auto-play FPS';
-  document.getElementById('btn-thomson').textContent = 'Thomson Mode';
-  document.getElementById('info-energy').textContent = '—';
-  while (repGroup.children.length) repGroup.remove(repGroup.children[0]);
-  while (lineGroup.children.length) lineGroup.remove(lineGroup.children[0]);
-  while (flashGroup.children.length) flashGroup.remove(flashGroup.children[0]);
-  updateInfo();
-}
-
-// ── UI ─────────────────────────────────────────────────────────────────────
-function setStep(s) {
-  currentStep = Math.max(0, Math.min(4, s));
-  document.querySelectorAll('.step').forEach((el, i) => el.classList.toggle('active', i === currentStep));
-  document.getElementById('step-indicator').textContent = (currentStep+1) + ' / 5';
-  const labels = ['OPH SKETCH','SPHERE PROJECTION','HNSW INDEX','FARTHEST POINT SAMPLING','THOMSON MERGE'];
-  document.getElementById('canvas-label').textContent = labels[currentStep];
-  // Show relevant controls
-  const inFPS = currentStep === 3;
-  const inThomson = currentStep === 4;
-  document.getElementById('btn-action').style.display = (inFPS || inThomson) ? '' : 'none';
-  document.getElementById('btn-action').textContent = inThomson ? '⚡ Thomson Step' : '▶ Add Representative';
-  document.getElementById('btn-autoplay').style.display = inFPS ? '' : 'none';
-  document.getElementById('btn-thomson').style.display = inThomson ? '' : 'none';
-}
-
-document.getElementById('btn-prev').onclick = () => setStep(currentStep - 1);
-document.getElementById('btn-next').onclick = () => setStep(currentStep + 1);
-document.getElementById('btn-reset').onclick = reset;
-
-document.getElementById('btn-action').onclick = () => {
-  if (currentStep === 3) fpsStep();
-  else if (currentStep === 4) { thomsonActive = false; thomsonStep(); }
-};
-
-document.getElementById('btn-autoplay').onclick = function() {
-  if (autoplayTimer) {
-    clearInterval(autoplayTimer);
-    autoplayTimer = null;
-    this.textContent = 'Auto-play FPS';
-  } else {
-    this.textContent = '⏸ Pause';
-    autoplayTimer = setInterval(() => {
-      if (selected.length >= N_GENOMES) {
-        clearInterval(autoplayTimer); autoplayTimer = null;
-        document.getElementById('btn-autoplay').textContent = 'Auto-play FPS';
-        return;
-      }
-      fpsStep();
-    }, 220);
-  }
-};
-
-document.getElementById('btn-thomson').onclick = function() {
-  thomsonActive = !thomsonActive;
-  this.textContent = thomsonActive ? '⏸ Pause Thomson' : 'Thomson Mode';
-};
-
-document.querySelectorAll('.step').forEach((el, i) => {
-  el.addEventListener('click', () => setStep(i));
-});
-
-setStep(0);
-
-// ── Animation loop ─────────────────────────────────────────────────────────
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  if (thomsonActive) thomsonStep();
-  renderer.render(scene, camera);
-}
-animate();
-
-})();
-</script>
-</body>
-</html>
-)GEODESIC";
-
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Main report HTML template  (__DATA__ is replaced with JSON)
 // ─────────────────────────────────────────────────────────────────────────────
 static const char* REPORT_HTML = R"GEODESIC(<!DOCTYPE html>
@@ -815,6 +256,62 @@ footer{
 /* ── Utility ── */
 .muted{color:var(--t3)!important}
 .loading-msg{padding:40px;text-align:center;color:var(--t3);font-size:13px}
+
+/* ── Algorithm section ── */
+#algorithm{height:100vh;display:flex;overflow:hidden;background:#000005}
+#algorithm .alg-panel{
+  width:340px;min-width:340px;background:#080d18;border-right:1px solid #182038;
+  display:flex;flex-direction:column;overflow:hidden;z-index:10;
+}
+#algorithm .alg-panel-hdr{padding:24px 24px 16px;border-bottom:1px solid #182038;flex-shrink:0}
+#algorithm .alg-logo{font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:500;color:var(--teal);letter-spacing:-.02em}
+#algorithm .alg-logo-sub{margin-top:4px;font-size:11px;color:#3d5070;letter-spacing:.08em;text-transform:uppercase}
+#algorithm .alg-steps{flex:1;overflow-y:auto;padding:16px 0}
+#algorithm .alg-steps::-webkit-scrollbar{width:4px}
+#algorithm .alg-steps::-webkit-scrollbar-thumb{background:#1e2d4a;border-radius:2px}
+#algorithm .alg-step{padding:14px 24px;border-left:2px solid transparent;cursor:pointer;transition:all .15s;opacity:.45}
+#algorithm .alg-step.active{border-left-color:var(--teal);opacity:1;background:rgba(0,212,163,.04)}
+#algorithm .alg-step:hover{opacity:.8}
+#algorithm .alg-step-num{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--teal);letter-spacing:.12em;margin-bottom:4px}
+#algorithm .alg-step-title{font-size:13px;font-weight:600;color:var(--t1);margin-bottom:6px}
+#algorithm .alg-step-body{font-size:12px;color:var(--t2);line-height:1.6;display:none}
+#algorithm .alg-step.active .alg-step-body{display:block}
+#algorithm .alg-eq{
+  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--amber);
+  background:rgba(240,160,48,.08);border:1px solid rgba(240,160,48,.15);
+  border-radius:4px;padding:6px 10px;margin-top:8px;line-height:1.7;
+}
+#algorithm .alg-controls{padding:16px 24px;border-top:1px solid #182038;flex-shrink:0}
+#algorithm .alg-ctrl-row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
+#algorithm .alg-ctrl-row:last-child{margin-bottom:0}
+#algorithm .alg-btn{
+  background:#0c1220;border:1px solid #182038;border-radius:6px;
+  padding:7px 14px;color:var(--t2);font-family:'Outfit',sans-serif;
+  font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;white-space:nowrap;
+}
+#algorithm .alg-btn:hover{color:var(--t1);border-color:#1e2d4a}
+#algorithm .alg-btn.primary{color:var(--teal);border-color:rgba(0,212,163,.3);background:rgba(0,212,163,.1)}
+#algorithm .alg-btn.primary:hover{background:rgba(0,212,163,.18)}
+#algorithm .alg-btn:disabled{opacity:.35;cursor:not-allowed}
+#algorithm .alg-step-nav{display:flex;align-items:center;gap:8px;flex:1}
+#algorithm .alg-step-lbl{flex:1;text-align:center;font-family:'JetBrains Mono',monospace;font-size:11px;color:#3d5070}
+#algorithm .alg-info-grid{
+  display:grid;grid-template-columns:1fr 1fr;gap:1px;
+  background:#182038;border:1px solid #182038;border-radius:8px;overflow:hidden;margin-top:12px;
+}
+#algorithm .alg-info-cell{background:#080d18;padding:10px 12px}
+#algorithm .alg-info-key{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#3d5070;margin-bottom:2px}
+#algorithm .alg-info-val{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:500;color:var(--teal)}
+#algorithm .alg-canvas-wrap{flex:1;position:relative;overflow:hidden}
+#algorithm #sphere-canvas{width:100%;height:100%;display:block}
+#algorithm .alg-canvas-lbl{
+  position:absolute;top:20px;right:24px;
+  font-family:'JetBrains Mono',monospace;font-size:11px;color:#3d5070;
+  letter-spacing:.08em;text-transform:uppercase;
+}
+#algorithm .alg-legend{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:column;gap:6px}
+#algorithm .alg-legend-item{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--t2)}
+#algorithm .alg-legend-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 </style>
 </head>
 <body>
@@ -826,7 +323,7 @@ footer{
   <div class="nav-links">
     <a href="#overview">Overview</a>
     <a href="#explorer">Explorer</a>
-    <a href="help.html" target="_blank">Algorithm ↗</a>
+    <a href="#algorithm">Algorithm</a>
   </div>
 </nav>
 
@@ -932,11 +429,120 @@ footer{
   </div>
 </section>
 
+<section id="algorithm">
+<aside class="alg-panel">
+  <div class="alg-panel-hdr">
+    <div class="alg-logo">geodesic</div>
+    <div class="alg-logo-sub">Algorithm Visualization</div>
+  </div>
+  <div class="alg-steps" id="alg-steps">
+    <div class="alg-step active" data-step="0">
+      <div class="alg-step-num">01 / OPH SKETCHING</div>
+      <div class="alg-step-title">Genome Embedding</div>
+      <div class="alg-step-body">
+        Each genome is processed with One-Permutation Hashing (OPH): all k-mers (k=21) are hashed into m=10,000 bins. The minimum hash value per bin forms the genome's signature.
+        <div class="alg-eq">P[sig_A[t] = sig_B[t]] = J(A,B)</div>
+        This is an unbiased estimator of the Jaccard similarity between the k-mer sets of any two genomes.
+      </div>
+    </div>
+    <div class="alg-step" data-step="1">
+      <div class="alg-step-num">02 / COUNTSKETCH</div>
+      <div class="alg-step-title">Sphere Projection</div>
+      <div class="alg-step-body">
+        The OPH signature (10,000 bins) is compressed to a 256-dimensional unit vector via CountSketch: each bin maps to a random dimension with a ±1 sign flip. Normalizing places the genome on the unit sphere S²⁵⁵.
+        <div class="alg-eq">E[u·v] = J(A,B)<br>ANI = (2J / (1+J))^(1/k) × 100</div>
+        The dot product is an unbiased Jaccard estimator — no calibration needed.
+      </div>
+    </div>
+    <div class="alg-step" data-step="2">
+      <div class="alg-step-num">03 / HNSW INDEX</div>
+      <div class="alg-step-title">Fast Nearest Neighbors</div>
+      <div class="alg-step-body">
+        All genome vectors are inserted into a Hierarchical Navigable Small World graph. This enables sub-linear approximate nearest-neighbor queries on the sphere — finding the k closest genomes to any query point in O(log n) time instead of O(n).
+        <div class="alg-eq">isolation(g) = mean distance to<br>k nearest neighbors</div>
+        Isolation scores guide representative selection: genomes in sparse regions are more likely to be selected.
+      </div>
+    </div>
+    <div class="alg-step" data-step="3">
+      <div class="alg-step-num">04 / FARTHEST POINT SAMPLING</div>
+      <div class="alg-step-title">Select Representatives</div>
+      <div class="alg-step-body">
+        FPS greedily places each new representative as far as possible from all already-selected ones. This is a 2-approximation to the k-center problem: the maximum coverage radius is at most twice optimal.
+        <div class="alg-eq">next_rep = argmax_g min_r d(g, r)</div>
+        Click <strong style="color:var(--teal)">Add Representative</strong> to step through the selection, or use Auto-play.
+      </div>
+    </div>
+    <div class="alg-step" data-step="4">
+      <div class="alg-step-num">05 / THOMSON MERGE</div>
+      <div class="alg-step-title">Electrostatic Equilibrium</div>
+      <div class="alg-step-body">
+        After FPS, representatives within <code style="color:var(--amber)">min_rep_distance</code> of each other are coalesced via Union-Find. In Thomson mode, remaining reps drift under mutual Coulomb repulsion to maximize their minimum pairwise separation.
+        <div class="alg-eq">U = Σ_{i≠j} 1/‖r_i − r_j‖</div>
+        The equilibrium configuration maximally tiles the sphere — the continuous Thomson problem.
+      </div>
+    </div>
+  </div>
+  <div class="alg-controls">
+    <div class="alg-ctrl-row">
+      <div class="alg-step-nav">
+        <button class="alg-btn" id="alg-btn-prev">←</button>
+        <span class="alg-step-lbl" id="alg-step-indicator">1 / 5</span>
+        <button class="alg-btn" id="alg-btn-next">→</button>
+      </div>
+    </div>
+    <div class="alg-ctrl-row">
+      <button class="alg-btn primary" id="alg-btn-action">▶ Add Representative</button>
+      <button class="alg-btn" id="alg-btn-reset">Reset</button>
+    </div>
+    <div class="alg-ctrl-row">
+      <button class="alg-btn" id="alg-btn-autoplay" style="flex:1">Auto-play FPS</button>
+      <button class="alg-btn" id="alg-btn-thomson" style="flex:1">Thomson Mode</button>
+    </div>
+    <div class="alg-info-grid">
+      <div class="alg-info-cell">
+        <div class="alg-info-key">Representatives</div>
+        <div class="alg-info-val" id="alg-info-reps">0 / 80</div>
+      </div>
+      <div class="alg-info-cell">
+        <div class="alg-info-key">Coverage radius</div>
+        <div class="alg-info-val" id="alg-info-radius">—</div>
+      </div>
+      <div class="alg-info-cell">
+        <div class="alg-info-key">Thomson energy</div>
+        <div class="alg-info-val" id="alg-info-energy">—</div>
+      </div>
+      <div class="alg-info-cell">
+        <div class="alg-info-key">Angular dist</div>
+        <div class="alg-info-val" id="alg-info-dist">—</div>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<div class="alg-canvas-wrap">
+  <canvas id="sphere-canvas"></canvas>
+  <div class="alg-canvas-lbl" id="alg-canvas-label">UNIT SPHERE S²⁵⁵</div>
+  <div class="alg-legend">
+    <div class="alg-legend-item">
+      <div class="alg-legend-dot" style="background:#2a5090"></div>
+      <span>Genome embedding</span>
+    </div>
+    <div class="alg-legend-item">
+      <div class="alg-legend-dot" style="background:#00d4a3"></div>
+      <span>Representative</span>
+    </div>
+    <div class="alg-legend-item">
+      <div class="alg-legend-dot" style="background:#f0a030"></div>
+      <span>Coverage boundary</span>
+    </div>
+  </div>
+</div>
+</section>
+
 <footer>
   <div class="footer-logo">geodesic</div>
   <div class="footer-desc">spherical genome embeddings for diverse representative selection</div>
   <div class="footer-links">
-    <a href="help.html" target="_blank">Algorithm Visualization</a>
     <a href="https://github.com/genomewalker/geodesic" target="_blank">GitHub ↗</a>
   </div>
 </footer>
@@ -1198,6 +804,318 @@ window.addEventListener('load', () => {
   setTimeout(initCharts, 150);
 });
 </script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+(function(){
+'use strict';
+
+const N_GENOMES = 80;
+const canvas = document.getElementById('sphere-canvas');
+const wrap = canvas.parentElement;
+
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:false});
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(0x000005, 1);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
+camera.position.set(0, 0.5, 2.8);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.4;
+controls.minDistance = 1.5;
+controls.maxDistance = 6;
+
+function resize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+resize();
+new ResizeObserver(resize).observe(wrap);
+
+{
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(1200 * 3);
+  for (let i = 0; i < 1200; i++) {
+    const phi = Math.random() * Math.PI * 2;
+    const theta = Math.acos(Math.random() * 2 - 1);
+    const r = 60 + Math.random() * 80;
+    pos[i*3]   = r * Math.sin(theta) * Math.cos(phi);
+    pos[i*3+1] = r * Math.sin(theta) * Math.sin(phi);
+    pos[i*3+2] = r * Math.cos(theta);
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({color:0x334466, size:0.15, sizeAttenuation:true})));
+}
+
+const sphereObj = new THREE.Mesh(
+  new THREE.SphereGeometry(1, 48, 36),
+  new THREE.MeshBasicMaterial({color:0x152040, wireframe:true, transparent:true, opacity:0.12})
+);
+scene.add(sphereObj);
+
+scene.add(new THREE.Mesh(
+  new THREE.SphereGeometry(0.998, 32, 24),
+  new THREE.MeshBasicMaterial({color:0x030610, transparent:true, opacity:0.6})
+));
+
+function randOnSphere() {
+  let x, y, s;
+  do { x = Math.random()*2-1; y = Math.random()*2-1; s = x*x+y*y; } while (s >= 1);
+  const sq = Math.sqrt(1 - s);
+  return new THREE.Vector3(2*x*sq, 2*y*sq, 1-2*s).normalize();
+}
+
+const CLUSTER_CENTERS = 8;
+const centers = Array.from({length:CLUSTER_CENTERS}, randOnSphere);
+const genomePos = Array.from({length:N_GENOMES}, (_, i) => {
+  if (Math.random() < 0.65) {
+    const c = centers[i % CLUSTER_CENTERS];
+    const v = randOnSphere();
+    return c.clone().lerp(v, 0.18 + Math.random()*0.25).normalize();
+  }
+  return randOnSphere();
+});
+
+const genomeGeo = new THREE.BufferGeometry();
+const gPos = new Float32Array(N_GENOMES * 3);
+genomePos.forEach((p,i) => { gPos[i*3]=p.x; gPos[i*3+1]=p.y; gPos[i*3+2]=p.z; });
+genomeGeo.setAttribute('position', new THREE.BufferAttribute(gPos, 3));
+const genomePoints = new THREE.Points(genomeGeo,
+  new THREE.PointsMaterial({color:0x1a4878, size:0.03, sizeAttenuation:true, transparent:true, opacity:0.9})
+);
+scene.add(genomePoints);
+
+const repGroup = new THREE.Group();
+scene.add(repGroup);
+const flashGroup = new THREE.Group();
+scene.add(flashGroup);
+const lineGroup = new THREE.Group();
+scene.add(lineGroup);
+
+const selected = [];
+const repPositions = [];
+let thomsonActive = false;
+let autoplayTimer = null;
+let currentStep = 0;
+let thomsonEnergy = 0;
+
+function fpsStep() {
+  if (selected.length === 0) {
+    const idx = Math.floor(Math.random() * N_GENOMES);
+    selected.push(idx);
+    repPositions.push(genomePos[idx].clone());
+    animateNewRep(genomePos[idx]);
+    updateScene();
+    return;
+  }
+  let best = -1, bestDist = -1;
+  for (let i = 0; i < N_GENOMES; i++) {
+    if (selected.includes(i)) continue;
+    let minD = Infinity;
+    for (const rp of repPositions) {
+      const d = genomePos[i].distanceTo(rp);
+      if (d < minD) minD = d;
+    }
+    if (minD > bestDist) { bestDist = minD; best = i; }
+  }
+  if (best >= 0) {
+    selected.push(best);
+    repPositions.push(genomePos[best].clone());
+    animateNewRep(genomePos[best]);
+    updateScene();
+  }
+}
+
+function animateNewRep(pos) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.04, 10, 8),
+    new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:1})
+  );
+  mesh.position.copy(pos);
+  flashGroup.add(mesh);
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.04, 0.055, 24),
+    new THREE.MeshBasicMaterial({color:0x00d4a3, transparent:true, opacity:0.9, side:THREE.DoubleSide})
+  );
+  ring.position.copy(pos);
+  ring.lookAt(camera.position);
+  flashGroup.add(ring);
+  const t0 = performance.now();
+  const dur = 900;
+  function tick() {
+    const p = Math.min((performance.now()-t0)/dur, 1);
+    mesh.material.opacity = 1 - p;
+    ring.material.opacity = (1-p)*0.9;
+    ring.scale.setScalar(1 + p * 1.4);
+    if (p < 1) requestAnimationFrame(tick);
+    else { flashGroup.remove(mesh); flashGroup.remove(ring); }
+  }
+  requestAnimationFrame(tick);
+}
+
+function updateScene() {
+  genomePoints.material.color.setHex(0x1a4878);
+  while (repGroup.children.length) repGroup.remove(repGroup.children[0]);
+  repPositions.forEach(rp => {
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(0.038, 12, 10),
+      new THREE.MeshBasicMaterial({color:0x00d4a3})
+    );
+    m.position.copy(rp);
+    repGroup.add(m);
+    const glow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.055, 12, 10),
+      new THREE.MeshBasicMaterial({color:0x00d4a3, transparent:true, opacity:0.12})
+    );
+    glow.position.copy(rp);
+    repGroup.add(glow);
+  });
+  while (lineGroup.children.length) lineGroup.remove(lineGroup.children[0]);
+  if (repPositions.length > 0) {
+    genomePos.forEach((gp, i) => {
+      if (selected.includes(i)) return;
+      let nearest = repPositions[0], nearD = gp.distanceTo(repPositions[0]);
+      repPositions.forEach(rp => { const d = gp.distanceTo(rp); if (d < nearD) { nearD = d; nearest = rp; } });
+      const geo = new THREE.BufferGeometry().setFromPoints([gp.clone().multiplyScalar(1.01), nearest.clone().multiplyScalar(1.01)]);
+      lineGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({color:0x1a3a60, transparent:true, opacity:0.45})));
+    });
+  }
+  updateInfo();
+}
+
+function updateInfo() {
+  document.getElementById('alg-info-reps').textContent = selected.length + ' / ' + N_GENOMES;
+  if (repPositions.length > 0) {
+    let maxMinD = 0;
+    genomePos.forEach((gp, i) => {
+      if (selected.includes(i)) return;
+      let minD = Infinity;
+      repPositions.forEach(rp => { const d = gp.distanceTo(rp); if (d < minD) minD = d; });
+      if (minD > maxMinD) maxMinD = minD;
+    });
+    document.getElementById('alg-info-radius').textContent = maxMinD.toFixed(3) + ' rad';
+    document.getElementById('alg-info-dist').textContent = (maxMinD * 180 / Math.PI).toFixed(1) + '°';
+  } else {
+    document.getElementById('alg-info-radius').textContent = '—';
+    document.getElementById('alg-info-dist').textContent = '—';
+  }
+  if (thomsonActive) {
+    document.getElementById('alg-info-energy').textContent = thomsonEnergy.toFixed(1);
+  }
+}
+
+function thomsonStep() {
+  const n = repPositions.length;
+  if (n < 2) return;
+  const forces = repPositions.map(() => new THREE.Vector3());
+  let energy = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = i+1; j < n; j++) {
+      const diff = repPositions[i].clone().sub(repPositions[j]);
+      const d2 = diff.lengthSq();
+      energy += 1 / Math.sqrt(d2);
+      const f = diff.divideScalar(d2 * Math.sqrt(d2) + 1e-8);
+      forces[i].add(f);
+      forces[j].sub(f);
+    }
+  }
+  thomsonEnergy = energy;
+  repPositions.forEach((rp, i) => {
+    rp.addScaledVector(forces[i], 0.0008);
+    rp.normalize();
+  });
+  let k = 0;
+  repGroup.children.forEach(m => {
+    m.position.copy(repPositions[Math.floor(k/2)]);
+    k++;
+  });
+  updateScene();
+}
+
+function reset() {
+  selected.length = 0;
+  repPositions.length = 0;
+  thomsonActive = false;
+  clearTimeout(autoplayTimer);
+  autoplayTimer = null;
+  document.getElementById('alg-btn-autoplay').textContent = 'Auto-play FPS';
+  document.getElementById('alg-btn-thomson').textContent = 'Thomson Mode';
+  document.getElementById('alg-info-energy').textContent = '—';
+  while (repGroup.children.length) repGroup.remove(repGroup.children[0]);
+  while (lineGroup.children.length) lineGroup.remove(lineGroup.children[0]);
+  while (flashGroup.children.length) flashGroup.remove(flashGroup.children[0]);
+  updateInfo();
+}
+
+function setStep(s) {
+  currentStep = Math.max(0, Math.min(4, s));
+  document.querySelectorAll('#algorithm .alg-step').forEach((el, i) => el.classList.toggle('active', i === currentStep));
+  document.getElementById('alg-step-indicator').textContent = (currentStep+1) + ' / 5';
+  const labels = ['OPH SKETCH','SPHERE PROJECTION','HNSW INDEX','FARTHEST POINT SAMPLING','THOMSON MERGE'];
+  document.getElementById('alg-canvas-label').textContent = labels[currentStep];
+  const inFPS = currentStep === 3;
+  const inThomson = currentStep === 4;
+  document.getElementById('alg-btn-action').style.display = (inFPS || inThomson) ? '' : 'none';
+  document.getElementById('alg-btn-action').textContent = inThomson ? '⚡ Thomson Step' : '▶ Add Representative';
+  document.getElementById('alg-btn-autoplay').style.display = inFPS ? '' : 'none';
+  document.getElementById('alg-btn-thomson').style.display = inThomson ? '' : 'none';
+}
+
+document.getElementById('alg-btn-prev').onclick = () => setStep(currentStep - 1);
+document.getElementById('alg-btn-next').onclick = () => setStep(currentStep + 1);
+document.getElementById('alg-btn-reset').onclick = reset;
+
+document.getElementById('alg-btn-action').onclick = () => {
+  if (currentStep === 3) fpsStep();
+  else if (currentStep === 4) { thomsonActive = false; thomsonStep(); }
+};
+
+document.getElementById('alg-btn-autoplay').onclick = function() {
+  if (autoplayTimer) {
+    clearInterval(autoplayTimer);
+    autoplayTimer = null;
+    this.textContent = 'Auto-play FPS';
+  } else {
+    this.textContent = '⏸ Pause';
+    autoplayTimer = setInterval(() => {
+      if (selected.length >= N_GENOMES) {
+        clearInterval(autoplayTimer); autoplayTimer = null;
+        document.getElementById('alg-btn-autoplay').textContent = 'Auto-play FPS';
+        return;
+      }
+      fpsStep();
+    }, 220);
+  }
+};
+
+document.getElementById('alg-btn-thomson').onclick = function() {
+  thomsonActive = !thomsonActive;
+  this.textContent = thomsonActive ? '⏸ Pause Thomson' : 'Thomson Mode';
+};
+
+document.querySelectorAll('#algorithm .alg-step').forEach((el, i) => {
+  el.addEventListener('click', () => setStep(i));
+});
+
+setStep(0);
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  if (thomsonActive) thomsonStep();
+  renderer.render(scene, camera);
+}
+animate();
+
+})();
+</script>
 </body>
 </html>
 )GEODESIC";
@@ -1372,14 +1290,6 @@ void ReportWriter::write(db::DBManager& db) const {
     rf << html;
     rf.close();
     spdlog::info("Report written to {}", report_path.string());
-
-    // ── Help page ────────────────────────────────────────────────────────────
-    auto help_path = dir_ / "help.html";
-    std::ofstream hf(help_path);
-    if (!hf) { spdlog::warn("Cannot write help page: {}", help_path.string()); return; }
-    hf << HELP_HTML;
-    hf.close();
-    spdlog::info("Help page written to {}", help_path.string());
 }
 
 } // namespace derep
