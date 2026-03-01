@@ -47,270 +47,175 @@ static const char* REPORT_HTML = R"GEODESIC(<!DOCTYPE html>
 <title>geodesic · __PREFIX__ · report</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=DM+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#07090f;--s1:#0c1020;--s2:#111828;--b1:#1c2840;--b2:#243254;
-  --t1:#c4d0e8;--t2:#7a8fb0;--t3:#3d5070;
-  --teal:#00d4a3;--teal-d:rgba(0,212,163,.1);--teal-b:rgba(0,212,163,.18);
-  --blue:#4a9eff;--blue-d:rgba(74,158,255,.1);
-  --amber:#f0a030;--amber-d:rgba(240,160,48,.1);
-  --rose:#e05070;--rose-d:rgba(224,80,112,.1);
-  --purple:#9b7cf4;
+  --bg:#f7f6f2;--bg2:#f0ede7;--bg3:#e8e4dc;
+  --border:#d4d0c8;--border-dark:#b8b3a8;
+  --text:#1c1917;--text2:#6b6560;--text3:#a8a298;
+  --ink:#0f2d52;--teal:#0a6e57;--amber:#854d0e;--rose:#881337;
+  --ink-d:rgba(15,45,82,.08);--teal-d:rgba(10,110,87,.08);
 }
 html{scroll-behavior:smooth}
-body{background:var(--bg);color:var(--t1);font-family:'Outfit',sans-serif;font-size:14px;line-height:1.6;min-height:100vh}
+body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;line-height:1.6;min-height:100vh}
 
 /* ── Nav ── */
 .nav{
-  position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:20px;
-  padding:0 32px;height:50px;
-  background:rgba(7,9,15,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
-  border-bottom:1px solid var(--b1);
+  position:sticky;top:0;z-index:100;
+  display:flex;align-items:center;gap:24px;
+  padding:0 40px;height:48px;
+  background:rgba(247,246,242,.95);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--border);
 }
-.nav-logo{font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:500;color:var(--teal);letter-spacing:-.02em}
-.nav-sep{width:1px;height:14px;background:var(--b2)}
-.nav-run{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--t3)}
+.nav-logo{font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:500;color:var(--ink);letter-spacing:-.01em}
+.nav-meta{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)}
 .nav-links{margin-left:auto;display:flex;gap:2px}
-.nav-links a{
-  padding:6px 12px;border-radius:6px;text-decoration:none;
-  color:var(--t2);font-size:12px;font-weight:500;transition:all .15s;letter-spacing:.02em;
-}
-.nav-links a:hover{color:var(--t1);background:var(--s2)}
-.nav-links a.active{color:var(--teal)}
+.nav-links a{padding:5px 12px;border-radius:5px;text-decoration:none;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;color:var(--text2);transition:all .15s}
+.nav-links a:hover{color:var(--ink);background:var(--bg2)}
+.nav-links a.active{color:var(--ink);background:var(--ink-d)}
 
-/* ── Hero ── */
-.hero{padding:64px 48px 40px;max-width:960px}
-.hero-tag{
-  font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.18em;
-  text-transform:uppercase;color:var(--teal);margin-bottom:14px;
-}
-.hero h1{
-  font-family:'Crimson Pro',serif;font-size:60px;font-weight:600;
-  line-height:1.05;color:var(--t1);letter-spacing:-.02em;
-}
-.hero h1 .hi{color:var(--teal)}
-.hero-sub{
-  margin-top:12px;font-family:'Crimson Pro',serif;font-size:20px;
-  color:var(--t2);font-style:italic;
-}
-.hero-meta{
-  margin-top:20px;display:flex;gap:24px;flex-wrap:wrap;
-}
-.hero-badge{
-  display:flex;align-items:center;gap:6px;
-  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--t3);
-}
-.hero-badge span{color:var(--t2)}
+/* ── Header ── */
+.header{padding:56px 40px 32px;border-bottom:1px solid var(--border)}
+.header-eyebrow{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);margin-bottom:10px}
+.header-title{font-family:'Lora',serif;font-size:52px;font-weight:600;color:var(--ink);line-height:1.1;letter-spacing:-.02em}
+.header-title .accent{color:var(--teal)}
+.header-sub{margin-top:10px;font-family:'Lora',serif;font-size:18px;color:var(--text2);font-style:italic}
+.header-meta{margin-top:20px;display:flex;gap:0;flex-wrap:wrap}
+.meta-badge{padding:4px 14px;border:1px solid var(--border);font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text2);margin-right:-1px}
+.meta-badge:first-child{border-radius:4px 0 0 4px}
+.meta-badge:last-child{border-radius:0 4px 4px 0}
+.meta-badge span{color:var(--text);font-weight:500}
 
-/* ── Metric strip ── */
-.metric-strip{
-  display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
-  gap:1px;background:var(--b1);
-  border-top:1px solid var(--b1);border-bottom:1px solid var(--b1);
-  margin:0 0 40px;
-}
-.metric-cell{
-  background:var(--s1);padding:20px 28px;
-  transition:background .15s;cursor:default;
-}
-.metric-cell:hover{background:var(--s2)}
-.metric-val{
-  font-family:'Crimson Pro',serif;font-size:38px;font-weight:600;
-  line-height:1;color:var(--t1);letter-spacing:-.01em;
-}
-.metric-val.c-teal{color:var(--teal)}
-.metric-val.c-blue{color:var(--blue)}
-.metric-val.c-amber{color:var(--amber)}
-.metric-val.c-rose{color:var(--rose)}
-.metric-val.c-purple{color:var(--purple)}
-.metric-lbl{
-  margin-top:6px;font-size:10px;font-weight:600;
-  letter-spacing:.12em;text-transform:uppercase;color:var(--t3);
-}
-.metric-desc{margin-top:2px;font-size:11px;color:var(--t3)}
+/* ── Stats strip ── */
+.stats-strip{display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--border)}
+.stat-cell{padding:20px 24px;border-right:1px solid var(--border)}
+.stat-cell:last-child{border-right:none}
+.stat-val{font-family:'Lora',serif;font-size:32px;font-weight:600;color:var(--text);line-height:1}
+.stat-val.c-ink{color:var(--ink)}
+.stat-val.c-teal{color:var(--teal)}
+.stat-val.c-amber{color:var(--amber)}
+.stat-val.c-rose{color:var(--rose)}
+.stat-lbl{margin-top:5px;font-family:'DM Sans',sans-serif;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)}
+.stat-desc{margin-top:1px;font-family:'DM Sans',sans-serif;font-size:11px;color:var(--text3)}
 
-/* ── Section wrapper ── */
-.sec{padding:0 32px 48px}
-.sec-title{
-  font-family:'Crimson Pro',serif;font-size:28px;font-weight:600;
-  color:var(--t1);margin-bottom:20px;display:flex;align-items:baseline;gap:12px;
-}
-.sec-title small{font-family:'Outfit',sans-serif;font-size:12px;color:var(--t3);font-weight:400}
+/* ── Section ── */
+.section{padding:40px}
+.section-title{font-family:'Lora',serif;font-size:22px;font-weight:600;color:var(--text);margin-bottom:24px;padding-bottom:12px;border-bottom:1px solid var(--border)}
 
 /* ── Charts ── */
-.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:0}
-.chart-card{
-  background:var(--s1);border:1px solid var(--b1);border-radius:10px;
-  padding:20px 22px;
-}
-.chart-title{
-  font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
-  color:var(--t2);margin-bottom:16px;
-}
+.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);border:1px solid var(--border)}
+.chart-card{background:var(--bg);padding:24px}
+.chart-label{font-family:'DM Sans',sans-serif;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);margin-bottom:16px}
 .chart-card canvas{display:block;width:100%}
 
 /* ── Explorer ── */
-.explorer-head{
-  display:flex;align-items:center;gap:16px;margin-bottom:16px;
-  flex-wrap:wrap;
-}
-.search-box{
-  background:var(--s1);border:1px solid var(--b1);border-radius:8px;
-  display:flex;align-items:center;gap:8px;padding:0 12px;
-  transition:border-color .15s;
-}
-.search-box:focus-within{border-color:var(--teal)}
-.search-icon{color:var(--t3);font-size:14px;flex-shrink:0}
-.search-input{
-  background:none;border:none;outline:none;
-  font-family:'JetBrains Mono',monospace;font-size:12px;
-  color:var(--t1);padding:8px 0;width:300px;
-}
-.search-input::placeholder{color:var(--t3)}
-.search-count{
-  margin-left:auto;font-family:'JetBrains Mono',monospace;
-  font-size:11px;color:var(--t3);white-space:nowrap;
-}
-.sort-btns{display:flex;gap:6px;flex-wrap:wrap}
-.sort-btn{
-  background:var(--s1);border:1px solid var(--b1);border-radius:6px;
-  padding:5px 10px;font-size:11px;color:var(--t2);cursor:pointer;
-  transition:all .15s;font-family:'Outfit',sans-serif;white-space:nowrap;
-}
-.sort-btn:hover{color:var(--t1);border-color:var(--b2)}
-.sort-btn.active{color:var(--teal);border-color:rgba(0,212,163,.35);background:var(--teal-d)}
+#explorer{border-top:1px solid var(--border)}
+.explorer-toolbar{padding:20px 40px;display:flex;align-items:center;gap:16px;border-bottom:1px solid var(--border);background:var(--bg);position:sticky;top:48px;z-index:50}
+.search-wrap{display:flex;align-items:center;gap:8px;border:1px solid var(--border-dark);border-radius:6px;padding:0 12px;background:white;transition:border-color .15s}
+.search-wrap:focus-within{border-color:var(--ink)}
+.search-icon{font-size:13px;color:var(--text3)}
+.search-input{border:none;outline:none;background:none;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text);padding:8px 0;width:280px}
+.search-input::placeholder{color:var(--text3)}
+.count-label{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);margin-left:auto}
 
 /* ── Table ── */
-.tbl-wrap{
-  border:1px solid var(--b1);border-radius:10px;overflow:hidden;
-  margin-bottom:16px;
-}
-table{width:100%;border-collapse:collapse}
-thead th{
-  background:var(--s1);padding:10px 14px;text-align:left;
-  font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
-  color:var(--t2);border-bottom:1px solid var(--b1);
-  white-space:nowrap;user-select:none;
-}
+.tbl-container{padding:0 40px 32px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+thead th{padding:9px 12px;text-align:left;font-family:'DM Sans',sans-serif;font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);border-bottom:2px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none}
+thead th:hover{color:var(--text)}
 thead th.r{text-align:right}
-td{
-  padding:8px 14px;border-bottom:1px solid rgba(28,40,64,.6);
-  font-size:12.5px;vertical-align:middle;
-}
+td{padding:7px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
 tr:last-child td{border-bottom:none}
-tr:hover td{background:rgba(17,24,40,.5)}
-td.tx{
-  font-family:'JetBrains Mono',monospace;font-size:11.5px;
-  max-width:380px;
-}
-td.nm{
-  font-family:'JetBrains Mono',monospace;font-size:12px;
-  text-align:right;color:var(--t2);white-space:nowrap;
-}
-td.nm.hi{color:var(--t1)}
-.chip{
-  display:inline-block;padding:1px 5px;border-radius:3px;
-  font-size:9.5px;font-weight:600;letter-spacing:.04em;
-  margin-right:3px;vertical-align:middle;
-}
-.chip-p{background:#0e1a30;color:#4a7aaa}
-.chip-g{background:#081e18;color:#1e8060}
-.chip-s{color:var(--t1)}
-.mini-bar{
-  display:inline-block;height:3px;border-radius:2px;
-  opacity:.7;vertical-align:middle;margin-right:6px;
-}
-.method-tag{
-  display:inline-block;padding:1px 6px;border-radius:3px;
-  font-size:9px;font-weight:600;letter-spacing:.05em;font-family:'JetBrains Mono',monospace;
-}
-.mt-singleton{background:#1a1a1a;color:#555}
-.mt-tiny{background:var(--teal-d);color:var(--teal)}
-.mt-geodesic{background:var(--blue-d);color:var(--blue)}
+tr:hover td{background:var(--bg2)}
+tr:nth-child(even) td{background:rgba(0,0,0,.015)}
+td.tx{font-family:'IBM Plex Mono',monospace;font-size:11px;max-width:400px}
+td.nm{font-family:'IBM Plex Mono',monospace;font-size:12px;text-align:right;color:var(--text2)}
+td.nm.hi{color:var(--text);font-weight:500}
+.chip{display:inline-block;padding:1px 5px;border-radius:3px;font-size:9.5px;font-weight:600;letter-spacing:.04em;margin-right:3px;vertical-align:middle}
+.chip-p{background:var(--ink-d);color:var(--ink)}
+.chip-g{background:var(--teal-d);color:var(--teal)}
+.chip-s{color:var(--text)}
+.mini-bar{display:inline-block;height:3px;border-radius:2px;opacity:.7;vertical-align:middle;margin-right:6px}
+.method-tag{display:inline-block;padding:1px 6px;border-radius:2px;font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:500;letter-spacing:.04em}
+.mt-singleton{background:var(--bg3);color:var(--text3)}
+.mt-tiny{background:var(--teal-d);color:var(--teal);border:1px solid rgba(10,110,87,.2)}
+.mt-geodesic{background:var(--ink-d);color:var(--ink);border:1px solid rgba(15,45,82,.2)}
 
 /* ── Pager ── */
-.pager{display:flex;align-items:center;justify-content:center;gap:4px;padding:4px 0 20px}
-.pg-btn{
-  background:var(--s1);border:1px solid var(--b1);border-radius:6px;
-  padding:5px 10px;color:var(--t2);cursor:pointer;font-size:12px;
-  transition:all .15s;font-family:'Outfit',sans-serif;
-}
-.pg-btn:hover{color:var(--t1);border-color:var(--b2)}
-.pg-btn.on{color:var(--teal);border-color:rgba(0,212,163,.35);background:var(--teal-d)}
+.pager{padding:12px 40px 24px;display:flex;align-items:center;justify-content:center;gap:3px}
+.pg-btn{background:none;border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-family:'DM Sans',sans-serif;font-size:12px;color:var(--text2);cursor:pointer;transition:all .12s}
+.pg-btn:hover{border-color:var(--ink);color:var(--ink)}
+.pg-btn.on{background:var(--ink);border-color:var(--ink);color:white}
 .pg-btn:disabled{opacity:.3;cursor:not-allowed}
-.pg-sep{color:var(--t3);padding:0 4px;font-size:12px}
+.pg-sep{color:var(--text3);padding:0 4px;font-size:12px}
 
 /* ── Footer ── */
-footer{
-  padding:36px 32px;border-top:1px solid var(--b1);
-  display:flex;align-items:center;gap:16px;flex-wrap:wrap;
-}
-.footer-logo{font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--teal)}
-.footer-desc{font-size:12px;color:var(--t3)}
-.footer-links{margin-left:auto;display:flex;gap:16px}
-.footer-links a{font-size:12px;color:var(--t3);text-decoration:none;transition:color .15s}
-.footer-links a:hover{color:var(--t1)}
+footer{padding:28px 40px;border-top:1px solid var(--border);display:flex;align-items:center;gap:16px;background:var(--bg2)}
+.footer-logo{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink);font-weight:500}
+.footer-desc{font-family:'DM Sans',sans-serif;font-size:12px;color:var(--text3)}
+.footer-links{margin-left:auto;display:flex;gap:20px}
+.footer-links a{font-family:'DM Sans',sans-serif;font-size:12px;color:var(--text3);text-decoration:none}
+.footer-links a:hover{color:var(--ink)}
 
 /* ── Utility ── */
-.muted{color:var(--t3)!important}
-.loading-msg{padding:40px;text-align:center;color:var(--t3);font-size:13px}
+.muted{color:var(--text3)!important}
+.loading-msg{padding:40px;text-align:center;color:var(--text3);font-size:13px}
 
 /* ── Algorithm section ── */
-#algorithm{height:100vh;display:flex;overflow:hidden;background:#000005}
+#algorithm{height:100vh;display:flex;overflow:hidden;border-top:3px solid var(--ink);background:#02070f}
 #algorithm .alg-panel{
-  width:340px;min-width:340px;background:#080d18;border-right:1px solid #182038;
+  width:340px;min-width:340px;background:#070d1a;border-right:1px solid #1a2540;
   display:flex;flex-direction:column;overflow:hidden;z-index:10;
 }
-#algorithm .alg-panel-hdr{padding:24px 24px 16px;border-bottom:1px solid #182038;flex-shrink:0}
-#algorithm .alg-logo{font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:500;color:var(--teal);letter-spacing:-.02em}
+#algorithm .alg-panel-hdr{padding:24px 24px 16px;border-bottom:1px solid #1a2540;flex-shrink:0}
+#algorithm .alg-logo{font-family:'IBM Plex Mono',monospace;font-size:16px;font-weight:500;color:#00d4a3;letter-spacing:-.02em}
 #algorithm .alg-logo-sub{margin-top:4px;font-size:11px;color:#3d5070;letter-spacing:.08em;text-transform:uppercase}
 #algorithm .alg-steps{flex:1;overflow-y:auto;padding:16px 0}
 #algorithm .alg-steps::-webkit-scrollbar{width:4px}
 #algorithm .alg-steps::-webkit-scrollbar-thumb{background:#1e2d4a;border-radius:2px}
 #algorithm .alg-step{padding:14px 24px;border-left:2px solid transparent;cursor:pointer;transition:all .15s;opacity:.45}
-#algorithm .alg-step.active{border-left-color:var(--teal);opacity:1;background:rgba(0,212,163,.04)}
+#algorithm .alg-step.active{border-left-color:#00d4a3;opacity:1;background:rgba(0,212,163,.04)}
 #algorithm .alg-step:hover{opacity:.8}
-#algorithm .alg-step-num{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--teal);letter-spacing:.12em;margin-bottom:4px}
-#algorithm .alg-step-title{font-size:13px;font-weight:600;color:var(--t1);margin-bottom:6px}
-#algorithm .alg-step-body{font-size:12px;color:var(--t2);line-height:1.6;display:none}
+#algorithm .alg-step-num{font-family:'IBM Plex Mono',monospace;font-size:10px;color:#00d4a3;letter-spacing:.12em;margin-bottom:4px}
+#algorithm .alg-step-title{font-size:13px;font-weight:600;color:#c4d0e8;margin-bottom:6px}
+#algorithm .alg-step-body{font-size:12px;color:#7a8fb0;line-height:1.6;display:none}
 #algorithm .alg-step.active .alg-step-body{display:block}
 #algorithm .alg-eq{
-  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--amber);
+  font-family:'IBM Plex Mono',monospace;font-size:11px;color:#f0a030;
   background:rgba(240,160,48,.08);border:1px solid rgba(240,160,48,.15);
   border-radius:4px;padding:6px 10px;margin-top:8px;line-height:1.7;
 }
-#algorithm .alg-controls{padding:16px 24px;border-top:1px solid #182038;flex-shrink:0}
+#algorithm .alg-controls{padding:16px 24px;border-top:1px solid #1a2540;flex-shrink:0}
 #algorithm .alg-ctrl-row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
 #algorithm .alg-ctrl-row:last-child{margin-bottom:0}
 #algorithm .alg-btn{
-  background:#0c1220;border:1px solid #182038;border-radius:6px;
-  padding:7px 14px;color:var(--t2);font-family:'Outfit',sans-serif;
+  background:#0c1220;border:1px solid #1a2540;border-radius:6px;
+  padding:7px 14px;color:#7a8fb0;font-family:'DM Sans',sans-serif;
   font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;white-space:nowrap;
 }
-#algorithm .alg-btn:hover{color:var(--t1);border-color:#1e2d4a}
-#algorithm .alg-btn.primary{color:var(--teal);border-color:rgba(0,212,163,.3);background:rgba(0,212,163,.1)}
+#algorithm .alg-btn:hover{color:#c4d0e8;border-color:#1e2d4a}
+#algorithm .alg-btn.primary{color:#00d4a3;border-color:rgba(0,212,163,.3);background:rgba(0,212,163,.1)}
 #algorithm .alg-btn.primary:hover{background:rgba(0,212,163,.18)}
 #algorithm .alg-btn:disabled{opacity:.35;cursor:not-allowed}
 #algorithm .alg-step-nav{display:flex;align-items:center;gap:8px;flex:1}
-#algorithm .alg-step-lbl{flex:1;text-align:center;font-family:'JetBrains Mono',monospace;font-size:11px;color:#3d5070}
+#algorithm .alg-step-lbl{flex:1;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:11px;color:#3d5070}
 #algorithm .alg-info-grid{
   display:grid;grid-template-columns:1fr 1fr;gap:1px;
-  background:#182038;border:1px solid #182038;border-radius:8px;overflow:hidden;margin-top:12px;
+  background:#1a2540;border:1px solid #1a2540;border-radius:8px;overflow:hidden;margin-top:12px;
 }
-#algorithm .alg-info-cell{background:#080d18;padding:10px 12px}
+#algorithm .alg-info-cell{background:#070d1a;padding:10px 12px}
 #algorithm .alg-info-key{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#3d5070;margin-bottom:2px}
-#algorithm .alg-info-val{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:500;color:var(--teal)}
+#algorithm .alg-info-val{font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:500;color:#00d4a3}
 #algorithm .alg-canvas-wrap{flex:1;position:relative;overflow:hidden}
 #algorithm #sphere-canvas{width:100%;height:100%;display:block}
 #algorithm .alg-canvas-lbl{
   position:absolute;top:20px;right:24px;
-  font-family:'JetBrains Mono',monospace;font-size:11px;color:#3d5070;
+  font-family:'IBM Plex Mono',monospace;font-size:11px;color:#3d5070;
   letter-spacing:.08em;text-transform:uppercase;
 }
 #algorithm .alg-legend{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:column;gap:6px}
-#algorithm .alg-legend-item{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--t2)}
+#algorithm .alg-legend-item{display:flex;align-items:center;gap:8px;font-size:11px;color:#7a8fb0}
 #algorithm .alg-legend-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 </style>
 </head>
@@ -318,8 +223,7 @@ footer{
 
 <nav class="nav">
   <span class="nav-logo">geodesic</span>
-  <span class="nav-sep"></span>
-  <span class="nav-run">__PREFIX__ · __TIMESTAMP__</span>
+  <span class="nav-meta">__PREFIX__ · __TIMESTAMP__</span>
   <div class="nav-links">
     <a href="#overview">Overview</a>
     <a href="#explorer">Explorer</a>
@@ -328,65 +232,66 @@ footer{
 </nav>
 
 <section id="overview">
-  <div class="hero">
-    <div class="hero-tag">geodesic run report</div>
-    <h1><span class="hi counter" data-n="__N_GENOMES__">0</span><br>genomes processed</h1>
-    <p class="hero-sub">
+  <div class="header">
+    <div class="header-eyebrow">geodesic run report</div>
+    <div class="header-title"><span class="accent counter" data-n="__N_GENOMES__">0</span><br>genomes processed</div>
+    <div class="header-sub">
       <span class="counter" data-n="__N_TAXA__">0</span> species ·
       <span class="counter" data-n="__N_REPS__">0</span> representatives selected
-    </p>
-    <div class="hero-meta">
-      <div class="hero-badge">prefix <span>__PREFIX__</span></div>
-      <div class="hero-badge">run <span>__TIMESTAMP__</span></div>
-      <div class="hero-badge">runtime <span>__RUNTIME__</span></div>
-      <div class="hero-badge">singletons <span>__N_SINGLETONS__</span></div>
+    </div>
+    <div class="header-meta">
+      <div class="meta-badge">prefix <span>__PREFIX__</span></div>
+      <div class="meta-badge">run <span>__TIMESTAMP__</span></div>
+      <div class="meta-badge">runtime <span>__RUNTIME__</span></div>
+      <div class="meta-badge">singletons <span>__N_SINGLETONS__</span></div>
     </div>
   </div>
 
-  <div class="metric-strip">
-    <div class="metric-cell">
-      <div class="metric-val c-teal"><span class="counter" data-n="__N_REPS__" data-fmt="int">0</span></div>
-      <div class="metric-lbl">Representatives</div>
-      <div class="metric-desc">selected across all species</div>
+  <div class="stats-strip">
+    <div class="stat-cell">
+      <div class="stat-val c-ink"><span class="counter" data-n="__N_REPS__" data-fmt="int">0</span></div>
+      <div class="stat-lbl">Representatives</div>
+      <div class="stat-desc">selected across all species</div>
     </div>
-    <div class="metric-cell">
-      <div class="metric-val c-blue"><span id="m-cov">—</span></div>
-      <div class="metric-lbl">Mean Coverage ANI</div>
-      <div class="metric-desc">genome to nearest representative</div>
+    <div class="stat-cell">
+      <div class="stat-val c-teal"><span id="m-cov">—</span></div>
+      <div class="stat-lbl">Mean Coverage ANI</div>
+      <div class="stat-desc">genome to nearest representative</div>
     </div>
-    <div class="metric-cell">
-      <div class="metric-val c-amber"><span id="m-div">—</span></div>
-      <div class="metric-lbl">Mean Diversity ANI</div>
-      <div class="metric-desc">pairwise among representatives</div>
+    <div class="stat-cell">
+      <div class="stat-val c-amber"><span id="m-div">—</span></div>
+      <div class="stat-lbl">Mean Diversity ANI</div>
+      <div class="stat-desc">pairwise among representatives</div>
     </div>
-    <div class="metric-cell">
-      <div class="metric-val c-purple"><span id="m-red">—</span></div>
-      <div class="metric-lbl">Mean Reduction</div>
-      <div class="metric-desc">fraction of genomes retained</div>
+    <div class="stat-cell">
+      <div class="stat-val"><span id="m-red">—</span></div>
+      <div class="stat-lbl">Mean Reduction</div>
+      <div class="stat-desc">fraction of genomes retained</div>
     </div>
-    <div class="metric-cell">
-      <div class="metric-val c-rose"><span class="counter" data-n="__N_FAILED__">0</span></div>
-      <div class="metric-lbl">Failed Taxa</div>
-      <div class="metric-desc">processing errors</div>
+    <div class="stat-cell">
+      <div class="stat-val c-rose"><span class="counter" data-n="__N_FAILED__">0</span></div>
+      <div class="stat-lbl">Failed Taxa</div>
+      <div class="stat-desc">processing errors</div>
     </div>
   </div>
 
-  <div class="sec">
+  <div class="section">
+    <div class="section-title">Distribution Overview</div>
     <div class="chart-grid">
       <div class="chart-card">
-        <div class="chart-title">Taxon Size Distribution</div>
+        <div class="chart-label">Taxon Size Distribution</div>
         <canvas id="chart-size" height="160"></canvas>
       </div>
       <div class="chart-card">
-        <div class="chart-title">Coverage ANI Distribution</div>
+        <div class="chart-label">Coverage ANI Distribution</div>
         <canvas id="chart-cov" height="160"></canvas>
       </div>
       <div class="chart-card">
-        <div class="chart-title">Reduction Ratio Distribution</div>
+        <div class="chart-label">Reduction Ratio Distribution</div>
         <canvas id="chart-rr" height="160"></canvas>
       </div>
       <div class="chart-card">
-        <div class="chart-title">Processing Method</div>
+        <div class="chart-label">Processing Method</div>
         <canvas id="chart-method" height="160"></canvas>
       </div>
     </div>
@@ -394,39 +299,33 @@ footer{
 </section>
 
 <section id="explorer">
-  <div class="sec">
-    <div class="sec-title">
-      Taxa Explorer
-      <small>click column headers to sort · search filters all fields</small>
+  <div class="explorer-toolbar">
+    <div class="search-wrap">
+      <span class="search-icon">⌕</span>
+      <input class="search-input" id="q" type="text" placeholder="search taxonomy…" autocomplete="off" spellcheck="false">
     </div>
-    <div class="explorer-head">
-      <div class="search-box">
-        <span class="search-icon">⌕</span>
-        <input class="search-input" id="q" type="text" placeholder="search taxonomy…" autocomplete="off" spellcheck="false">
-      </div>
-      <span class="search-count" id="cnt">— taxa</span>
-    </div>
-    <div class="tbl-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th data-col="tx">Species</th>
-            <th data-col="ng" class="r">Genomes</th>
-            <th data-col="nr" class="r">Reps</th>
-            <th data-col="rr" class="r">Reduction</th>
-            <th data-col="cm" class="r">Coverage ANI</th>
-            <th data-col="dm" class="r">Diversity ANI</th>
-            <th data-col="mt">Method</th>
-            <th data-col="rt" class="r">Runtime</th>
-          </tr>
-        </thead>
-        <tbody id="tbody">
-          <tr><td colspan="8" class="loading-msg">Loading…</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="pager" id="pager"></div>
+    <span class="count-label" id="cnt">— taxa</span>
   </div>
+  <div class="tbl-container">
+    <table>
+      <thead>
+        <tr>
+          <th data-col="tx">Species</th>
+          <th data-col="ng" class="r">Genomes</th>
+          <th data-col="nr" class="r">Reps</th>
+          <th data-col="rr" class="r">Reduction</th>
+          <th data-col="cm" class="r">Coverage ANI</th>
+          <th data-col="dm" class="r">Diversity ANI</th>
+          <th data-col="mt">Method</th>
+          <th data-col="rt" class="r">Runtime</th>
+        </tr>
+      </thead>
+      <tbody id="tbody">
+        <tr><td colspan="8" class="loading-msg">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="pager" id="pager"></div>
 </section>
 
 <section id="algorithm">
@@ -592,12 +491,12 @@ function drawBars(canvas, labels, vals, color, opts) {
   const bw = cw / vals.length;
 
   // Grid
-  ctx.strokeStyle = '#1c2840'; ctx.lineWidth = 1;
+  ctx.strokeStyle = '#d4d0c8'; ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = pad.t + ch*(1 - i/4);
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l+cw, y); ctx.stroke();
     const v = Math.round(maxV*i/4);
-    ctx.fillStyle = '#3d5070'; ctx.font = '10px JetBrains Mono,monospace';
+    ctx.fillStyle = '#a8a298'; ctx.font = '10px IBM Plex Mono,monospace';
     ctx.textAlign = 'right';
     ctx.fillText(v >= 10000 ? (v/1000).toFixed(0)+'k' : v >= 1000 ? (v/1000).toFixed(1)+'k' : v, pad.l-5, y+3.5);
   }
@@ -615,7 +514,7 @@ function drawBars(canvas, labels, vals, color, opts) {
     }
     const step = Math.ceil(vals.length / 10);
     if (i % step === 0 || i === vals.length-1) {
-      ctx.fillStyle = '#3d5070'; ctx.font = '9px JetBrains Mono,monospace';
+      ctx.fillStyle = '#a8a298'; ctx.font = '9px IBM Plex Mono,monospace';
       ctx.textAlign = 'center';
       const lbl = labels[i];
       ctx.fillText(lbl.length > 6 ? lbl.slice(0,5)+'…' : lbl, x+bw/2, pad.t+ch+18);
@@ -650,25 +549,25 @@ function initCharts() {
     sizeBuckets[k]++;
   });
   const sKeys = Object.keys(sizeBuckets);
-  drawBars(document.getElementById('chart-size'), sKeys, sKeys.map(k=>sizeBuckets[k]), '#4a9eff');
+  drawBars(document.getElementById('chart-size'), sKeys, sKeys.map(k=>sizeBuckets[k]), '#0f2d52');
 
   // 2. Coverage ANI (only non-singleton taxa)
   const covVals = t.cm.filter((_,i) => t.mt[i]!=='singleton' && t.cm[i]>0);
   const covEdges = [90,91,92,93,94,95,96,97,98,99,99.5,100,100.01];
   const cov = histCounts(covVals, covEdges);
-  drawBars(document.getElementById('chart-cov'), cov.labels, cov.counts, '#00d4a3');
+  drawBars(document.getElementById('chart-cov'), cov.labels, cov.counts, '#0a6e57');
 
   // 3. Reduction ratio (non-singleton taxa with >1 genome)
   const rrVals = t.rr.filter((_,i) => t.ng[i]>1);
   const rrEdges = Array.from({length:21},(_,i)=>i*0.05);
   const rr = histCounts(rrVals, rrEdges);
-  drawBars(document.getElementById('chart-rr'), rr.labels, rr.counts, '#f0a030');
+  drawBars(document.getElementById('chart-rr'), rr.labels, rr.counts, '#854d0e');
 
   // 4. Method breakdown
   const mtCounts = {};
   t.mt.forEach(m => { mtCounts[m]=(mtCounts[m]||0)+1; });
   const mtKeys = Object.keys(mtCounts).sort((a,b)=>mtCounts[b]-mtCounts[a]);
-  drawBars(document.getElementById('chart-method'), mtKeys, mtKeys.map(k=>mtCounts[k]), '#9b7cf4');
+  drawBars(document.getElementById('chart-method'), mtKeys, mtKeys.map(k=>mtCounts[k]), '#881337');
 }
 
 // ── Table ──────────────────────────────────────────────────────────────────
