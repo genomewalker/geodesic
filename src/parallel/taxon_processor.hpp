@@ -18,4 +18,12 @@ TaxonResult process_taxon(
     GenomeCache& cache,
     db::EmbeddingStore* emb_store = nullptr);
 
+// Process a batch of tiny taxa (n <= TINY_BATCH_N) in a single thread slot.
+// Returns results in the same order as input.
+std::vector<TaxonResult> process_tiny_batch(
+    const std::vector<const Taxon*>& taxa,
+    const Config& cfg,
+    db::DBManager& db,
+    GenomeCache& cache);
+
 } // namespace derep

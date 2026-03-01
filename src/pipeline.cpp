@@ -1,4 +1,5 @@
 #include "pipeline.hpp"
+#include "parallel/taxon_processor.hpp"
 #include "core/genome_cache.hpp"
 #include "core/logging.hpp"
 #include "core/types.hpp"
@@ -30,11 +31,6 @@
 #include <vector>
 
 namespace derep {
-
-TaxonResult process_taxon(const Taxon& taxon, const Config& cfg,
-                          int thread_budget,
-                          db::DBManager& db, GenomeCache& cache,
-                          db::EmbeddingStore* emb_store = nullptr);
 
 namespace {
 
@@ -336,12 +332,36 @@ int run_pipeline(Config& cfg) {
     std::mutex done_mutex;
     std::condition_variable done_cv;
 
+    // Partition taxa into large (size > 10) and tiny batches (size <= 10, grouped by 100).
+    static constexpr size_t TINY_SCHED_THRESHOLD = 10;
+    static constexpr size_t TINY_BATCH_SIZE = 100;
+
+    std::vector<size_t> large_indices;
+    std::vector<std::vector<size_t>> tiny_batches;
+    {
+        std::vector<size_t> tiny_indices;
+        for (size_t i = 0; i < taxa.size(); ++i) {
+            if (taxa[i].size() > TINY_SCHED_THRESHOLD)
+                large_indices.push_back(i);
+            else
+                tiny_indices.push_back(i);
+        }
+        for (size_t off = 0; off < tiny_indices.size(); off += TINY_BATCH_SIZE) {
+            size_t end = std::min(off + TINY_BATCH_SIZE, tiny_indices.size());
+            tiny_batches.emplace_back(tiny_indices.begin() + off,
+                                      tiny_indices.begin() + end);
+        }
+        spdlog::info("Scheduler: {} large taxa (individual), {} tiny taxa in {} batches",
+                     large_indices.size(), tiny_indices.size(), tiny_batches.size());
+    }
+
     // Scheduler thread: submits tasks as budget permits, runs concurrently
     // with the main collection loop below.
     std::thread scheduler([&] {
-        for (std::size_t i = 0; i < taxa.size(); ++i) {
+        // Submit large taxa individually (existing logic)
+        for (size_t i : large_indices) {
             int desired  = taxon_threads[i];
-            int acquired = budget_acquire(desired);  // blocks until ≥1 slot free
+            int acquired = budget_acquire(desired);
             pool.detach_task(
                 [&taxa, i, &cfg, &db, &cache, emb_store_ptr,
                  &done_queue, &done_mutex, &done_cv,
@@ -353,6 +373,27 @@ int run_pipeline(Config& cfg) {
                     }
                     done_cv.notify_one();
                     budget_release(acquired);
+                });
+        }
+        // Submit tiny batches: 1 budget slot per batch of up to 100 taxa
+        for (const auto& batch_indices : tiny_batches) {
+            budget_acquire(1);
+            std::vector<const Taxon*> batch_taxa;
+            batch_taxa.reserve(batch_indices.size());
+            for (size_t i : batch_indices)
+                batch_taxa.push_back(&taxa[i]);
+            pool.detach_task(
+                [batch_taxa, &cfg, &db, &cache,
+                 &done_queue, &done_mutex, &done_cv,
+                 &budget_release] {
+                    auto results = process_tiny_batch(batch_taxa, cfg, db, cache);
+                    {
+                        std::lock_guard lock(done_mutex);
+                        for (auto& r : results)
+                            done_queue.push(std::move(r));
+                    }
+                    done_cv.notify_all();
+                    budget_release(1);
                 });
         }
     });

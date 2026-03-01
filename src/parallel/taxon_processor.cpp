@@ -10,6 +10,7 @@
 #include <chrono>
 #include <deque>
 #include <memory>
+#include <numeric>
 #include <spdlog/spdlog.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -195,74 +196,138 @@ TaxonResult process_taxon(
             path_to_idx[file_paths[i].string()] = i;
 
         // -----------------------------------------------------------
-        // 4a. Fast path: n=2 — direct OPH Jaccard, skip full pipeline
+        // 4a. Fast path: n <= TINY_N_THRESHOLD — direct OPH Jaccard, skip full pipeline
         // -----------------------------------------------------------
-        if (taxon.size() == 2) {
+        static constexpr size_t TINY_N_THRESHOLD = 20;
+        if (taxon.size() <= TINY_N_THRESHOLD) {
             auto t0 = std::chrono::steady_clock::now();
+            const size_t n = taxon.size();
 
             MinHasher hasher({
-                .kmer_size  = cfg.kmer_size,
+                .kmer_size   = cfg.kmer_size,
                 .sketch_size = cfg.sketch_size,
-                .seed = 42
+                .seed        = 42
             });
-            auto oph_a = hasher.sketch_oph(file_paths[0], cfg.sketch_size);
-            auto oph_b = hasher.sketch_oph(file_paths[1], cfg.sketch_size);
 
-            double J   = GeodesicDerep::refine_jaccard(oph_a.signature, oph_b.signature);
-            double ani = GeodesicDerep::jaccard_to_ani(J, cfg.kmer_size);
+            // Sketch all n genomes with OPH
+            std::vector<std::vector<uint64_t>> sigs(n);
+            for (size_t i = 0; i < n; ++i)
+                sigs[i] = hasher.sketch_oph(file_paths[i], cfg.sketch_size).signature;
 
-            std::vector<std::string> representatives;
-            if (ani >= cfg.ani_threshold) {
-                int best = (taxon.genomes[0].quality_score() >= taxon.genomes[1].quality_score()) ? 0 : 1;
-                representatives = {all_accessions[best]};
-            } else {
-                representatives = all_accessions;
+            // Compute all pairwise Jaccard
+            std::vector<std::vector<double>> jac(n, std::vector<double>(n, 1.0));
+            for (size_t i = 0; i < n; ++i)
+                for (size_t j = i + 1; j < n; ++j)
+                    jac[i][j] = jac[j][i] = GeodesicDerep::refine_jaccard(sigs[i], sigs[j]);
+
+            // Convert ANI threshold to Jaccard threshold
+            double ani_threshold_frac = cfg.ani_threshold / 100.0;
+            double q = std::pow(ani_threshold_frac, cfg.kmer_size);
+            double jaccard_threshold = q / (2.0 - q);
+
+            // Sort genome indices by quality descending
+            std::vector<size_t> order(n);
+            std::iota(order.begin(), order.end(), 0);
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                return taxon.genomes[a].quality_score() > taxon.genomes[b].quality_score();
+            });
+
+            // Greedy quality-sorted cover
+            std::vector<size_t> rep_indices;
+            std::vector<bool> is_rep(n, false);
+            for (size_t idx : order) {
+                bool covered = false;
+                for (size_t ri : rep_indices) {
+                    if (jac[idx][ri] >= jaccard_threshold) { covered = true; break; }
+                }
+                if (!covered) {
+                    rep_indices.push_back(idx);
+                    is_rep[idx] = true;
+                }
             }
+
+            // Build representatives list
+            std::vector<std::string> representatives;
+            representatives.reserve(rep_indices.size());
+            for (size_t ri : rep_indices)
+                representatives.push_back(all_accessions[ri]);
+
+            // Build ani_to_rep_map for non-reps: best Jaccard to any rep
+            std::unordered_map<std::string, double> ani_to_rep_map;
+            for (size_t i = 0; i < n; ++i) {
+                if (is_rep[i]) continue;
+                double best_j = 0.0;
+                for (size_t ri : rep_indices)
+                    best_j = std::max(best_j, jac[i][ri]);
+                ani_to_rep_map[all_accessions[i]] =
+                    GeodesicDerep::jaccard_to_ani(best_j, cfg.kmer_size);
+            }
+
+            // Coverage stats: per-genome best ANI to nearest rep
+            std::vector<double> genome_to_rep_ani(n);
+            for (size_t i = 0; i < n; ++i) {
+                if (is_rep[i]) {
+                    genome_to_rep_ani[i] = 100.0;
+                } else {
+                    double best_j = 0.0;
+                    for (size_t ri : rep_indices)
+                        best_j = std::max(best_j, jac[i][ri]);
+                    genome_to_rep_ani[i] = GeodesicDerep::jaccard_to_ani(best_j, cfg.kmer_size);
+                }
+            }
+            double cov_sum = 0.0, cov_min = 100.0, cov_max = 0.0;
+            for (double v : genome_to_rep_ani) {
+                cov_sum += v;
+                cov_min = std::min(cov_min, v);
+                cov_max = std::max(cov_max, v);
+            }
+            double cov_mean = cov_sum / static_cast<double>(n);
+
+            // Diversity stats: pairwise ANI among reps only
+            double div_sum = 0.0, div_min = 100.0, div_max = 0.0;
+            int div_pairs = 0;
+            for (size_t a = 0; a < rep_indices.size(); ++a) {
+                for (size_t b = a + 1; b < rep_indices.size(); ++b) {
+                    double ani = GeodesicDerep::jaccard_to_ani(
+                        jac[rep_indices[a]][rep_indices[b]], cfg.kmer_size);
+                    div_sum += ani;
+                    div_min = std::min(div_min, ani);
+                    div_max = std::max(div_max, ani);
+                    ++div_pairs;
+                }
+            }
+            double div_mean = (div_pairs > 0) ? div_sum / div_pairs : 100.0;
+            if (div_pairs == 0) { div_min = 100.0; div_max = 100.0; }
 
             double runtime = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - t0).count();
 
-            std::unordered_map<std::string, double> ani_to_rep_map;
-            if (representatives.size() == 1) {
-                int non_rep = (representatives[0] == all_accessions[0]) ? 1 : 0;
-                ani_to_rep_map[all_accessions[non_rep]] = ani;
-            }
+            if (!is_quiet())
+                spdlog::info("[{}] {} → {} reps ({:.2f}s) [tiny]", taxon.taxonomy,
+                             n, representatives.size(), runtime);
 
             TaxonResult r;
-            r.taxonomy        = taxon.taxonomy;
-            r.status          = TaxonStatus::SUCCESS;
-            r.n_genomes       = 2;
+            r.taxonomy          = taxon.taxonomy;
+            r.status            = TaxonStatus::SUCCESS;
+            r.n_genomes         = static_cast<int>(n);
             r.n_representatives = static_cast<int>(representatives.size());
-            r.method          = "geodesic";
+            r.method            = "geodesic-tiny";
 
             TaxonDiversityStats div_stats;
-            div_stats.taxonomy        = taxon.taxonomy;
-            div_stats.method          = "geodesic";
-            div_stats.n_genomes       = 2;
+            div_stats.taxonomy          = taxon.taxonomy;
+            div_stats.method            = "geodesic-tiny";
+            div_stats.n_genomes         = static_cast<int>(n);
             div_stats.n_representatives = static_cast<int>(representatives.size());
-            div_stats.reduction_ratio = 1.0 - static_cast<double>(representatives.size()) / 2.0;
-            div_stats.runtime_seconds = runtime;
-            if (representatives.size() == 2) {
-                div_stats.diversity_mean_ani = ani;
-                div_stats.diversity_min_ani  = ani;
-                div_stats.diversity_max_ani  = ani;
-                div_stats.diversity_n_pairs  = 1;
-                div_stats.coverage_mean_ani  = 100.0;
-                div_stats.coverage_min_ani   = 100.0;
-                div_stats.coverage_max_ani   = 100.0;
-            } else {
-                div_stats.coverage_mean_ani  = ani;
-                div_stats.coverage_min_ani   = ani;
-                div_stats.coverage_max_ani   = ani;
-                div_stats.diversity_mean_ani = 100.0;
-                div_stats.diversity_min_ani  = 100.0;
-                div_stats.diversity_max_ani  = 100.0;
-                div_stats.diversity_n_pairs  = 0;
-            }
-
-            if (!is_quiet())
-                spdlog::info("[{}] 2 → {} reps ({:.2f}s)", taxon.taxonomy,
-                             representatives.size(), runtime);
+            div_stats.reduction_ratio   = 1.0 - static_cast<double>(representatives.size()) /
+                                                static_cast<double>(n);
+            div_stats.runtime_seconds   = runtime;
+            div_stats.coverage_mean_ani = cov_mean;
+            div_stats.coverage_min_ani  = cov_min;
+            div_stats.coverage_max_ani  = cov_max;
+            div_stats.diversity_mean_ani = div_mean;
+            div_stats.diversity_min_ani  = div_min;
+            div_stats.diversity_max_ani  = div_max;
+            div_stats.diversity_n_pairs  = div_pairs;
 
             auto& conn = db.thread_connection();
             conn.Query("BEGIN TRANSACTION");
@@ -540,6 +605,18 @@ TaxonResult process_taxon(
         r.error_message = e.what();
         return r;
     }
+}
+
+std::vector<TaxonResult> process_tiny_batch(
+    const std::vector<const Taxon*>& taxa,
+    const Config& cfg,
+    db::DBManager& db,
+    GenomeCache& cache) {
+    std::vector<TaxonResult> results;
+    results.reserve(taxa.size());
+    for (const Taxon* t : taxa)
+        results.push_back(process_taxon(*t, cfg, 1, db, cache, nullptr));
+    return results;
 }
 
 } // namespace derep
