@@ -364,13 +364,20 @@ TaxonResult process_taxon(
             embedding_dim = params.embedding_dim;
             sketch_size = params.sketch_size;
             min_rep_distance = params.min_rep_distance;
-            ani_threshold_frac = params.ani_threshold;
+            // Derive diversity_threshold from USER's ani_threshold (not the auto-calibrated
+            // midpoint which biases toward common strains and under-selects reps).
+            // Use calibrated kmer_size so the distance is in the right embedding space.
+            {
+                const double user_ani = cfg.ani_threshold / 100.0;
+                double q = std::exp(-static_cast<double>(kmer_size) * (1.0 - user_ani));
+                double j = q / (2.0 - q);
+                diversity_threshold = static_cast<float>(std::acos(j) / M_PI);
+            }
             // Scale diversity_threshold by genome size heterogeneity.
             // High size CV indicates an open pangenome: genomes at similar ANI
             // may differ substantially in gene content. Lower threshold → more reps.
             // Example: E. coli size_cv ≈ 0.10 → scale 1/(1+1.0) = 0.5x
             //          uniform species size_cv ≈ 0.01 → scale 1/(1.05) ≈ 0.95x
-            diversity_threshold = params.diversity_threshold;
             calib_size_cv = params.size_cv;
             if (calib_size_cv > 0.0f) {
                 float scale = 1.0f / (1.0f + 10.0f * calib_size_cv);

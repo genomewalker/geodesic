@@ -517,7 +517,7 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     params.ani_max    = dist_to_ani(p5);
     params.ani_min    = dist_to_ani(p95);
     params.ani_spread = params.ani_max - params.ani_min;
-    // FPS threshold: midpoint of detected ANI range (as fraction), clamped to [0.90, 0.9999]
+    // Auto-calibrated ANI range (used for logging / min_rep_distance only)
     params.ani_threshold = std::max(0.90, std::min(0.9999,
         (params.ani_min + 0.5 * params.ani_spread) / 100.0));
 
@@ -525,9 +525,7 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     params.embedding_dim    = embedding_dim;
     params.sketch_size      = sketch_size;
 
-    // diversity_threshold: FPS stops when every genome is within ani_threshold of some rep.
-    // Derived from Mash chain: J = q/(2-q), q = exp(-k*(1-ANI)), dist = acos(J)/π
-    // This is calibration-free and matches the semantic intent of ani_threshold.
+    // diversity_threshold: stored in params but overridden at call site with user's ani_threshold.
     {
         double q = std::exp(-static_cast<double>(kmer) * (1.0 - params.ani_threshold));
         double j = q / (2.0 - q);
