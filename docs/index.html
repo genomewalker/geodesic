@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>geodesic ·  · algorithm</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&family=Outfit:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#fff;--bg2:#f8f8f6;--bg3:#f0f0ed;
+  --border:#e5e5e2;--border-dark:#ccccc8;
+  --text:#0a0a08;--text2:#52524e;--text3:#a8a8a2;
+  --ink:#0a0a08;--green:#15803d;--amber:#b45309;--rose:#9f1239;
+  --green-d:rgba(21,128,61,.07);--ink-d:rgba(10,10,8,.05);
+}
+html,body{height:100%;overflow:hidden;display:flex;flex-direction:column}
+body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font-size:14px;line-height:1.6}
+.nav{display:flex;align-items:center;gap:16px;padding:0 24px;height:44px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0}
+.nav-logo{font-family:'Geist Mono',monospace;font-size:13px;font-weight:500;color:var(--text)}
+.nav-back{font-size:12px;color:var(--text3);text-decoration:none;transition:color .15s}
+.nav-back:hover{color:var(--text)}
+.nav-prefix{font-family:'Geist Mono',monospace;font-size:11px;color:var(--text3);margin-left:auto}
+#algorithm{flex:1;display:flex;overflow:hidden;background:var(--bg)}
+#algorithm .alg-panel{
+  width:320px;min-width:320px;background:var(--bg2);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;overflow:hidden;z-index:10;
+}
+#algorithm .alg-panel-hdr{padding:24px 24px 16px;border-bottom:1px solid var(--border);flex-shrink:0}
+#algorithm .alg-logo{font-family:'Geist Mono',monospace;font-size:15px;font-weight:500;color:var(--green);letter-spacing:-.02em}
+#algorithm .alg-logo-sub{margin-top:4px;font-size:11px;color:var(--text3);letter-spacing:.08em;text-transform:uppercase}
+#algorithm .alg-steps{flex:1;overflow-y:auto;padding:16px 0}
+#algorithm .alg-steps::-webkit-scrollbar{width:4px}
+#algorithm .alg-steps::-webkit-scrollbar-thumb{background:var(--border-dark);border-radius:2px}
+#algorithm .alg-step{padding:14px 24px;border-left:2px solid transparent;cursor:pointer;transition:all .15s;opacity:.5}
+#algorithm .alg-step.active{border-left-color:var(--green);opacity:1;background:var(--green-d)}
+#algorithm .alg-step:hover{opacity:.8}
+#algorithm .alg-step-num{font-family:'Geist Mono',monospace;font-size:10px;color:var(--green);letter-spacing:.12em;margin-bottom:4px}
+#algorithm .alg-step-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:6px}
+#algorithm .alg-step-body{font-size:12px;color:var(--text2);line-height:1.6;display:none}
+#algorithm .alg-step.active .alg-step-body{display:block}
+#algorithm .alg-controls{padding:16px 24px;border-top:1px solid var(--border);flex-shrink:0}
+#algorithm .alg-ctrl-row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
+#algorithm .alg-ctrl-row:last-child{margin-bottom:0}
+#algorithm .alg-btn{
+  background:var(--bg);border:1px solid var(--border);border-radius:5px;
+  padding:7px 14px;color:var(--text2);font-family:'Outfit',sans-serif;
+  font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;white-space:nowrap;
+}
+#algorithm .alg-btn:hover{color:var(--text);border-color:var(--border-dark)}
+#algorithm .alg-btn.primary{color:var(--green);border-color:rgba(21,128,61,.3);background:var(--green-d)}
+#algorithm .alg-btn.primary:hover{background:rgba(21,128,61,.12)}
+#algorithm .alg-btn:disabled{opacity:.35;cursor:not-allowed}
+#algorithm .alg-step-nav{display:flex;align-items:center;gap:8px;flex:1}
+#algorithm .alg-step-lbl{flex:1;text-align:center;font-family:'Geist Mono',monospace;font-size:11px;color:var(--text3)}
+#algorithm .alg-info-grid{
+  display:grid;grid-template-columns:1fr 1fr;gap:1px;
+  background:var(--border);border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-top:8px;
+}
+#algorithm .alg-info-cell{background:var(--bg);padding:10px 12px}
+#algorithm .alg-info-key{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--text3);margin-bottom:2px}
+#algorithm .alg-info-val{font-family:'Geist Mono',monospace;font-size:13px;font-weight:500;color:var(--text)}
+#algorithm .alg-canvas-wrap{flex:1;position:relative;overflow:hidden;background:var(--bg3)}
+#algorithm #sphere-canvas{width:100%;height:100%;display:block}
+#algorithm .alg-canvas-lbl{
+  position:absolute;top:20px;right:24px;
+  font-family:'Geist Mono',monospace;font-size:11px;color:var(--text3);
+  letter-spacing:.08em;text-transform:uppercase;
+}
+#algorithm .alg-legend{position:absolute;bottom:24px;right:24px;display:flex;flex-direction:column;gap:6px}
+#algorithm .alg-legend-item{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text2)}
+#algorithm .alg-legend-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+
+#algorithm .alg-insight{
+  background:rgba(21,128,61,.05);border-left:2px solid var(--green);
+  padding:6px 10px;margin:8px 0;font-size:11.5px;color:var(--text2);
+  line-height:1.6;font-style:italic;
+}
+#algorithm .alg-btn.alg-btn-tour{color:var(--amber);border-color:rgba(180,83,9,.3)}
+#algorithm .alg-btn.alg-btn-tour:hover{background:rgba(180,83,9,.07)}
+#algorithm .alg-progress{
+  position:relative;height:26px;background:var(--bg3);
+  border:1px solid var(--border);border-radius:5px;
+  overflow:hidden;margin-bottom:8px;display:flex;align-items:center;padding:0 10px;
+}
+#algorithm .alg-progress-bar{
+  position:absolute;left:0;top:0;bottom:0;
+  background:var(--green-d);border-right:2px solid var(--green);
+  transition:width .4s ease;
+}
+#algorithm .alg-progress-label{
+  position:relative;font-family:'Geist Mono',monospace;
+  font-size:11px;color:var(--green);font-weight:500;
+}
+</style>
+</head>
+<body>
+<nav class="nav">
+  <span class="nav-logo">geodesic</span>
+  <a href="https://github.com/genomewalker/geodesic/wiki" class="nav-back">← Wiki</a>
+  <span class="nav-prefix">How it works · </span>
+</nav>
+<div id="algorithm">
+<aside class="alg-panel">
+  <div class="alg-panel-hdr">
+    <div class="alg-logo">geodesic</div>
+    <div class="alg-logo-sub">How it works</div>
+  </div>
+  <div class="alg-steps" id="alg-steps">
+    <div class="alg-step active" data-step="0">
+      <div class="alg-step-num">01 · Fingerprinting</div>
+      <div class="alg-step-title">Each genome gets a unique fingerprint</div>
+      <div class="alg-step-body">
+        Every genome's DNA is broken into overlapping 21-letter words (k-mers). These are hashed into 10,000 numerical bins — a compact signature that captures the genome's genetic content without storing the full sequence.
+        <div class="alg-insight">If two genomes share 95% of their DNA, roughly 95% of their fingerprint matches. No alignment needed.</div>
+        Each dot on the sphere is a genome. Similar genomes cluster together naturally.
+      </div>
+    </div>
+    <div class="alg-step" data-step="1">
+      <div class="alg-step-num">02 · Projection</div>
+      <div class="alg-step-title">Placing every genome on a sphere</div>
+      <div class="alg-step-body">
+        The 10,000-number fingerprint is compressed into a 256-dimensional unit vector — a single point on the surface of a hypersphere. The angle between two points directly encodes their genetic distance.
+        <div class="alg-insight">Genetically identical genomes sit at the same point. Completely unrelated ones sit at opposite poles.</div>
+        Genetic similarity now equals a dot product — instant to compute at any scale.
+      </div>
+    </div>
+    <div class="alg-step" data-step="2">
+      <div class="alg-step-num">03 · Indexing</div>
+      <div class="alg-step-title">Finding every genome's closest relatives</div>
+      <div class="alg-step-body">
+        A spatial index (HNSW graph) finds each genome's 10 nearest neighbors in milliseconds, even across millions of genomes. The average distance to those neighbors gives an <em>isolation score</em>.
+        <div class="alg-insight">A high isolation score means a genome has no close relatives — it represents a rare lineage that must be preserved as a reference.</div>
+        The most isolated genome always becomes the very first representative.
+      </div>
+    </div>
+    <div class="alg-step" data-step="3">
+      <div class="alg-step-num">04 · Selection</div>
+      <div class="alg-step-title">Choosing representatives to cover all diversity</div>
+      <div class="alg-step-body">
+        Greedy farthest-point sampling: at each step, pick the genome most poorly covered by existing representatives. Stop when every genome is within the ANI similarity threshold of some representative.
+        <div class="alg-insight">This guarantees complete diversity coverage with the fewest possible representatives — a minimax coverage problem on the sphere.</div>
+        Colored circles show each representative's coverage zone. Watch the sphere fill in.
+      </div>
+    </div>
+    <div class="alg-step" data-step="4">
+      <div class="alg-step-num">05 · Refinement</div>
+      <div class="alg-step-title">Spreading representatives evenly</div>
+      <div class="alg-step-body">
+        Representatives too close together (above the similarity threshold) are merged. The survivors then repel each other like electric charges on a sphere — spreading until coverage is as uniform as possible.
+        <div class="alg-insight">The <a href="https://en.wikipedia.org/wiki/Thomson_problem" style="color:inherit;text-decoration:underline">Thomson problem</a> (N charges on a sphere arranged to minimise total electrostatic energy) offers a useful intuition: each new representative should be placed as far as possible from all existing ones. Note: Thomson minimises ∑1/r<sub>ij</sub>, not the k-center objective — the analogy is geometric intuition, not a mathematical equivalence.</div>
+        Press Run Thomson to simulate convergence to the equilibrium.
+      </div>
+    </div>
+  </div>
+  <div class="alg-controls">
+    <div class="alg-ctrl-row">
+      <div class="alg-step-nav">
+        <button class="alg-btn" id="alg-btn-prev">←</button>
+        <span class="alg-step-lbl" id="alg-step-indicator">1 / 5</span>
+        <button class="alg-btn" id="alg-btn-next">→</button>
+      </div>
+      <button class="alg-btn alg-btn-tour" id="alg-btn-tour">▶ Tour</button>
+    </div>
+    <div class="alg-ctrl-row">
+      <button class="alg-btn primary" id="alg-btn-action" style="flex:1;display:none">▶ Run</button>
+      <button class="alg-btn" id="alg-btn-autoplay" style="display:none">Step</button>
+      <button class="alg-btn" id="alg-btn-thomson" style="flex:1;display:none">▶ Run Thomson</button>
+      <button class="alg-btn" id="alg-btn-reset">↺</button>
+    </div>
+    <div class="alg-progress" id="alg-progress" style="display:none">
+      <div class="alg-progress-bar" id="alg-progress-bar" style="width:0%"></div>
+      <span class="alg-progress-label" id="alg-progress-label">0 / 80 covered</span>
+    </div>
+    <div class="alg-info-grid">
+      <div class="alg-info-cell">
+        <div class="alg-info-key">Representatives</div>
+        <div class="alg-info-val" id="alg-info-reps">0</div>
+      </div>
+      <div class="alg-info-cell">
+        <div class="alg-info-key">Genomes covered</div>
+        <div class="alg-info-val" id="alg-info-cov">—</div>
+      </div>
+      <div class="alg-info-cell">
+        <div class="alg-info-key">Largest gap</div>
+        <div class="alg-info-val" id="alg-info-radius">—</div>
+      </div>
+      <div class="alg-info-cell">
+        <div class="alg-info-key">Status</div>
+        <div class="alg-info-val" id="alg-info-energy">—</div>
+      </div>
+    </div>
+  </div>
+</aside>
+<div class="alg-canvas-wrap">
+  <canvas id="sphere-canvas"></canvas>
+  <div class="alg-canvas-lbl" id="alg-canvas-label">UNIT SPHERE S²⁵⁵</div>
+  <div class="alg-legend">
+    <div class="alg-legend-item">
+      <div class="alg-legend-dot" style="background:#7090b8"></div>
+      <span>Genome</span>
+    </div>
+    <div class="alg-legend-item">
+      <div class="alg-legend-dot" style="background:#15803d"></div>
+      <span>Representative</span>
+    </div>
+    <div class="alg-legend-item">
+      <div class="alg-legend-dot" style="background:rgba(21,128,61,.4)"></div>
+      <span>Coverage zone</span>
+    </div>
+  </div>
+</div>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const N_GENOMES = 80;
+const COVERAGE_THRESHOLD = 0.38;
+const canvas = document.getElementById('sphere-canvas');
+const wrap = canvas.parentElement;
+
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:false});
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(0xf0f0ed, 1);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
+camera.position.set(0, 0.5, 2.8);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.4;
+controls.minDistance = 1.5;
+controls.maxDistance = 6;
+
+function resize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+resize();
+new ResizeObserver(resize).observe(wrap);
+
+scene.add(new THREE.Mesh(
+  new THREE.SphereGeometry(0.998, 32, 24),
+  new THREE.MeshBasicMaterial({color:0xe8e8e4, transparent:true, opacity:0.5})
+));
+scene.add(new THREE.Mesh(
+  new THREE.SphereGeometry(1, 48, 36),
+  new THREE.MeshBasicMaterial({color:0xc8c8c4, wireframe:true, transparent:true, opacity:0.25})
+));
+
+function randOnSphere() {
+  let x, y, s;
+  do { x = Math.random()*2-1; y = Math.random()*2-1; s = x*x+y*y; } while (s >= 1);
+  const sq = Math.sqrt(1-s);
+  return new THREE.Vector3(2*x*sq, 2*y*sq, 1-2*s).normalize();
+}
+
+const centers = Array.from({length:8}, randOnSphere);
+const genomePos = Array.from({length:N_GENOMES}, (_, i) => {
+  if (Math.random() < 0.65) {
+    const c = centers[i % 8];
+    return c.clone().lerp(randOnSphere(), 0.18 + Math.random()*0.25).normalize();
+  }
+  return randOnSphere();
+});
+
+const PALETTE = [
+  [0.15,0.50,0.24],[0.15,0.38,0.75],[0.75,0.15,0.15],
+  [0.70,0.45,0.05],[0.50,0.10,0.75],[0.05,0.55,0.65],
+  [0.75,0.30,0.05],[0.60,0.15,0.45],[0.25,0.60,0.10],
+  [0.10,0.30,0.60],[0.65,0.10,0.20],[0.40,0.50,0.05],
+];
+const DEFAULT_COL = [0.44,0.56,0.72];
+
+function paletteHex(ri) {
+  const c = PALETTE[ri % PALETTE.length];
+  return (Math.round(c[0]*255)<<16)|(Math.round(c[1]*255)<<8)|Math.round(c[2]*255);
+}
+
+const genomeGeo = new THREE.BufferGeometry();
+const gPos = new Float32Array(N_GENOMES*3);
+const gCol = new Float32Array(N_GENOMES*3);
+genomePos.forEach((p,i) => {
+  gPos[i*3]=p.x; gPos[i*3+1]=p.y; gPos[i*3+2]=p.z;
+  gCol[i*3]=DEFAULT_COL[0]; gCol[i*3+1]=DEFAULT_COL[1]; gCol[i*3+2]=DEFAULT_COL[2];
+});
+genomeGeo.setAttribute('position', new THREE.BufferAttribute(gPos,3));
+genomeGeo.setAttribute('color',    new THREE.BufferAttribute(gCol,3));
+const genomePoints = new THREE.Points(genomeGeo,
+  new THREE.PointsMaterial({size:0.035, sizeAttenuation:true, transparent:true, opacity:0.9, vertexColors:true})
+);
+scene.add(genomePoints);
+
+const repGroup   = new THREE.Group(); scene.add(repGroup);
+const flashGroup = new THREE.Group(); scene.add(flashGroup);
+const lineGroup  = new THREE.Group(); scene.add(lineGroup);
+const circleGroup= new THREE.Group(); scene.add(circleGroup);
+
+const selected = [];
+const repPositions = [];
+let thomsonActive = false;
+let autoplayTimer = null;
+let currentStep = 0;
+let thomsonEnergy = 0;
+let coverageDone = false;
+let tourActive = false;
+const tourTimeouts = [];
+let tourPoll = null;
+
+function countCovered() {
+  if (repPositions.length === 0) return 0;
+  let n = 0;
+  genomePos.forEach((gp, i) => {
+    let minD = Infinity;
+    repPositions.forEach(rp => { const d = gp.distanceTo(rp); if (d < minD) minD = d; });
+    if (minD < COVERAGE_THRESHOLD) n++;
+  });
+  return n;
+}
+
+function updateVoronoiColors() {
+  const col = genomeGeo.attributes.color.array;
+  if (repPositions.length === 0) {
+    for (let i = 0; i < N_GENOMES; i++) {
+      col[i*3]=DEFAULT_COL[0]; col[i*3+1]=DEFAULT_COL[1]; col[i*3+2]=DEFAULT_COL[2];
+    }
+  } else {
+    for (let i = 0; i < N_GENOMES; i++) {
+      let ni=0, nd=genomePos[i].distanceTo(repPositions[0]);
+      for (let r=1; r<repPositions.length; r++) {
+        const d=genomePos[i].distanceTo(repPositions[r]);
+        if (d<nd){nd=d;ni=r;}
+      }
+      const c=PALETTE[ni%PALETTE.length];
+      if (selected.includes(i)){
+        col[i*3]=c[0]; col[i*3+1]=c[1]; col[i*3+2]=c[2];
+      } else if (nd < COVERAGE_THRESHOLD) {
+        col[i*3]=c[0]*0.45+0.55; col[i*3+1]=c[1]*0.45+0.55; col[i*3+2]=c[2]*0.45+0.55;
+      } else {
+        // Uncovered: muted blue-grey
+        col[i*3]=0.44; col[i*3+1]=0.50; col[i*3+2]=0.58;
+      }
+    }
+  }
+  genomeGeo.attributes.color.needsUpdate = true;
+}
+
+function fpsStep() {
+  if (selected.length === 0) {
+    const idx = Math.floor(Math.random()*N_GENOMES);
+    selected.push(idx);
+    repPositions.push(genomePos[idx].clone());
+    animateNewRep(genomePos[idx]);
+    updateScene();
+    return;
+  }
+  let best=-1, bestDist=-1;
+  for (let i=0; i<N_GENOMES; i++) {
+    if (selected.includes(i)) continue;
+    let minD=Infinity;
+    for (const rp of repPositions) { const d=genomePos[i].distanceTo(rp); if (d<minD) minD=d; }
+    if (minD>bestDist){bestDist=minD; best=i;}
+  }
+  if (best >= 0) {
+    selected.push(best);
+    repPositions.push(genomePos[best].clone());
+    animateNewRep(genomePos[best]);
+    updateScene();
+    if (bestDist < COVERAGE_THRESHOLD && selected.length > 1) {
+      coverageDone = true;
+      if (autoplayTimer){clearInterval(autoplayTimer);autoplayTimer=null;}
+      document.getElementById('alg-btn-action').textContent = '✓ Done';
+      document.getElementById('alg-btn-action').disabled = true;
+      document.getElementById('alg-info-energy').textContent = 'complete';
+    }
+  }
+}
+
+function animateNewRep(pos) {
+  const hex = paletteHex(repPositions.length-1);
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.05,10,8),
+    new THREE.MeshBasicMaterial({color:hex, transparent:true, opacity:1})
+  );
+  mesh.position.copy(pos);
+  flashGroup.add(mesh);
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.05,0.068,24),
+    new THREE.MeshBasicMaterial({color:hex, transparent:true, opacity:0.8, side:THREE.DoubleSide})
+  );
+  ring.position.copy(pos);
+  ring.lookAt(camera.position);
+  flashGroup.add(ring);
+  const t0=performance.now(), dur=900;
+  (function tick(){
+    const p=Math.min((performance.now()-t0)/dur,1);
+    mesh.material.opacity=1-p;
+    ring.material.opacity=(1-p)*0.9;
+    ring.scale.setScalar(1+p*1.4);
+    if(p<1) requestAnimationFrame(tick);
+    else{flashGroup.remove(mesh);flashGroup.remove(ring);}
+  })();
+}
+
+function updateCoverageCircles() {
+  while (circleGroup.children.length) circleGroup.remove(circleGroup.children[0]);
+  if (repPositions.length===0) return;
+  repPositions.forEach((rp,ri) => {
+    let maxD=0;
+    genomePos.forEach((gp,i) => {
+      if (selected.includes(i)) return;
+      let ni=0,nd=gp.distanceTo(repPositions[0]);
+      for(let r=1;r<repPositions.length;r++){const d=gp.distanceTo(repPositions[r]);if(d<nd){nd=d;ni=r;}}
+      if(ni===ri && nd>maxD) maxD=nd;
+    });
+    if(maxD<0.02) return;
+    const angR=2*Math.asin(Math.min(maxD/2,0.9999));
+    const up=Math.abs(rp.y)<0.9?new THREE.Vector3(0,1,0):new THREE.Vector3(1,0,0);
+    const u=new THREE.Vector3().crossVectors(rp,up).normalize();
+    const v=new THREE.Vector3().crossVectors(rp,u).normalize();
+    const pts=[];
+    for(let t=0;t<=72;t++){
+      const a=(t/72)*Math.PI*2;
+      pts.push(rp.clone().multiplyScalar(Math.cos(angR))
+        .addScaledVector(u,Math.sin(angR)*Math.cos(a))
+        .addScaledVector(v,Math.sin(angR)*Math.sin(a)));
+    }
+    circleGroup.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({color:paletteHex(ri),transparent:true,opacity:0.55})
+    ));
+  });
+}
+
+function updateScene() {
+  updateVoronoiColors();
+  while(repGroup.children.length) repGroup.remove(repGroup.children[0]);
+  repPositions.forEach((rp,ri) => {
+    const hex=paletteHex(ri);
+    const m=new THREE.Mesh(new THREE.SphereGeometry(0.040,14,10),new THREE.MeshBasicMaterial({color:hex}));
+    m.position.copy(rp); repGroup.add(m);
+    const h=new THREE.Mesh(new THREE.SphereGeometry(0.062,12,10),new THREE.MeshBasicMaterial({color:hex,transparent:true,opacity:0.12}));
+    h.position.copy(rp); repGroup.add(h);
+  });
+  while(lineGroup.children.length) lineGroup.remove(lineGroup.children[0]);
+  if(repPositions.length>0){
+    genomePos.forEach((gp,i) => {
+      if(selected.includes(i)) return;
+      let ni=0,nearD=gp.distanceTo(repPositions[0]);
+      repPositions.forEach((rp,ri)=>{const d=gp.distanceTo(rp);if(d<nearD){nearD=d;ni=ri;}});
+      const geo=new THREE.BufferGeometry().setFromPoints([gp.clone().multiplyScalar(1.01),repPositions[ni].clone().multiplyScalar(1.01)]);
+      lineGroup.add(new THREE.Line(geo,new THREE.LineBasicMaterial({color:paletteHex(ni),transparent:true,opacity:0.22})));
+    });
+  }
+  updateCoverageCircles();
+  updateInfo();
+}
+
+function updateInfo() {
+  document.getElementById('alg-info-reps').textContent = selected.length;
+  const cov = countCovered();
+  const pct = Math.round(cov/N_GENOMES*100);
+  document.getElementById('alg-info-cov').textContent = cov + ' / ' + N_GENOMES;
+  // Progress bar
+  const pb = document.getElementById('alg-progress-bar');
+  const pl = document.getElementById('alg-progress-label');
+  if (pb) { pb.style.width = pct + '%'; pl.textContent = cov + ' / ' + N_GENOMES + ' covered (' + pct + '%)'; }
+  if (repPositions.length>0) {
+    let maxMinD=0;
+    genomePos.forEach((gp,i) => {
+      if(selected.includes(i)) return;
+      let minD=Infinity;
+      repPositions.forEach(rp=>{const d=gp.distanceTo(rp);if(d<minD)minD=d;});
+      if(minD>maxMinD) maxMinD=minD;
+    });
+    document.getElementById('alg-info-radius').textContent = (maxMinD*180/Math.PI).toFixed(1)+'°';
+  } else {
+    document.getElementById('alg-info-radius').textContent = '—';
+  }
+  if (thomsonActive) {
+    document.getElementById('alg-info-energy').textContent = 'U='+thomsonEnergy.toFixed(0);
+  }
+}
+
+function thomsonStep() {
+  const n=repPositions.length;
+  if(n<2) return;
+  const forces=repPositions.map(()=>new THREE.Vector3());
+  let energy=0;
+  for(let i=0;i<n;i++){
+    for(let j=i+1;j<n;j++){
+      const diff=repPositions[i].clone().sub(repPositions[j]);
+      const d2=diff.lengthSq();
+      energy+=1/Math.sqrt(d2);
+      const f=diff.divideScalar(d2*Math.sqrt(d2)+1e-8);
+      forces[i].add(f); forces[j].sub(f);
+    }
+  }
+  thomsonEnergy=energy;
+  repPositions.forEach((rp,i)=>{rp.addScaledVector(forces[i],0.0008);rp.normalize();});
+  let k=0;
+  repGroup.children.forEach(m=>{m.position.copy(repPositions[Math.floor(k/2)]);k++;});
+  updateInfo();
+}
+
+function reset() {
+  selected.length=0; repPositions.length=0;
+  thomsonActive=false; coverageDone=false;
+  if(autoplayTimer){clearInterval(autoplayTimer);autoplayTimer=null;}
+  document.getElementById('alg-btn-action').textContent='▶ Run';
+  document.getElementById('alg-btn-action').disabled=false;
+  document.getElementById('alg-btn-thomson').textContent='▶ Run Thomson';
+  document.getElementById('alg-info-energy').textContent='—';
+  while(repGroup.children.length)   repGroup.remove(repGroup.children[0]);
+  while(lineGroup.children.length)  lineGroup.remove(lineGroup.children[0]);
+  while(flashGroup.children.length) flashGroup.remove(flashGroup.children[0]);
+  while(circleGroup.children.length)circleGroup.remove(circleGroup.children[0]);
+  updateVoronoiColors(); updateInfo();
+}
+
+function setStep(s) {
+  currentStep=Math.max(0,Math.min(4,s));
+  document.querySelectorAll('#algorithm .alg-step').forEach((el,i)=>el.classList.toggle('active',i===currentStep));
+  document.getElementById('alg-step-indicator').textContent=(currentStep+1)+' / 5';
+  const labels=['FINGERPRINTING','SPHERE PROJECTION','NEIGHBOR INDEX','REPRESENTATIVE SELECTION','THOMSON REFINEMENT'];
+  document.getElementById('alg-canvas-label').textContent=labels[currentStep];
+  const inFPS=currentStep===3, inThomson=currentStep===4;
+  const btnAction=document.getElementById('alg-btn-action');
+  btnAction.style.display=inFPS?'':'none';
+  if(inFPS&&!coverageDone){btnAction.textContent='▶ Run';btnAction.disabled=false;}
+  document.getElementById('alg-btn-autoplay').style.display=inFPS?'':'none';
+  document.getElementById('alg-btn-thomson').style.display=inThomson?'':'none';
+  const prog=document.getElementById('alg-progress');
+  if(prog) prog.style.display=inFPS?'':'none';
+}
+
+// ── Guided tour ───────────────────────────────────────────────────────────────
+function tourAt(ms, fn) {
+  const id=setTimeout(()=>{if(tourActive)fn();},ms);
+  tourTimeouts.push(id);
+}
+function clearTourTimeouts() {
+  tourTimeouts.forEach(clearTimeout);
+  tourTimeouts.length=0;
+  if(tourPoll){clearInterval(tourPoll);tourPoll=null;}
+}
+function startTour() {
+  if(tourActive){stopTour();return;}
+  reset();
+  tourActive=true;
+  document.getElementById('alg-btn-tour').textContent='⏹ Stop';
+  setStep(0);
+  tourAt(3200,()=>setStep(1));
+  tourAt(6400,()=>setStep(2));
+  tourAt(9600,()=>{
+    setStep(3);
+    if(!coverageDone){
+      document.getElementById('alg-btn-action').textContent='⏸ Pause';
+      autoplayTimer=setInterval(()=>{
+        if(coverageDone||selected.length>=N_GENOMES){clearInterval(autoplayTimer);autoplayTimer=null;}
+        else fpsStep();
+      },150);
+    }
+  });
+  tourPoll=setInterval(()=>{
+    if(!tourActive){clearInterval(tourPoll);tourPoll=null;return;}
+    if(coverageDone){
+      clearInterval(tourPoll);tourPoll=null;
+      tourAt(1200,()=>{
+        setStep(4);
+        thomsonActive=true;
+        document.getElementById('alg-btn-thomson').textContent='⏸ Pause Thomson';
+        document.getElementById('alg-info-energy').textContent='running…';
+        tourAt(8000,()=>{
+          thomsonActive=false;updateScene();
+          document.getElementById('alg-btn-thomson').textContent='▶ Run Thomson';
+          stopTour();
+        });
+      });
+    }
+  },300);
+}
+function stopTour() {
+  tourActive=false;clearTourTimeouts();
+  if(autoplayTimer){clearInterval(autoplayTimer);autoplayTimer=null;}
+  document.getElementById('alg-btn-tour').textContent='▶ Tour';
+}
+
+// ── Event handlers ────────────────────────────────────────────────────────────
+document.getElementById('alg-btn-prev').onclick=()=>setStep(currentStep-1);
+document.getElementById('alg-btn-next').onclick=()=>setStep(currentStep+1);
+document.getElementById('alg-btn-reset').onclick=reset;
+document.getElementById('alg-btn-tour').onclick=startTour;
+
+document.getElementById('alg-btn-action').onclick=function(){
+  if(coverageDone) return;
+  if(autoplayTimer){
+    clearInterval(autoplayTimer);autoplayTimer=null;
+    this.textContent='▶ Run';
+  } else {
+    this.textContent='⏸ Pause';
+    autoplayTimer=setInterval(()=>{
+      if(coverageDone||selected.length>=N_GENOMES){clearInterval(autoplayTimer);autoplayTimer=null;return;}
+      fpsStep();
+    },200);
+  }
+};
+
+document.getElementById('alg-btn-autoplay').onclick=function(){if(!coverageDone)fpsStep();};
+
+document.getElementById('alg-btn-thomson').onclick=function(){
+  thomsonActive=!thomsonActive;
+  this.textContent=thomsonActive?'⏸ Pause Thomson':'▶ Run Thomson';
+  if(!thomsonActive)updateScene();
+};
+
+document.querySelectorAll('#algorithm .alg-step').forEach((el,i)=>{
+  el.addEventListener('click',()=>setStep(i));
+});
+
+setStep(0);
+
+function animate(){
+  requestAnimationFrame(animate);
+  controls.update();
+  if(thomsonActive)thomsonStep();
+  renderer.render(scene,camera);
+}
+animate();
+
+</script>
+</body>
+</html>
