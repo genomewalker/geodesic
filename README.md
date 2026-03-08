@@ -8,27 +8,27 @@
 
 ## Algorithm
 
-1. **Sketch** — sketch each genome with two independent One-Permutation Hashing (OPH) signatures (k=21, m=10,000 bins, seeds 42 and 1337). Each bin holds the minimum hash of all k-mers mapping to that bin. P[sig_A[t] == sig_B[t]] = J(A,B). Averaging two signatures halves Jaccard estimation variance. The occupied-bin bitmask is stored for containment estimation.
+1. **Sketch** — compute two independent [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signatures per genome ($k=21$, $m=10{,}000$ bins, seeds 42 and 1337). Each bin holds the minimum hash of all k-mers mapping to it, giving $\Pr[\mathrm{sig}_A[t] = \mathrm{sig}_B[t]] = J(A,B)$. Averaging two independent signatures halves Jaccard estimation variance. The per-bin occupancy bitmask enables containment estimation for sparse assemblies.
 
-2. **Embed** — project all genomes onto a unit sphere via Nyström spectral embedding with four robustness improvements:
-   - *Stratified anchors*: anchors sampled stratified by fill fraction f_i = n_real_bins/m across 5 quantile strata, ensuring sparse MAGs and complete genomes are equally represented as landmarks.
-   - *Averaged kernel*: both anchor-anchor and genome-anchor similarities use the dual-sketch average K[i,j] = (J₁+J₂)/2, reducing Jaccard estimation variance.
-   - *Containment blend*: when either genome has f_i < 0.2, Jaccard is blended with bin co-occupancy max(C(A→B), C(B→A)) where C(A→B) = |bins(A) ∩ bins(B)| / |bins(A)|, weighted by alpha = 1 − f_i/0.2.
-   - *Regularisation*: symmetric Laplacian normalisation (D^{-1/2} K D^{-1/2}) removes hub-anchor bias; Tikhonov diagonal loading (K += λI, λ = 0.01 × max(mean diagonal, 1e-4)) prevents near-zero eigenvalues from blowing up the Nyström inversion.
+2. **Embed** — project all genomes onto a unit sphere via [Nyström spectral embedding](https://en.wikipedia.org/wiki/Nystr%C3%B6m_method) with four robustness improvements:
+   - *Stratified anchors*: anchors stratified by fill fraction $f_i = n_\text{real}/m$ across 5 quantile strata, ensuring sparse MAGs and complete genomes are equally represented as landmarks.
+   - *Averaged kernel*: anchor Gram matrix uses dual-sketch average $K[i,j] = (J_1+J_2)/2$, halving Jaccard estimation variance.
+   - *Containment blend*: when $f_i < 0.2$, Jaccard is blended with bin co-occupancy $\max(C(A{\to}B),\,C(B{\to}A))$ where $C(A{\to}B) = |B_A \cap B_B|/|B_A|$, weighted by $\alpha = 1 - f_i/0.2$.
+   - *Regularisation*: symmetric Laplacian normalisation ($D^{-1/2} K D^{-1/2}$) removes hub-anchor bias; Tikhonov regularisation ($\lambda = 0.01 \cdot \max(\bar{K}_\text{diag}, 10^{-4})$) prevents eigenvalue blow-up.
 
-   The Gram matrix is eigendecomposed; all genomes are projected onto the top d eigenvectors via Nyström extension and L2-normalised. d is auto-selected to capture ≥95% of variance. Borderline threshold decisions use exact OPH Jaccard (Phase 7).
+   The Gram matrix is eigendecomposed; all genomes are projected onto the top $d$ eigenvectors via Nyström extension and L2-normalised. $d$ is auto-selected to capture ≥95% of variance. Borderline decisions use exact OPH Jaccard (Phase 7).
 
-3. **Index** — build an HNSW nearest-neighbour index on the sphere for sub-linear candidate retrieval.
+3. **Index** — build an [HNSW](https://arxiv.org/abs/1603.09320) nearest-neighbour index on the sphere for sub-linear candidate retrieval.
 
-4. **Score** — compute isolation scores (mean angular distance to k=10 nearest neighbours). Flag anomalous genomes (potential contamination) when isolation score > mean + z×std. Derive the diversity threshold from the NN distance distribution: `diversity_threshold = min(NN_P95, angular_distance(ANI_threshold))`.
+4. **Score** — compute isolation scores (mean angular distance to $k=10$ nearest neighbours). Flag anomalous genomes when isolation score $> \mu + z\sigma$. Derive the diversity threshold from the NN distribution: $\theta = \min(\mathrm{NN}_{P95},\,\theta_\mathrm{ANI})$.
 
-5. **Select** — quality-weighted Farthest Point Sampling (FPS) on the unit sphere. FPS is a greedy 2-approximation to the k-center problem: each step adds the genome farthest from its nearest representative, weighted by CheckM2 quality and sqrt(genome_size / median_size). Stops when every genome is within `diversity_threshold` of some representative.
+5. **Select** — quality-weighted [Farthest Point Sampling (FPS)](https://en.wikipedia.org/wiki/Farthest-first_traversal) on the unit sphere. FPS is a greedy 2-approximation to the k-center problem: each step adds the genome farthest from its nearest representative, with fitness weighted by $q_i/100 \cdot \sqrt{L_i/L_m}$ (CheckM2 quality × genome size). Stops when every genome is within $\theta$ of some representative.
 
-6. **Merge** — coalesce representatives within `min_rep_distance` via Union-Find.
+6. **Merge** — coalesce representatives within $d_\text{min}$ via Union-Find.
 
-7. **Verify** — for non-representatives with embedding distance in [θ·(1−ε), θ), check the top-3 nearest representatives using exact dual-sketch OPH Jaccard. Promote only if no representative is within θ in OPH space.
+7. **Verify** — for non-representatives with embedding distance in $[\theta(1-\varepsilon),\,\theta)$, check the top-3 nearest representatives using exact dual-sketch OPH Jaccard. Promote only if no representative is within $\theta$ in sketch space.
 
-ANI thresholds are derived from Jaccard via the Mash formula: `ANI = (2J / (1+J))^(1/k) × 100`.
+ANI thresholds are derived from Jaccard via the Mash formula: $\mathrm{ANI} = \left(\frac{2J}{1+J}\right)^{1/k} \times 100$.
 
 ## Build
 
