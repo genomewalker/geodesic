@@ -44,7 +44,6 @@ struct GenomeEmbedding {
     // Required for accurate coverage metrics; n_real_bins = popcount(real_bins_mask).
     std::vector<uint64_t> real_bins_mask;
     uint32_t n_real_bins = 0;
-    float chimera_score = 0.0f;
 };
 
 struct NearestNeighbor {

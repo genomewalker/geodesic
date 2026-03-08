@@ -113,109 +113,6 @@ struct SyncmerMinQueue {
     return state.fwd ^ ((state.fwd ^ state.rev) & -(uint64_t)(state.fwd > state.rev));
 }
 
-// Compute inter-contig k-mer heterogeneity as mean pairwise OPH Jaccard distance [0,1].
-// Uses a lightweight 64-bin OPH; a second pass over the in-memory buffer (already cached).
-// Normal within-species variance: ~0.30-0.35. Score > 0.45 indicates chimeric contigs.
-// Returns 0.0 if fewer than 2 contigs >= MIN_CONTIG_LEN are found.
-float compute_contig_chimera_score(const char* data, size_t size,
-                                   const MinHasher::Config& cfg) {
-    constexpr int    CBINS            = 64;
-    constexpr size_t MIN_CONTIG_LEN   = 10000;
-    constexpr size_t MAX_CONTIGS      = 100;   // cap O(N²) pairwise cost
-    constexpr uint32_t EMPTY          = std::numeric_limits<uint32_t>::max();
-
-    const int      k         = cfg.kmer_size;
-    const uint64_t seed      = cfg.seed;
-    const uint64_t k_mask    = (k == 32) ? UINT64_MAX : ((1ULL << (2 * k)) - 1);
-    const int      rev_shift = 2 * (k - 1);
-
-    if (k <= 0 || k > 32) return 0.0f;
-
-    std::vector<std::array<uint32_t, CBINS>> contig_sigs;
-    std::array<uint32_t, CBINS> cur_sig;
-    cur_sig.fill(EMPTY);
-    size_t cur_len = 0;
-    OPHKmerState state;
-    bool in_header = false;
-
-    auto mix32 = [](uint64_t x) -> uint32_t {
-        x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
-        x ^= x >> 27; x *= 0x94d049bb133111ebULL;
-        x ^= x >> 31;
-        return static_cast<uint32_t>(x >> 32);
-    };
-
-    auto finalize_contig = [&]() {
-        if (cur_len >= MIN_CONTIG_LEN && contig_sigs.size() < MAX_CONTIGS) {
-            // Densify empty bins (forward then backward pass)
-            for (int t = 1; t < CBINS; ++t)
-                if (cur_sig[t] == EMPTY && cur_sig[t - 1] != EMPTY)
-                    cur_sig[t] = mix32(static_cast<uint64_t>(cur_sig[t - 1]) ^ static_cast<uint64_t>(t));
-            for (int t = CBINS - 2; t >= 0; --t)
-                if (cur_sig[t] == EMPTY && cur_sig[t + 1] != EMPTY)
-                    cur_sig[t] = mix32(static_cast<uint64_t>(cur_sig[t + 1]) ^ static_cast<uint64_t>(t));
-            if (cur_sig[0] != EMPTY)
-                contig_sigs.push_back(cur_sig);
-        }
-        cur_sig.fill(EMPTY);
-        cur_len = 0;
-        state.reset();
-    };
-
-    size_t i = 0;
-    while (i < size) {
-        const char c = data[i];
-        if (c == '>') {
-            finalize_contig();
-            in_header = true;
-            const char* nl = static_cast<const char*>(std::memchr(data + i, '\n', size - i));
-            if (nl) { i = static_cast<size_t>(nl - data) + 1; in_header = false; }
-            else break;
-            continue;
-        }
-        if (in_header) { if (c == '\n') in_header = false; ++i; continue; }
-        if (c == '\n' || c == '\r') { ++i; continue; }
-
-        const uint8_t base = encode_base(c);
-        if (base == 255) { state.reset(); ++i; continue; }
-
-        state.fwd = ((state.fwd << 2) | base) & k_mask;
-        state.rev = (state.rev >> 2) | (static_cast<uint64_t>(3 ^ base) << rev_shift);
-        if (++state.valid >= k) {
-            const uint64_t canonical = canonical_rolling_hash(state);
-            const uint64_t h         = oph_hash_wymix(canonical, seed);
-            const uint32_t bin       = fast_range_u64(h, static_cast<uint32_t>(CBINS));
-            const uint32_t sig       = oph_sig32(h);
-            if (sig < cur_sig[bin]) cur_sig[bin] = sig;
-        }
-        ++cur_len;
-        ++i;
-    }
-    finalize_contig();
-
-    if (contig_sigs.size() < 2) return 0.0f;
-
-    // max_i mean_j d(i,j): for each contig, compute its mean OPH Jaccard distance to all
-    // other contigs, then return the maximum. This isolates outlier contigs from a foreign
-    // organism without being diluted by the O(n²) clean-clean pairs.
-    // A chimeric contig has mean dist ≈ 1.0 to all clean contigs → drives score high.
-    // A clean genome has low max (all contigs similar) ≈ 0.30-0.35 within-species.
-    const size_t n = contig_sigs.size();
-    double max_mean_dist = 0.0;
-    for (size_t a = 0; a < n; ++a) {
-        double sum = 0.0;
-        for (size_t b = 0; b < n; ++b) {
-            if (a == b) continue;
-            size_t matches = 0;
-            for (int t = 0; t < CBINS; ++t)
-                if (contig_sigs[a][t] == contig_sigs[b][t]) ++matches;
-            sum += 1.0 - static_cast<double>(matches) / CBINS;
-        }
-        const double mean_dist = sum / static_cast<double>(n - 1);
-        if (mean_dist > max_mean_dist) max_mean_dist = mean_dist;
-    }
-    return static_cast<float>(max_mean_dist);
-}
 
 inline void finalize_oph_sketch(OPHSketch& result, int m) {
     const uint32_t EMPTY = std::numeric_limits<uint32_t>::max();
@@ -265,66 +162,6 @@ template <bool TrackRealBins, uint32_t FixedBins>
     }
 }
 
-template <bool TrackRealBins, uint32_t FixedBins>
-[[gnu::always_inline]] inline size_t process_valid_run(
-        const char* data,
-        size_t i,
-        size_t len,
-        int k,
-        uint64_t seed,
-        uint64_t k_mask,
-        int rev_shift,
-        uint32_t runtime_bins,
-        OPHKmerState& state,
-        uint64_t /*run_start_pos*/,
-        uint32_t* __restrict signature,
-        uint64_t* __restrict real_bins) {
-    // Extract to locals so GCC can register-allocate fwd/rev/valid
-    // (passing OPHKmerState& by reference prevents register allocation).
-    uint64_t fwd   = state.fwd;
-    uint64_t rev   = state.rev;
-    int      valid = state.valid;
-    size_t j = i;
-
-    for (; j < len && valid < k; ++j) {
-        const char c = data[j];
-        if (c == '>' || c == '\n' || c == '\r') break;
-
-        const uint8_t base = static_cast<uint8_t>(encode_base(c));
-        if (base == 255) break;
-
-        fwd = ((fwd << 2) | base) & k_mask;
-        rev = (rev >> 2) | ((3ULL - base) << rev_shift);
-        ++valid;
-
-        if (valid >= k) {
-            const uint64_t canonical = fwd ^ ((fwd ^ rev) & -(uint64_t)(fwd > rev));
-            const uint64_t h = oph_hash_wymix(canonical, seed);
-            update_oph_bin<TrackRealBins, FixedBins>(signature, real_bins, runtime_bins, h);
-        }
-    }
-
-    for (; j < len; ++j) {
-        const char c = data[j];
-        if (c == '>' || c == '\n' || c == '\r') break;
-
-        const uint8_t base = static_cast<uint8_t>(encode_base(c));
-        if (base == 255) break;
-
-        fwd = ((fwd << 2) | base) & k_mask;
-        rev = (rev >> 2) | ((3ULL - base) << rev_shift);
-
-        const uint64_t canonical = fwd ^ ((fwd ^ rev) & -(uint64_t)(fwd > rev));
-        const uint64_t h = oph_hash_wymix(canonical, seed);
-        update_oph_bin<TrackRealBins, FixedBins>(signature, real_bins, runtime_bins, h);
-    }
-
-    state.fwd   = fwd;
-    state.rev   = rev;
-    state.valid = valid;
-    return j;
-}
-
 // Scan forward from data[0] to find the length of a valid ACGT run.
 // Returns number of consecutive bytes where BASE_ENCODE[byte] != 255.
 // Stops at '>', '\n', '\r', 'N', or any non-ACGT character.
@@ -358,7 +195,7 @@ template <bool TrackRealBins, uint32_t FixedBins>
     return j;
 }
 
-// Like process_valid_run but operates on a pre-validated run [i, run_end).
+// Processes a pre-validated ACGT run [i, run_end).
 // Caller guarantees data[i..run_end) are all valid ACGT bases (no break conditions needed).
 // Eliminates per-character branch checks, allowing the compiler to unroll more aggressively.
 template <bool TrackRealBins, uint32_t FixedBins>
@@ -372,7 +209,6 @@ template <bool TrackRealBins, uint32_t FixedBins>
         int rev_shift,
         uint32_t runtime_bins,
         OPHKmerState& state,
-        uint64_t /*run_start_pos*/,
         uint32_t* __restrict signature,
         uint64_t* __restrict real_bins) {
     uint64_t fwd   = state.fwd;
@@ -408,7 +244,7 @@ template <bool TrackRealBins, uint32_t FixedBins>
     state.valid = valid;
 }
 
-template <bool TrackRealBins, uint32_t FixedBins, bool ComputeChimera = false>
+template <bool TrackRealBins, uint32_t FixedBins>
 OPHSketch sketch_oph_impl(const std::filesystem::path& fasta_path,
                           int m,
                           const MinHasher::Config& cfg) {
@@ -469,11 +305,10 @@ OPHSketch sketch_oph_impl(const std::filesystem::path& fasta_path,
             }
 
             const size_t run_start = i;
-            const uint64_t run_start_pos = genome_pos;
             const size_t run_end = i + scan_valid_run(data + i, len - i);
             process_valid_run_bounded<TrackRealBins, FixedBins>(
                 data, i, run_end, k, seed, k_mask, rev_shift, runtime_bins,
-                state, run_start_pos, signature, real_bins);
+                state, signature, real_bins);
             i = run_end;
 
             const uint64_t consumed = static_cast<uint64_t>(i - run_start);
@@ -496,35 +331,18 @@ OPHSketch sketch_oph_impl(const std::filesystem::path& fasta_path,
 
     if (is_gzipped || is_zstd) {
         auto buf = GzReader::decompress_file(path_str);
-        if (!buf.empty()) {
+        if (!buf.empty())
             process_bases(buf.data(), buf.size());
-            if constexpr (ComputeChimera)
-                result.chimera_score = compute_contig_chimera_score(buf.data(), buf.size(), cfg);
-        }
     } else {
-        if constexpr (ComputeChimera) {
-            // Slurp full file so chimera scorer sees all contig boundaries at once
-            std::ifstream in(fasta_path, std::ios::binary);
-            if (!in) return result;
-            in.seekg(0, std::ios::end);
-            std::vector<char> buf(static_cast<size_t>(in.tellg()));
-            in.seekg(0);
-            in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
-            if (!buf.empty()) {
-                process_bases(buf.data(), buf.size());
-                result.chimera_score = compute_contig_chimera_score(buf.data(), buf.size(), cfg);
-            }
-        } else {
-            constexpr size_t BUF_SIZE = 1 << 22;
-            std::vector<char> buf(BUF_SIZE);
-            std::ifstream in(fasta_path, std::ios::binary);
-            if (!in) return result;
-            while (in) {
-                in.read(buf.data(), BUF_SIZE);
-                std::streamsize bytes_read = in.gcount();
-                if (bytes_read <= 0) break;
-                process_bases(buf.data(), static_cast<size_t>(bytes_read));
-            }
+        constexpr size_t BUF_SIZE = 1 << 22;
+        std::vector<char> buf(BUF_SIZE);
+        std::ifstream in(fasta_path, std::ios::binary);
+        if (!in) return result;
+        while (in) {
+            in.read(buf.data(), BUF_SIZE);
+            std::streamsize bytes_read = in.gcount();
+            if (bytes_read <= 0) break;
+            process_bases(buf.data(), static_cast<size_t>(bytes_read));
         }
     }
 
@@ -595,11 +413,10 @@ OPHSketch sketch_oph_impl_from_buffer(const char* data, size_t size,
             }
 
             const size_t run_start = i;
-            const uint64_t run_start_pos = genome_pos;
             const size_t run_end = i + scan_valid_run(d + i, len - i);
             process_valid_run_bounded<TrackRealBins, FixedBins>(
                 d, i, run_end, k, seed, k_mask, rev_shift, runtime_bins,
-                state, run_start_pos, signature, real_bins);
+                state, signature, real_bins);
             i = run_end;
 
             const uint64_t consumed = static_cast<uint64_t>(i - run_start);
@@ -1031,8 +848,8 @@ OPHSketch MinHasher::sketch_oph_with_positions(
         return sketch_oph_syncmer_impl<true, 0>(fasta_path, m, cfg_.syncmer_s, cfg_);
     }
     if (m == OPH_BINS)
-        return sketch_oph_impl<true, OPH_BINS, false>(fasta_path, m, cfg_);
-    return sketch_oph_impl<true, 0, false>(fasta_path, m, cfg_);
+        return sketch_oph_impl<true, OPH_BINS>(fasta_path, m, cfg_);
+    return sketch_oph_impl<true, 0>(fasta_path, m, cfg_);
 }
 
 OPHSketch MinHasher::sketch_oph_with_positions_from_buffer(

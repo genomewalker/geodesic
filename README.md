@@ -89,7 +89,6 @@ Results written to the working directory (or `--out-dir`):
 | `--checkm2` | — | CheckM2 TSV for quality-weighted selection |
 | `--gunc-scores` | — | GUNC TSV to exclude chimeric assemblies from selection |
 | `-z` | 2.0 | Z-score threshold for contamination detection |
-| `--chimera-zscore` | 3.0 | K-mer diversity z-score threshold for chimera flagging |
 | `--nystrom-diagonal-loading` | 0.01 | Tikhonov regularisation fraction |
 | `--nystrom-degree-normalize` | on | Symmetric Laplacian normalisation of Gram matrix |
 | `--embedding-db` | — | Persistent embedding store for incremental updates |

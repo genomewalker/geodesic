@@ -30,9 +30,6 @@ struct OPHSketch {
     size_t genome_length = 0;
     size_t n_real_bins = 0;                 // non-empty bins before densification (for containment)
     size_t n_contigs = 0;                   // Number of sequences (FASTA headers)
-    float chimera_score = 0.0f;             // max_i mean_j OPH Jaccard distance among large contigs [0,1];
-                                             // stored for future analysis; not used for flagging
-                                             // (real contigs score ~1.0 regardless of chimeric status)
 };
 
 struct MinHashSketch {

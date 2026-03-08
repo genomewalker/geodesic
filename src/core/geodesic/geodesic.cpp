@@ -810,7 +810,6 @@ GenomeEmbedding GeodesicDerep::embed_genome(const std::filesystem::path& path, u
     emb.n_real_bins = static_cast<uint32_t>(oph.n_real_bins);
     emb.n_contigs = static_cast<uint32_t>(oph.n_contigs);
     emb.isolation_score = 0.0f;
-    emb.chimera_score = oph.chimera_score;
     emb.quality_score = 50.0f;  // Default, overridden in build_index
     emb.genome_size = oph.genome_length;
     emb.path = path;
@@ -858,7 +857,6 @@ GenomeEmbedding GeodesicDerep::embed_genome_from_buffer(
     emb.n_real_bins = static_cast<uint32_t>(oph.n_real_bins);
     emb.n_contigs = static_cast<uint32_t>(oph.n_contigs);
     emb.isolation_score = 0.0f;
-    emb.chimera_score = oph.chimera_score;
     emb.quality_score = 50.0f;
     emb.genome_size = oph.genome_length;
     emb.path = path;
@@ -2491,14 +2489,6 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
     // Flagging criterion: nn_outlier only.
     // isolation_score > mean + z_threshold * std → statistically anomalous k-NN distance
     // → likely misassigned taxonomy.
-    //
-    // chimera_score is computed and stored for future analysis, but NOT used for flagging.
-    // Reason: at k=21 with 64-bin OPH, any two large contigs from the same organism have
-    // near-zero Jaccard (different genomic regions look completely dissimilar), so
-    // chimera_score ≈ 1.0 for all real multi-contig genomes and MAGs. The metric needs
-    // population-level per-contig embeddings (compare each contig to taxon centroid) to
-    // be meaningful. Until then, chimera_score is informational only.
-    constexpr float kChimeraThreshold = 0.45f;  // kept for n_chimeric reporting
 
     std::vector<ContaminationCandidate> candidates;
     for (size_t i = 0; i < n; ++i) {
@@ -2517,7 +2507,6 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
             ? static_cast<float>(
                 (static_cast<double>(store_.genome_sizes[i]) - size_mean) / std_sz)
             : 0.0f;
-        const bool is_chimeric   = embeddings_[i].chimera_score > kChimeraThreshold;
         ContaminationCandidate c;
         c.genome_id          = embeddings_[i].genome_id;
         c.centroid_distance  = angular_distance(embeddings_[i].vector, centroid);
@@ -2526,7 +2515,6 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
         c.genome_size_zscore = sz_z;
         c.nn_outlier         = is_nn_outlier;
         c.kmer_div_zscore    = kmer_div_z;
-        c.chimera_score      = embeddings_[i].chimera_score;
         c.path               = embeddings_[i].path;
         candidates.push_back(c);
     }
@@ -2536,12 +2524,10 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
 
     const size_t n_misassigned = std::count_if(candidates.begin(), candidates.end(),
                                                 [](const auto& c) { return c.nn_outlier; });
-    const size_t n_chimeric    = std::count_if(candidates.begin(), candidates.end(),
-                                                [](const auto& c) { return c.chimera_score > 0.45f; });
     if (!candidates.empty())
-        spdlog::info("GEODESIC: {} contamination candidates ({} misassigned, {} chimeric, "
+        spdlog::info("GEODESIC: {} contamination candidates ({} misassigned, "
                      "nn_thr={:.4f}={:.3f}+{}*{:.3f})",
-                     candidates.size(), n_misassigned, n_chimeric,
+                     candidates.size(), n_misassigned,
                      nn_threshold, iso_mean, z_threshold, iso_std);
 
     return candidates;
@@ -2848,7 +2834,6 @@ size_t GeodesicDerep::build_index_incremental(
             se.isolation_score = emb.isolation_score;
             se.quality_score = emb.quality_score;
             se.genome_size = emb.genome_size;
-            se.chimera_score = emb.chimera_score;
             store_embeddings.push_back(std::move(se));
         }
         store.insert_embeddings(store_embeddings);
@@ -2870,7 +2855,6 @@ size_t GeodesicDerep::build_index_incremental(
         emb.isolation_score = se.isolation_score;
         emb.quality_score = se.quality_score;
         emb.genome_size = se.genome_size;
-        emb.chimera_score = se.chimera_score;
         emb.path = se.file_path;
         embeddings_.push_back(std::move(emb));
     }
@@ -2947,7 +2931,6 @@ void GeodesicDerep::save_embeddings_async(db::EmbeddingStore& store, const std::
         se.isolation_score = emb.isolation_score;
         se.quality_score   = emb.quality_score;
         se.genome_size     = emb.genome_size;
-        se.chimera_score   = emb.chimera_score;
         batch.push_back(std::move(se));
         if (batch.size() == BATCH) flush();
     }
@@ -2986,7 +2969,6 @@ void GeodesicDerep::save_embeddings_to_store(db::EmbeddingStore& store, const st
         se.isolation_score = emb.isolation_score;
         se.quality_score = emb.quality_score;
         se.genome_size = emb.genome_size;
-        se.chimera_score = emb.chimera_score;
         store_embeddings.push_back(std::move(se));
     }
 

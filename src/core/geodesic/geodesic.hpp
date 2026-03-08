@@ -72,7 +72,6 @@ struct GenomeEmbedding {
     std::vector<uint64_t> real_bins_mask;  // Bitmask: bit t=1 iff bin t has a real k-mer (pre-densification)
     float isolation_score;            // Mean distance to k nearest neighbors
     float quality_score;              // completeness - 5*contamination (0-100)
-    float chimera_score = 0.0f;       // Inter-contig OPH heterogeneity [0,1]; 0 = not computed
     uint64_t genome_size;
     std::filesystem::path path;
     uint32_t n_real_bins = 0;         // non-empty OPH bins before densification
@@ -288,7 +287,6 @@ public:
         float genome_size_zscore;   // Z-score of genome size within taxon
         bool nn_outlier;            // isolation_score > 90% ANI threshold (primary: misassigned)
         float kmer_div_zscore = 0.0f; // k-mer diversity z-score (n_real_bins/kbp vs population; informational)
-        float chimera_score = 0.0f; // Inter-contig OPH heterogeneity [0,1]; > 0.45 = chimeric
         std::filesystem::path path;
     };
     std::vector<ContaminationCandidate> detect_contamination_candidates(

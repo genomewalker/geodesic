@@ -33,7 +33,6 @@ struct Config {
     // Thresholds
     double z_threshold = 2.0;
     double ani_threshold = 95.0;
-    float chimera_zscore = 3.0f;
 
     // GEODESIC params (geodesic_ prefix dropped)
     bool auto_calibrate = true;

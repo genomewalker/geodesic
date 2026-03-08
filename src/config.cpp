@@ -64,9 +64,6 @@ Config parse_args(int argc, char** argv) {
     derep->add_option("-z,--z-threshold", cfg.z_threshold, "Z-score threshold for filtering")
         ->default_val(2.0);
 
-    derep->add_option("--chimera-zscore", cfg.chimera_zscore,
-        "K-mer diversity z-score threshold for chimera flagging (default: 3.0)")
-        ->default_val(3.0f);
 
     derep->add_option("--ani-threshold", cfg.ani_threshold, "ANI threshold for clustering")
         ->default_val(95.0);

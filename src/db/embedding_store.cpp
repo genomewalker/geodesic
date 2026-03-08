@@ -132,8 +132,7 @@ bool EmbeddingStore::create_schema() {
                 "    created_at TIMESTAMP DEFAULT current_timestamp,"
                 "    oph_sig BLOB,"
                 "    oph_sig2 BLOB,"
-                "    real_bins_mask BLOB,"
-                "    chimera_score FLOAT DEFAULT 0.0"
+                "    real_bins_mask BLOB"
                 ")";
             auto result = conn_->Query(create_sql);
             if (result->HasError()) {
@@ -167,15 +166,6 @@ bool EmbeddingStore::create_schema() {
                     spdlog::warn("[EmbeddingStore] Could not add oph_sig2 column: {}", r->GetError());
             }
         }
-        {
-            auto col_check = conn_->Query("SELECT chimera_score FROM genome_embeddings LIMIT 0");
-            if (col_check->HasError()) {
-                auto r = conn_->Query("ALTER TABLE genome_embeddings ADD COLUMN chimera_score FLOAT DEFAULT 0.0");
-                if (r->HasError())
-                    spdlog::warn("[EmbeddingStore] Could not add chimera_score column: {}", r->GetError());
-            }
-        }
-
         create_indexes:
 
         // Create index on taxonomy for filtered queries
@@ -315,7 +305,7 @@ bool EmbeddingStore::insert_embeddings(const std::vector<GenomeEmbedding>& embed
             "  accession VARCHAR, taxonomy VARCHAR, file_path VARCHAR,"
             "  embedding FLOAT[],"
             "  isolation_score FLOAT, quality_score FLOAT, genome_size BIGINT,"
-            "  oph_sig BLOB, oph_sig2 BLOB, real_bins_mask BLOB, chimera_score FLOAT)");
+            "  oph_sig BLOB, oph_sig2 BLOB, real_bins_mask BLOB)");
         conn_->Query("DELETE FROM _emb_stage");
 
         {
@@ -368,7 +358,6 @@ bool EmbeddingStore::insert_embeddings(const std::vector<GenomeEmbedding>& embed
                 appender.Append(std::move(oph_val));
                 appender.Append(std::move(oph_val2));
                 appender.Append(std::move(mask_val));
-                appender.Append<float>(emb.chimera_score);
                 appender.EndRow();
             }
             appender.Close();
@@ -379,7 +368,7 @@ bool EmbeddingStore::insert_embeddings(const std::vector<GenomeEmbedding>& embed
             "INSERT OR REPLACE INTO genome_embeddings "
             "SELECT accession, taxonomy, file_path,"
             "  embedding::FLOAT[" + std::to_string(embedding_dim_) + "],"
-            "  isolation_score, quality_score, genome_size, current_timestamp, oph_sig, oph_sig2, real_bins_mask, chimera_score"
+            "  isolation_score, quality_score, genome_size, current_timestamp, oph_sig, oph_sig2, real_bins_mask"
             " FROM _emb_stage";
         auto r = conn_->Query(upsert_sql);
         if (r->HasError()) {
@@ -633,7 +622,7 @@ std::vector<GenomeEmbedding> EmbeddingStore::load_embeddings(const std::string& 
     std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::string sql =
             "SELECT accession, taxonomy, file_path, embedding, "
-            "isolation_score, quality_score, genome_size, oph_sig, oph_sig2, real_bins_mask, chimera_score "
+            "isolation_score, quality_score, genome_size, oph_sig, oph_sig2, real_bins_mask "
             "FROM genome_embeddings";
         if (!taxonomy.empty()) {
             sql += " WHERE taxonomy = '" + taxonomy + "'";
@@ -693,10 +682,6 @@ std::vector<GenomeEmbedding> EmbeddingStore::load_embeddings(const std::string& 
                     for (uint64_t w : emb.real_bins_mask)
                         emb.n_real_bins += static_cast<uint32_t>(__builtin_popcountll(w));
                 }
-
-                auto chimera_val = chunk->GetValue(10, i);
-                if (!chimera_val.IsNull())
-                    emb.chimera_score = chimera_val.GetValue<float>();
 
                 embeddings.push_back(std::move(emb));
             }
