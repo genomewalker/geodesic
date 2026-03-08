@@ -708,8 +708,10 @@ struct PrefetchedItem {
 class GenomePrefetcher {
 public:
     GenomePrefetcher(const std::vector<std::filesystem::path>& paths,
-                     size_t n_readers, size_t queue_cap)
-        : paths_(paths), cap_(queue_cap), n_readers_(n_readers) {
+                     size_t n_readers, size_t queue_cap,
+                     size_t byte_budget = 2ULL * 1024 * 1024 * 1024)
+        : paths_(paths), cap_(queue_cap), n_readers_(n_readers),
+          byte_budget_(byte_budget) {
         for (size_t t = 0; t < n_readers_; ++t)
             readers_.emplace_back([this] { read_loop(); });
     }
@@ -730,6 +732,7 @@ public:
         if (queue_.empty()) return std::nullopt;
         auto item = std::move(queue_.front());
         queue_.pop_front();
+        queued_bytes_ -= item.data.size();
         not_full_.notify_one();
         return item;
     }
@@ -738,6 +741,8 @@ private:
     const std::vector<std::filesystem::path>& paths_;
     size_t cap_;
     size_t n_readers_;
+    size_t byte_budget_;
+    size_t queued_bytes_{0};
     std::atomic<size_t> next_{0};
     std::mutex mu_;
     std::condition_variable not_empty_, not_full_;
@@ -774,8 +779,11 @@ private:
             }
 
             std::unique_lock<std::mutex> lk(mu_);
-            not_full_.wait(lk, [&] { return queue_.size() < cap_ || cancelled_; });
+            not_full_.wait(lk, [&] {
+                return (queue_.size() < cap_ && queued_bytes_ + d.size() <= byte_budget_) || cancelled_;
+            });
             if (cancelled_) break;
+            queued_bytes_ += d.size();
             queue_.push_back({i, std::move(d)});
             not_empty_.notify_one();
         }
@@ -1109,6 +1117,11 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
     }
     t_phase("OPH sketch (embed_genome)");
 
+    // Build canonical ID → row map (identity at this point, but needed after future sorts)
+    gid_to_row_.clear();
+    for (size_t i = 0; i < n; ++i)
+        gid_to_row_[embeddings_[i].genome_id] = i;
+
     // Copy embeddings to SoA store for SIMD-friendly access
     for (size_t i = 0; i < n; ++i) {
         store_.genome_ids[i] = embeddings_[i].genome_id;
@@ -1229,6 +1242,11 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     // FPS Phase 1 now finds the most-isolated genome by argmax scan instead of [0].
     std::sort(embeddings_.begin(), embeddings_.end(),
               [](const auto& a, const auto& b) { return a.genome_id < b.genome_id; });
+
+    // Rebuild canonical ID → row map after sort
+    gid_to_row_.clear();
+    for (size_t i = 0; i < n_emb; ++i)
+        gid_to_row_[embeddings_[i].genome_id] = i;
 
     // Update SoA store to match sorted embeddings (also copies Nyström vectors to store_.data)
     size_t n = n_emb;
@@ -1718,6 +1736,11 @@ void GeodesicDerep::compute_isolation_scores_brute() {
                   return a.genome_id < b.genome_id;
               });
 
+    // Rebuild canonical ID → row map after sort
+    gid_to_row_.clear();
+    for (size_t i = 0; i < n; ++i)
+        gid_to_row_[embeddings_[i].genome_id] = i;
+
     for (size_t i = 0; i < n; ++i) {
         store_.genome_ids[i]       = embeddings_[i].genome_id;
         store_.isolation_scores[i] = embeddings_[i].isolation_score;
@@ -1798,7 +1821,9 @@ std::vector<uint64_t> GeodesicDerep::find_candidate_covers(
 
     if (current_reps.empty()) return {};
 
-    const auto& query = embeddings_[query_id];
+    auto qit = gid_to_row_.find(query_id);
+    if (qit == gid_to_row_.end()) return {};
+    const auto& query = embeddings_[qit->second];
 
     // Create filter set for reps only
     std::unordered_set<uint64_t> rep_set(current_reps.begin(), current_reps.end());
@@ -1956,7 +1981,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     auto compact_active = [&]() {
         active.erase(
             std::remove_if(active.begin(), active.end(), [&](size_t i) {
-                return (1.0f - max_sim_to_rep[i]) < cfg_.diversity_threshold;
+                float sim = max_sim_to_rep[i];
+                float dist = std::acos(std::clamp(sim, -1.0f, 1.0f)) / static_cast<float>(M_PI);
+                return dist < cfg_.diversity_threshold;
             }),
             active.end());
     };
@@ -1985,7 +2012,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 #endif
         for (size_t ai = 0; ai < active.size(); ++ai) {
             size_t i = active[ai];
-            float d = 1.0f - max_sim_to_rep[i];
+            float sim = max_sim_to_rep[i];
+            float d = std::acos(std::clamp(sim, -1.0f, 1.0f)) / static_cast<float>(M_PI);
             fit_active[ai] = {d * (store_.quality_scores[i] / 100.0f) * length_factors[i], i};
         }
 
@@ -2022,14 +2050,13 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         }
 
         // Fused update: one parallel pass over all n, inner loop over batch
-        const size_t nb = batch_vecs.size();
+        const size_t nb = batch_idx.size();
 #if GEODESIC_USE_OMP
         #pragma omp parallel for
 #endif
         for (size_t j = 0; j < n; ++j) {
-            const float* vj = store_.row(j);
             for (size_t k = 0; k < nb; ++k) {
-                float sim = dot_product_simd(batch_vecs[k], vj, dim);
+                float sim = sim_fn(batch_idx[k], j);
                 if (sim > max_sim_to_rep[j]) {
                     max_sim_to_rep[j] = sim;
                     nearest_rep[j] = batch_gids[k];
@@ -2222,7 +2249,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             #pragma omp for nowait
             for (size_t i = 0; i < representatives.size(); ++i) {
                 uint64_t rep_i = representatives[i];
-                auto neighbors = index_->search(embeddings_[rep_i].vector, k_neighbors, &rep_set);
+                auto row_it = gid_to_row_.find(rep_i);
+                if (row_it == gid_to_row_.end()) continue;
+                auto neighbors = index_->search(embeddings_[row_it->second].vector, k_neighbors, &rep_set);
                 for (const auto& [neighbor_id, dist] : neighbors) {
                     if (neighbor_id == rep_i || dist >= cfg_.min_rep_distance) continue;
                     auto it = rep_to_idx.find(neighbor_id);
@@ -2238,7 +2267,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 #else
         for (size_t i = 0; i < representatives.size(); ++i) {
             uint64_t rep_i = representatives[i];
-            auto neighbors = index_->search(embeddings_[rep_i].vector, k_neighbors, &rep_set);
+            auto row_it = gid_to_row_.find(rep_i);
+            if (row_it == gid_to_row_.end()) continue;
+            auto neighbors = index_->search(embeddings_[row_it->second].vector, k_neighbors, &rep_set);
             for (const auto& [neighbor_id, dist] : neighbors) {
                 if (neighbor_id == rep_i || dist >= cfg_.min_rep_distance) continue;
                 auto it = rep_to_idx.find(neighbor_id);
@@ -2286,10 +2317,11 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             } else {
                 float max_sim = -1.0f;
                 uint64_t best_rep = representatives[0];
-                const float* vec_i = store_.row(i);
 
                 for (uint64_t r : representatives) {
-                    float sim = dot_product_simd(vec_i, store_.row(r), dim);
+                    auto rit = gid_to_row_.find(r);
+                    if (rit == gid_to_row_.end()) continue;
+                    float sim = sim_fn(i, rit->second);
                     if (sim > max_sim) {
                         max_sim = sim;
                         best_rep = r;
@@ -2569,15 +2601,23 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
             ? static_cast<float>(
                 (static_cast<double>(store_.genome_sizes[i]) - size_mean) / std_sz)
             : 0.0f;
+        const bool is_size_outlier = std::abs(sz_z) > z_threshold;
+        std::string reason;
+        if (is_nn_outlier && is_size_outlier) reason = "nn_outlier+size_outlier";
+        else if (is_nn_outlier) reason = "nn_outlier";
+        else reason = "size_outlier";
+
         ContaminationCandidate c;
-        c.genome_id          = embeddings_[i].genome_id;
-        c.centroid_distance  = angular_distance(embeddings_[i].vector, centroid);
-        c.isolation_score    = embeddings_[i].isolation_score;
-        c.anomaly_score      = embeddings_[i].isolation_score;
-        c.genome_size_zscore = sz_z;
-        c.nn_outlier         = is_nn_outlier;
-        c.kmer_div_zscore    = kmer_div_z;
-        c.path               = embeddings_[i].path;
+        c.genome_id            = embeddings_[i].genome_id;
+        c.centroid_distance    = angular_distance(embeddings_[i].vector, centroid);
+        c.isolation_score      = embeddings_[i].isolation_score;
+        c.anomaly_score        = embeddings_[i].isolation_score;
+        c.genome_size_zscore   = sz_z;
+        c.nn_outlier           = is_nn_outlier;
+        c.kmer_div_zscore      = kmer_div_z;
+        c.margin_to_threshold  = embeddings_[i].isolation_score - nn_threshold;
+        c.flag_reason          = std::move(reason);
+        c.path                 = embeddings_[i].path;
         candidates.push_back(c);
     }
 
@@ -2732,17 +2772,17 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
                 qe.real_bins_mask.empty() || re.real_bins_mask.empty()) {
                 ani = dist_to_ani(coverage_dists[i]);
             } else {
-                int n11 = 0, nq = 0;
+                int n11 = 0, n_union = 0;
                 for (int t = 0; t < m; ++t) {
                     const bool q_real = (qe.real_bins_mask[t >> 6] >> (t & 63)) & 1ULL;
-                    if (!q_real) continue;
-                    nq++;
                     const bool r_real = (re.real_bins_mask[t >> 6] >> (t & 63)) & 1ULL;
-                    if (r_real && qe.oph_sig[t] == re.oph_sig[t]) n11++;
+                    if (!q_real && !r_real) continue;
+                    n_union++;
+                    if (q_real && r_real && qe.oph_sig[t] == re.oph_sig[t]) n11++;
                 }
-                if (nq == 0) continue;
-                // Convert OPH containment J to ANI: ANI = (2J/(1+J))^(1/k)
-                const double j = static_cast<double>(n11) / nq;
+                if (n_union == 0) continue;
+                // Symmetric Jaccard → ANI: ANI = (2J/(1+J))^(1/k)
+                const double j = static_cast<double>(n11) / n_union;
                 ani = (j > 0.0) ? std::pow(2.0 * j / (1.0 + j), 1.0 / k) : 0.0;
             }
             if (ani < 0.99) cnt99++;
@@ -2923,6 +2963,11 @@ size_t GeodesicDerep::build_index_incremental(
 
     size_t n = embeddings_.size();
     if (n == 0) return 0;
+
+    // Build canonical ID → row map
+    gid_to_row_.clear();
+    for (size_t i = 0; i < n; ++i)
+        gid_to_row_[embeddings_[i].genome_id] = i;
 
     // Copy metadata to SoA store
     store_.resize(n, cfg_.embedding_dim);

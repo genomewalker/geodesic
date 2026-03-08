@@ -7,6 +7,7 @@
 #include <future>
 #include <memory>
 #include <random>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -288,6 +289,8 @@ public:
         float genome_size_zscore;   // Z-score of genome size within taxon
         bool nn_outlier;            // isolation_score > 90% ANI threshold (primary: misassigned)
         float kmer_div_zscore = 0.0f; // k-mer diversity z-score (n_real_bins/kbp vs population; informational)
+        float margin_to_threshold = 0.0f; // isolation_score - nn_threshold (positive = above threshold)
+        std::string flag_reason;    // "nn_outlier", "size_outlier", or "nn_outlier+size_outlier"
         std::filesystem::path path;
     };
     std::vector<ContaminationCandidate> detect_contamination_candidates(
@@ -372,6 +375,11 @@ private:
 
     // Whether Nyström embedding was applied (false → exact Jaccard FPS for small n)
     bool nystrom_applied_ = false;
+
+    // Canonical lookup: genome_id → row index in embeddings_/store_.
+    // Rebuilt after every sort of embeddings_ so that genome_ids (which are opaque
+    // identifiers after sorting) are never used as direct array indices.
+    std::unordered_map<uint64_t, size_t> gid_to_row_;
 
     // Genomes that failed to read after retries: (file_path, reason).
     // Written from OMP threads (mutex-protected); read by taxon_processor after build_index.
