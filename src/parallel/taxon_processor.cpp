@@ -599,15 +599,17 @@ TaxonResult process_taxon(
         for (const auto& c : contamination) {
             auto it = path_to_accession.find(c.path.string());
             if (it != path_to_accession.end()) {
-                contam_records.push_back({
-                    it->second,
-                    static_cast<double>(c.centroid_distance),
-                    static_cast<double>(c.isolation_score),
-                    static_cast<double>(c.anomaly_score),
-                    static_cast<double>(c.genome_size_zscore),
-                    c.nn_outlier,
-                    static_cast<double>(c.kmer_div_zscore)
-                });
+                db::ops::ContaminationRecord rec;
+                rec.accession          = it->second;
+                rec.centroid_distance  = static_cast<double>(c.centroid_distance);
+                rec.isolation_score    = static_cast<double>(c.isolation_score);
+                rec.anomaly_score      = static_cast<double>(c.anomaly_score);
+                rec.genome_size_zscore = static_cast<double>(c.genome_size_zscore);
+                rec.nn_outlier         = c.nn_outlier;
+                rec.kmer_div_zscore    = static_cast<double>(c.kmer_div_zscore);
+                rec.margin_to_threshold = static_cast<double>(c.margin_to_threshold);
+                rec.flag_reason        = c.flag_reason;
+                contam_records.push_back(std::move(rec));
             }
         }
         // Append GUNC-only failures (merged here so a single batch insert handles all)

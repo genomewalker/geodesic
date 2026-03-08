@@ -177,12 +177,13 @@ void ResultsWriter::write_contamination(db::DBManager& db) const {
 
     out << "taxonomy\taccession\tnn_outlier\tisolation_score\tkmer_div_zscore\t"
            "genome_size_zscore\tcentroid_distance\tanomaly_score\t"
-           "genome_length_bp\tn_contigs\n";
+           "genome_length_bp\tn_contigs\tmargin_to_threshold\tflag_reason\n";
 
     auto result = db.query(
         "SELECT c.taxonomy, c.accession, c.nn_outlier, c.isolation_score, "
         "c.kmer_div_zscore, c.genome_size_zscore, c.centroid_distance, c.anomaly_score, "
-        "COALESCE(g.genome_length, 0), COALESCE(g.n_contigs, 0) "
+        "COALESCE(g.genome_length, 0), COALESCE(g.n_contigs, 0), "
+        "COALESCE(c.margin_to_threshold, 0.0), COALESCE(c.flag_reason, '') "
         "FROM contamination_candidates c "
         "LEFT JOIN genomes g ON c.accession = g.accession "
         "ORDER BY c.taxonomy, c.anomaly_score DESC");
@@ -197,7 +198,9 @@ void ResultsWriter::write_contamination(db::DBManager& db) const {
             << row.GetValue<double>(6) << '\t'        // centroid_distance
             << row.GetValue<double>(7) << '\t'        // anomaly_score
             << row.GetValue<int64_t>(8) << '\t'       // genome_length_bp
-            << row.GetValue<int32_t>(9) << '\n';      // n_contigs
+            << row.GetValue<int32_t>(9) << '\t'       // n_contigs
+            << row.GetValue<float>(10) << '\t'        // margin_to_threshold
+            << row.GetValue<std::string>(11) << '\n'; // flag_reason
     }
 
     spdlog::info("Wrote contamination candidates to {}", path.string());

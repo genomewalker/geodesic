@@ -300,6 +300,8 @@ void insert_contamination_candidates(DBManager& db, const std::string& taxonomy,
         appender.Append<double>(c.genome_size_zscore);
         appender.Append<bool>(c.nn_outlier);
         appender.Append<double>(c.kmer_div_zscore);
+        appender.Append<float>(static_cast<float>(c.margin_to_threshold));
+        appender.Append<duckdb::string_t>(duckdb::string_t(c.flag_reason));
         appender.EndRow();
     }
     appender.Close();

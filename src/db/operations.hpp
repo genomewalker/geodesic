@@ -52,6 +52,8 @@ struct ContaminationRecord {
     double genome_size_zscore = 0.0;
     bool nn_outlier = false;
     double kmer_div_zscore = 0.0;
+    double margin_to_threshold = 0.0;
+    std::string flag_reason;
 };
 
 void insert_contamination_candidates(DBManager& db, const std::string& taxonomy,
