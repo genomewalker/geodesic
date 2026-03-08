@@ -61,7 +61,17 @@ set(RAPIDGZIP_BUILD_STANDALONE OFF CACHE BOOL "" FORCE)
 set(RAPIDGZIP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(rapidgzip)
 
+# Eigen3 for Nyström spectral embedding (matrix operations)
+FetchContent_Declare(Eigen3
+    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+    GIT_TAG 3.4.0
+    GIT_SHALLOW TRUE)
+set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(Eigen3)
+
 find_package(DuckDB MODULE REQUIRED)
+find_package(Zstd MODULE QUIET)
 
 # RPATH: embed DuckDB library search path so the binary runs without LD_LIBRARY_PATH
 get_filename_component(_duckdb_dir "${DuckDB_LIBRARIES}" DIRECTORY)
@@ -94,7 +104,12 @@ target_include_directories(geodesic PRIVATE
     "${thread_pool_SOURCE_DIR}/include"
     "${hnswlib_SOURCE_DIR}"
     "${rapidgzip_SOURCE_DIR}/src"
+    "${eigen3_SOURCE_DIR}"
 )
+if(Zstd_FOUND)
+    target_include_directories(geodesic PRIVATE "${Zstd_INCLUDE_DIRS}")
+    target_compile_definitions(geodesic PRIVATE HAVE_ZSTD)
+endif()
 
 target_link_libraries(geodesic PRIVATE
     CLI11::CLI11
@@ -103,6 +118,12 @@ target_link_libraries(geodesic PRIVATE
     librapidgzip
     pthread
 )
+if(Zstd_FOUND)
+    target_link_libraries(geodesic PRIVATE ${Zstd_LIBRARIES})
+    message(STATUS "zstd found: ${Zstd_LIBRARIES} — .zst genome files supported")
+else()
+    message(STATUS "zstd not found — .zst genome files unsupported")
+endif()
 
 # Link OpenMP if available
 if(OpenMP_CXX_FOUND)

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <deque>
+#include <fstream>
 #include <memory>
 #include <numeric>
 #include <spdlog/spdlog.h>
@@ -127,6 +128,7 @@ TaxonResult process_taxon(
     db::DBManager& db,
     GenomeCache& cache,
     db::EmbeddingStore* emb_store,
+    const std::unordered_map<std::string, GuncQuality>* gunc_scores,
     bool in_batch_txn) {
     try {
         const int threads = (thread_budget > 0) ? thread_budget : cfg.threads;
@@ -207,11 +209,12 @@ TaxonResult process_taxon(
             MinHasher hasher({
                 .kmer_size   = cfg.kmer_size,
                 .sketch_size = cfg.sketch_size,
+                .syncmer_s   = cfg.syncmer_s,
                 .seed        = 42
             });
 
             // Sketch all n genomes with OPH
-            std::vector<std::vector<uint64_t>> sigs(n);
+            std::vector<std::vector<uint32_t>> sigs(n);
             for (size_t i = 0; i < n; ++i)
                 sigs[i] = hasher.sketch_oph(file_paths[i], cfg.sketch_size).signature;
 
@@ -353,57 +356,53 @@ TaxonResult process_taxon(
         int sketch_size = cfg.sketch_size;
         float diversity_threshold = cfg.diversity_threshold;
 
-        float min_rep_distance = 0.025f;  // Default, overridden by calibration
         double ani_threshold_frac = cfg.ani_threshold / 100.0;
-        float calib_size_cv = 0.0f;
 
-        if (cfg.auto_calibrate && file_paths.size() >= 50) {
+        // Tier selection only: auto-calibrate chooses k/dim/sketch based on spread,
+        // but we derive all thresholds from actual data after embedding.
+        // Skip on warm (incremental) runs — OPH sigs already encode the original params,
+        // and auto_calibrate reads NFS genome files which defeats the caching purpose.
+        const bool is_warm_run = emb_store && cfg.incremental &&
+                                 emb_store->count_embeddings(taxon.taxonomy) > 0;
+        if (cfg.auto_calibrate && file_paths.size() >= 50 && !is_warm_run) {
             auto params = GeodesicDerep::auto_calibrate(
                 file_paths, cfg.calibration_pairs, threads);
-            kmer_size = params.kmer_size;
+            kmer_size     = params.kmer_size;
             embedding_dim = params.embedding_dim;
-            sketch_size = params.sketch_size;
-            min_rep_distance = params.min_rep_distance;
-            // Derive diversity_threshold from USER's ani_threshold (not the auto-calibrated
-            // midpoint which biases toward common strains and under-selects reps).
-            // Use calibrated kmer_size so the distance is in the right embedding space.
-            {
-                const double user_ani = cfg.ani_threshold / 100.0;
-                double q = std::exp(-static_cast<double>(kmer_size) * (1.0 - user_ani));
-                double j = q / (2.0 - q);
-                diversity_threshold = static_cast<float>(std::acos(j) / M_PI);
-            }
-            // Scale diversity_threshold by genome size heterogeneity.
-            // High size CV indicates an open pangenome: genomes at similar ANI
-            // may differ substantially in gene content. Lower threshold → more reps.
-            // Example: E. coli size_cv ≈ 0.10 → scale 1/(1+1.0) = 0.5x
-            //          uniform species size_cv ≈ 0.01 → scale 1/(1.05) ≈ 0.95x
-            calib_size_cv = params.size_cv;
-            if (calib_size_cv > 0.0f) {
-                float scale = 1.0f / (1.0f + 10.0f * calib_size_cv);
-                diversity_threshold *= scale;
-            }
-            // Enforce invariant after all scaling: min_rep_distance must be
-            // strictly less than diversity_threshold, or electrostatic merge
-            // will absorb reps that FPS guarantees are diversity_threshold apart.
-            min_rep_distance = std::min(min_rep_distance, diversity_threshold * 0.5f);
+            sketch_size   = params.sketch_size;
+            // Thresholds are computed from real data below — not from calibration heuristics.
         }
+
+        // ANI threshold as angular distance — used as the upper cap on diversity_threshold.
+        // The actual value is set from the real NN distribution after build_index.
+        {
+            const double user_ani = cfg.ani_threshold / 100.0;
+            double ak = std::pow(user_ani, static_cast<double>(kmer_size));
+            double j = std::clamp(ak / (2.0 - ak), 0.0, 1.0);
+            diversity_threshold = static_cast<float>(std::acos(j) / M_PI);
+        }
+
+        // Both thresholds are placeholders — replaced below using real NN distances.
+        float min_rep_distance = diversity_threshold * 0.5f;
 
         GeodesicDerep::Config gcfg{
             .embedding_dim = embedding_dim,
             .sketch_size = sketch_size,
             .kmer_size = kmer_size,
-            .syncmer_s = 8,
+            .syncmer_s = cfg.syncmer_s,
             .ani_threshold = ani_threshold_frac,
             .hnsw_m = 16,
             .hnsw_ef_construction = 64,
             .hnsw_ef_search = 50,
             .threads = threads,
+            .io_threads = cfg.io_threads,
             .calibration_samples = 0,
             .isolation_k = 10,
             .diversity_threshold = diversity_threshold,
             .min_rep_distance = min_rep_distance,
-            .max_rep_fraction = cfg.max_rep_fraction
+            .max_rep_fraction = cfg.max_rep_fraction,
+            .nystrom_diagonal_loading = cfg.nystrom_diagonal_loading,
+            .nystrom_degree_normalize = cfg.nystrom_degree_normalize
         };
 
         GeodesicDerep geodesic(gcfg);
@@ -417,29 +416,151 @@ TaxonResult process_taxon(
                          taxon.taxonomy, newly_embedded,
                          file_paths.size() - newly_embedded);
         } else {
-            geodesic.build_index(file_paths, quality_scores);
+            geodesic.build_index(file_paths, quality_scores, emb_store, taxon.taxonomy);
             newly_embedded = file_paths.size();
-            if (emb_store) {
-                geodesic.save_embeddings_to_store(*emb_store, taxon.taxonomy);
-                if (is_verbose()) spdlog::info("[{}] Saved {} embeddings to store",
-                             taxon.taxonomy, file_paths.size());
-            }
         }
-        geodesic.compute_isolation_scores();
+        // Record permanently failed genome reads in jobs_failed (NFS errors, corrupt files).
+        for (const auto& [file_path, reason] : geodesic.failed_reads()) {
+            auto it = path_to_accession.find(file_path);
+            const std::string accession = (it != path_to_accession.end()) ? it->second : file_path;
+            // Escape single quotes in reason to prevent SQL injection.
+            std::string safe_reason = reason;
+            for (size_t pos = 0; (pos = safe_reason.find('\'', pos)) != std::string::npos; pos += 2)
+                safe_reason.replace(pos, 1, "''");
+            db.execute("INSERT OR IGNORE INTO jobs_failed (accession, taxonomy, file, reason) "
+                       "VALUES ('" + accession + "', '" + taxon.taxonomy + "', '" +
+                       file_path + "', '" + safe_reason + "')");
+        }
+
+        // Persist genome_length + n_contigs from OPH sketch (input TSV doesn't have them).
+        {
+            std::unordered_map<std::string, std::pair<uint64_t, uint32_t>> sizes;
+            for (const auto& emb : geodesic.embeddings()) {
+                if (emb.genome_size == 0) continue;
+                auto it = path_to_accession.find(emb.path.string());
+                if (it != path_to_accession.end())
+                    sizes[it->second] = std::make_pair(emb.genome_size, emb.n_contigs);
+            }
+            db::ops::update_genome_sizes(db, sizes);
+        }
+
+        // Phase 3: single HNSW pass — isolation scores + 1-NN distribution fused.
+        auto nn = geodesic.compute_isolation_scores();
+
+        // Derive both thresholds from the real NN distance distribution.
+        // diversity_threshold = P95 of NN distances: FPS stops when every genome is
+        //   covered at the natural scale of THIS species' diversity.
+        //   Capped at user's --ani-threshold so we never exceed the species boundary.
+        // min_rep_distance = P5 of NN distances: electrostatic merge only collapses
+        //   genuine near-duplicates (bottom 5% of inter-genome spacings).
+        {
+
+            // Data-driven diversity threshold, capped at user's ANI boundary.
+            // Floor at 1/√M (1σ sketch noise): Nyström PCA smooths embedding distances
+            // significantly, so raw 3σ is too conservative and over-merges clonal species
+            // (e.g. S. enterica NN P95 = 0.010 < 3σ=0.030 → only 283 reps instead of ~4000).
+            // No sketch noise floor: Nyström PCA aggregates many anchor pairs, so
+            // embedding distances are far more reliable than single-pair sketch noise (1/√M).
+            // Use nn.p95 directly. Tiny epsilon guards against exact-zero (all genomes
+            // numerically identical) which would cause FPS to never terminate early.
+            constexpr float kMinDivThresh = 1e-6f;
+            diversity_threshold = std::max(kMinDivThresh,
+                                  std::min(diversity_threshold,
+                                           static_cast<float>(nn.p95)));
+            min_rep_distance = std::min(static_cast<float>(nn.p5),
+                                        diversity_threshold * 0.5f);
+
+            geodesic.set_diversity_threshold(diversity_threshold);
+            geodesic.set_min_rep_distance(min_rep_distance);
+
+            double thr_j   = std::cos(static_cast<double>(diversity_threshold) * M_PI);
+            double thr_ani = GeodesicDerep::jaccard_to_ani(std::max(0.0, thr_j), kmer_size);
+            spdlog::info("[{}] geodesic: k={} dim={} sketch={} | "
+                         "div_thr={:.4f} ({:.1f}% ANI, from NN P95={:.4f}) | "
+                         "min_rep={:.4f} (NN P5={:.4f} P50={:.4f})",
+                         taxon.taxonomy, kmer_size, embedding_dim, sketch_size,
+                         diversity_threshold, thr_ani, nn.p95,
+                         min_rep_distance, nn.p5, nn.p50);
+        }
 
         // Detect potential contamination before selection
         auto contamination = geodesic.detect_contamination_candidates(cfg.z_threshold);
         std::unordered_set<std::string> contaminated_paths;
         for (const auto& c : contamination) {
             if (is_verbose()) spdlog::warn("[{}] Potential contamination: {} (centroid_dist={:.3f}, "
-                         "isolation={:.3f}, anomaly={:.2f})",
+                         "isolation={:.3f}, kmer_div_z={:.2f}, nn_outlier={})",
                          taxon.taxonomy, c.path.filename().string(),
-                         c.centroid_distance, c.isolation_score, c.anomaly_score);
+                         c.centroid_distance, c.isolation_score, c.kmer_div_zscore, c.nn_outlier);
             contaminated_paths.insert(c.path.string());
+        }
+
+        // Apply GUNC flags: genomes failing GUNC are excluded from reps.
+        // GUNC-only failures (not already in embedding candidates) are collected
+        // into gunc_contam_records and merged into contam_records before the single
+        // batch insert — never inserted individually to avoid DELETE-per-genome.
+        std::vector<db::ops::ContaminationRecord> gunc_contam_records;
+        if (gunc_scores && !gunc_scores->empty()) {
+            std::unordered_set<std::string> already_flagged;
+            for (const auto& c : contamination) {
+                auto it = path_to_accession.find(c.path.string());
+                if (it != path_to_accession.end()) already_flagged.insert(it->second);
+            }
+            for (const auto& g : taxon.genomes) {
+                auto acc = canonical_accession(g.accession);
+                auto git = gunc_scores->find(acc);
+                if (git == gunc_scores->end()) continue;
+                if (git->second.pass_gunc) continue;
+                contaminated_paths.insert(g.file_path.string());
+                if (is_verbose())
+                    spdlog::warn("[{}] GUNC fail: {} (CSS={:.3f})",
+                                 taxon.taxonomy, acc,
+                                 git->second.clade_separation_score);
+                if (already_flagged.count(acc)) continue;
+                // kmer_div_zscore stores CSS; nn_outlier=false (embedding not the source)
+                db::ops::ContaminationRecord rec;
+                rec.accession          = acc;
+                rec.centroid_distance  = 0.0;
+                rec.isolation_score    = 0.0;
+                rec.anomaly_score      = 0.0;
+                rec.nn_outlier         = false;
+                rec.kmer_div_zscore    = static_cast<double>(git->second.clade_separation_score);
+                rec.genome_size_zscore = 0.0;
+                gunc_contam_records.push_back(std::move(rec));
+            }
         }
 
         // Exclude contaminated genomes from rep selection before running FPS
         geodesic.exclude_from_reps(contaminated_paths);
+
+        // Pre-seed fixed representatives (--fixed-reps) before FPS
+        if (cfg.fixed_reps_file) {
+            static const std::unordered_set<std::string> fixed_accessions = [&]() {
+                std::unordered_set<std::string> s;
+                std::ifstream f(*cfg.fixed_reps_file);
+                std::string line;
+                while (std::getline(f, line)) {
+                    if (!line.empty()) s.insert(line);
+                }
+                return s;
+            }();
+
+            if (!fixed_accessions.empty()) {
+                std::unordered_map<std::string, std::string> accession_to_path;
+                for (const auto& [path, acc] : path_to_accession)
+                    accession_to_path[acc] = path;
+
+                std::unordered_set<std::string> pinned_paths;
+                for (const auto& acc : fixed_accessions) {
+                    auto it = accession_to_path.find(acc);
+                    if (it != accession_to_path.end())
+                        pinned_paths.insert(it->second);
+                }
+                if (!pinned_paths.empty()) {
+                    geodesic.set_pinned_representatives(pinned_paths);
+                    spdlog::info("[{}] pinned {} fixed representatives", taxon.taxonomy, pinned_paths.size());
+                }
+            }
+        }
 
         // Select representatives
         auto edges = geodesic.select_representatives();
@@ -474,20 +595,24 @@ TaxonResult process_taxon(
         }
 
         std::vector<db::ops::ContaminationRecord> contam_records;
-        if (!contamination.empty()) {
-            contam_records.reserve(contamination.size());
-            for (const auto& c : contamination) {
-                auto it = path_to_accession.find(c.path.string());
-                if (it != path_to_accession.end()) {
-                    contam_records.push_back({
-                        it->second,
-                        static_cast<double>(c.centroid_distance),
-                        static_cast<double>(c.isolation_score),
-                        static_cast<double>(c.anomaly_score)
-                    });
-                }
+        contam_records.reserve(contamination.size() + gunc_contam_records.size());
+        for (const auto& c : contamination) {
+            auto it = path_to_accession.find(c.path.string());
+            if (it != path_to_accession.end()) {
+                contam_records.push_back({
+                    it->second,
+                    static_cast<double>(c.centroid_distance),
+                    static_cast<double>(c.isolation_score),
+                    static_cast<double>(c.anomaly_score),
+                    static_cast<double>(c.genome_size_zscore),
+                    c.nn_outlier,
+                    static_cast<double>(c.kmer_div_zscore)
+                });
             }
         }
+        // Append GUNC-only failures (merged here so a single batch insert handles all)
+        for (auto& rec : gunc_contam_records)
+            contam_records.push_back(std::move(rec));
 
         // Convert paths to accessions
         std::vector<std::string> all_representatives;
@@ -626,7 +751,7 @@ std::vector<TaxonResult> process_tiny_batch(
     conn.Query("BEGIN TRANSACTION");
     try {
         for (const Taxon* t : taxa)
-            results.push_back(process_taxon(*t, cfg, 1, db, cache, nullptr, /*in_batch_txn=*/true));
+            results.push_back(process_taxon(*t, cfg, 1, db, cache, nullptr, nullptr, /*in_batch_txn=*/true));
         conn.Query("COMMIT");
     } catch (...) {
         conn.Query("ROLLBACK");

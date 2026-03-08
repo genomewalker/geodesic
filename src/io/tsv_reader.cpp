@@ -301,4 +301,101 @@ std::size_t count_checkm2_matches(
     return count;
 }
 
+std::unordered_map<std::string, GuncQuality> read_gunc_tsv(
+    const std::filesystem::path& path, const TsvReadOptions& opts) {
+    std::ifstream in(path);
+    if (!in) {
+        throw TsvParseError("Cannot open GUNC TSV: " + path.string());
+    }
+
+    std::string line;
+    std::size_t line_num = 0;
+
+    int col_name = -1, col_pass = -1, col_css = -1, col_cont = -1;
+
+    if (opts.has_header) {
+        if (!std::getline(in, line)) {
+            throw TsvParseError("Empty GUNC TSV: " + path.string());
+        }
+        ++line_num;
+        auto headers = split_line(line, opts.delimiter);
+        if (opts.trim_fields) {
+            for (auto& h : headers) h = trim(h);
+        }
+
+        col_name = find_col(headers, {"genome_id", "genome"});
+        col_pass = find_col(headers, {"pass.gunc", "pass_gunc"});
+        col_css  = find_col(headers, {"clade_separation_score", "css"});
+        col_cont = find_col(headers, {"contamination_portion"});
+
+        if (col_name < 0 || col_pass < 0 || col_css < 0 || col_cont < 0) {
+            throw TsvParseError(
+                "GUNC TSV missing required columns (genome_id, pass.GUNC, "
+                "clade_separation_score, contamination_portion): " + path.string());
+        }
+    } else {
+        col_name = 0;
+        col_pass = 8;
+        col_css  = 6;
+        col_cont = 7;
+    }
+
+    std::unordered_map<std::string, GuncQuality> result;
+
+    while (std::getline(in, line)) {
+        ++line_num;
+        if (is_comment_or_empty(line, opts)) continue;
+
+        auto fields = split_line(line, opts.delimiter);
+        if (opts.trim_fields) {
+            for (auto& f : fields) f = trim(f);
+        }
+
+        int max_col = std::max({col_name, col_pass, col_css, col_cont});
+        if (static_cast<int>(fields.size()) <= max_col) {
+            spdlog::warn("{}:{}: expected at least {} fields, got {}",
+                         path.string(), line_num, max_col + 1, fields.size());
+            continue;
+        }
+
+        GuncQuality q;
+        // Strip file extensions from genome_id (e.g. .fna, .fa, .fasta, .gz)
+        std::string gid = fields[col_name];
+        for (const auto& ext : {".fna.gz", ".fa.gz", ".fasta.gz", ".fna", ".fa", ".fasta"}) {
+            if (gid.size() > std::strlen(ext) &&
+                gid.compare(gid.size() - std::strlen(ext), std::strlen(ext), ext) == 0) {
+                gid.erase(gid.size() - std::strlen(ext));
+                break;
+            }
+        }
+        q.genome_id = canonical_accession(gid);
+
+        // pass.GUNC: "True" or "False"
+        const std::string& pass_str = fields[col_pass];
+        q.pass_gunc = (pass_str == "True" || pass_str == "true" || pass_str == "1");
+
+        try {
+            q.clade_separation_score = std::stof(fields[col_css]);
+            q.contamination_portion  = std::stof(fields[col_cont]);
+        } catch (const std::exception& e) {
+            spdlog::warn("{}:{}: failed to parse numeric fields: {}",
+                         path.string(), line_num, e.what());
+            continue;
+        }
+
+        if (opts.strict) {
+            if (result.find(q.genome_id) != result.end()) {
+                throw TsvParseError("Duplicate genome_id '" + q.genome_id +
+                                    "' at line " + std::to_string(line_num) +
+                                    " in " + path.string());
+            }
+        }
+
+        result.insert_or_assign(q.genome_id, q);
+    }
+
+    spdlog::info("Read {} GUNC entries from {}", result.size(), path.string());
+    return result;
+}
+
 } // namespace derep

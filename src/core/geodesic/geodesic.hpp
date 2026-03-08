@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <random>
 #include <unordered_set>
@@ -66,11 +67,16 @@ struct EmbeddingStore {
 struct GenomeEmbedding {
     uint64_t genome_id;
     std::vector<float> vector;        // CountSketch unit vector (dim=256)
-    std::vector<uint64_t> oph_sig;    // Raw OPH signature for exact Jaccard refinement
+    std::vector<uint16_t> oph_sig;         // 16-bit OPH signature (2× RAM vs uint32; bias-corrected Jaccard)
+    std::vector<uint16_t> oph_sig2;        // Second OPH sketch (seed=1337) for variance reduction
+    std::vector<uint64_t> real_bins_mask;  // Bitmask: bit t=1 iff bin t has a real k-mer (pre-densification)
     float isolation_score;            // Mean distance to k nearest neighbors
     float quality_score;              // completeness - 5*contamination (0-100)
+    float chimera_score = 0.0f;       // Inter-contig OPH heterogeneity [0,1]; 0 = not computed
     uint64_t genome_size;
     std::filesystem::path path;
+    uint32_t n_real_bins = 0;         // non-empty OPH bins before densification
+    uint32_t n_contigs = 0;           // Number of sequences (FASTA '>' headers)
 };
 
 // Calibration model: embedding_distance → [ANI_lower, ANI_upper]
@@ -130,7 +136,7 @@ public:
         int embedding_dim = 256;     // Higher dim preserves more sketch information
         int sketch_size = 10000;     // Large sketch for accurate Jaccard at high ANI
         int kmer_size = 21;          // Larger k is more discriminative at >95% ANI
-        int syncmer_s = 8;
+        int syncmer_s = 0;           // 0 = disabled, >0 = open-syncmer OPH prefilter
 
         // ANI threshold for redundancy
         double ani_threshold = 0.95;
@@ -142,6 +148,9 @@ public:
 
         // Parallelism
         int threads = 4;
+        // Max concurrent NFS file readers during genome embedding.
+        // 0 = auto: threads (total budget for this taxon caps NFS readers).
+        int io_threads = 0;
 
         // Calibration
         int calibration_samples = 500;
@@ -153,6 +162,24 @@ public:
         float diversity_threshold = 0.02f;    // Stop when diversity gain < this
         float min_rep_distance = 0.025f;      // Min distance between reps (electrostatic merge threshold)
         float max_rep_fraction = 0.2f;        // At most this fraction as reps
+
+        // Nyström spectral embedding (always active for n > SMALL_N_THRESHOLD)
+        // -1  = auto: n_anchors = min(n, max(200, 2 * embedding_dim))
+        // >0  = explicit anchor count
+        int nystrom_anchors = -1;
+
+        // Target fraction of Gram matrix variance captured by the embedding.
+        // Auto-selects embedding dimension d as minimum to explain >= this fraction.
+        float nystrom_min_variance = 0.95f;
+
+        // Tikhonov regularization (fraction of mean diagonal)
+        float nystrom_diagonal_loading = 0.01f;
+        // Symmetric Laplacian normalization of Gram matrix
+        bool nystrom_degree_normalize = true;
+
+        // Internal: set by apply_nystrom_embeddings(). After L2 normalisation,
+        // dot(e_A,e_B) ≈ J(A,B)/captured_variance.
+        float nystrom_captured_variance = 1.0f;
     };
 
     explicit GeodesicDerep(Config cfg);
@@ -184,8 +211,12 @@ public:
 
     // Phase 1-2: Embed all genomes and build spatial index
     // quality_scores: path.string() → quality (completeness - 5*contamination)
+    // emb_store/taxonomy: if provided, CountSketch vectors are saved asynchronously
+    //   (background thread overlapping Nyström/HNSW/FPS) for future warm runs.
     void build_index(const std::vector<std::filesystem::path>& genomes,
-                     const std::unordered_map<std::string, double>& quality_scores = {});
+                     const std::unordered_map<std::string, double>& quality_scores = {},
+                     db::EmbeddingStore* emb_store = nullptr,
+                     const std::string& taxonomy = "");
 
     // Incremental build: load existing embeddings from store, embed only missing genomes
     // Returns number of newly embedded genomes
@@ -198,15 +229,20 @@ public:
     // Save embeddings to store (call after build_index or compute_isolation_scores)
     void save_embeddings_to_store(db::EmbeddingStore& store, const std::string& taxonomy);
 
+    // Async variant: uses pre-Nyström float snapshot, streams in batches to cap RAM overhead.
+    void save_embeddings_async(db::EmbeddingStore& store, const std::string& taxonomy,
+                               std::vector<std::vector<float>>&& vec_snap);
+
     // Get representative genome IDs (after select_representatives)
     std::vector<uint64_t> get_representative_ids() const { return last_representative_ids_; }
-
-    // Phase 3: Compute isolation scores (gravitational potential)
-    void compute_isolation_scores();
 
     // Exclude paths from being selected as representatives (sets quality score to 0).
     // Call after build_index and detect_contamination, before select_representatives.
     void exclude_from_reps(const std::unordered_set<std::string>& paths);
+
+    // Pre-seed paths as representatives before FPS runs.
+    // Call after build_index and before select_representatives.
+    void set_pinned_representatives(const std::unordered_set<std::string>& paths);
 
     // Phase 4: Select representatives with lazy certified ANI
     std::vector<SimilarityEdge> select_representatives();
@@ -222,25 +258,66 @@ public:
     size_t total_certified_redundant() const { return certified_redundant_; }
     size_t total_certified_unique() const { return certified_unique_; }
 
-    // Exact Jaccard from raw OPH signatures: J = #{t: sig_A[t]==sig_B[t]} / M
-    static double refine_jaccard(const std::vector<uint64_t>& sig_a,
-                                 const std::vector<uint64_t>& sig_b);
+    // Exact Jaccard from OPH signatures with b-bit bias correction.
+    // Works for both uint16_t (stored) and uint32_t (in-memory OPH path).
+    template<typename T>
+    static double refine_jaccard(const std::vector<T>& sig_a, const std::vector<T>& sig_b) {
+        if (sig_a.empty() || sig_b.empty()) return 0.0;
+        const size_t m = std::min(sig_a.size(), sig_b.size());
+        size_t matches = 0;
+        for (size_t t = 0; t < m; ++t)
+            if (sig_a[t] == sig_b[t]) ++matches;
+        const double j_raw = static_cast<double>(matches) / static_cast<double>(m);
+        if constexpr (sizeof(T) <= 2) {
+            // b-bit bias correction: J_true ≈ (J_obs - 2^-b) / (1 - 2^-b), b=16
+            constexpr double inv_2b = 1.0 / 65536.0;
+            return std::max(0.0, (j_raw - inv_2b) / (1.0 - inv_2b));
+        }
+        return j_raw;
+    }
 
     // ANI from exact Jaccard via Mash formula (calibration-free)
     static double jaccard_to_ani(double J, int kmer_size);
 
     // Contamination detection: returns genome IDs with anomalous embedding patterns
-    // Contaminated genomes often appear as outliers (far from centroid) or
-    // have inconsistent neighbor patterns (low isolation despite being outliers)
     struct ContaminationCandidate {
         uint64_t genome_id;
-        float centroid_distance;    // Distance from species centroid
+        float centroid_distance;    // Distance from species centroid (informational)
         float isolation_score;      // Mean distance to k-NN
-        float anomaly_score;        // Combined anomaly metric
+        float anomaly_score;        // isolation_score (repurposed field)
+        float genome_size_zscore;   // Z-score of genome size within taxon
+        bool nn_outlier;            // isolation_score > 90% ANI threshold (primary: misassigned)
+        float kmer_div_zscore = 0.0f; // k-mer diversity z-score (n_real_bins/kbp vs population; informational)
+        float chimera_score = 0.0f; // Inter-contig OPH heterogeneity [0,1]; > 0.45 = chimeric
         std::filesystem::path path;
     };
     std::vector<ContaminationCandidate> detect_contamination_candidates(
         float z_threshold = 2.0f) const;
+
+    // NN distance distribution from HNSW.
+    struct NNDistStats {
+        double p5;
+        double p50;
+        double p95;
+    };
+
+    // Phase 3: Compute isolation scores AND return NN distance stats in one HNSW pass.
+    // Replaces the old void compute_isolation_scores() + separate compute_nn_distance_stats().
+    NNDistStats compute_isolation_scores();
+
+    // Update thresholds after build_index (allows data-driven calibration).
+    void set_min_rep_distance(float d) { cfg_.min_rep_distance = d; }
+    void set_diversity_threshold(float d) { cfg_.diversity_threshold = d; }
+
+    // Returns (path, genome_length_bp) for all embedded genomes after build_index.
+    // Used to persist genome_length to the DB (OPH sketch computes it; input TSV doesn't have it).
+    std::vector<std::pair<std::filesystem::path, uint64_t>> get_genome_sizes() const;
+
+    // Genomes that permanently failed to read (all retries exhausted) during build_index.
+    // Each entry: (file_path, error_reason). Caller should record these in jobs_failed.
+    const std::vector<std::pair<std::string, std::string>>& failed_reads() const {
+        return failed_reads_;
+    }
 
     // Diversity statistics computed from embeddings (no skani needed)
     struct DiversityMetrics {
@@ -287,12 +364,42 @@ private:
     // Path to accession mapping (for incremental store integration)
     std::unordered_map<std::string, std::string> path_to_accession_;
 
-    // Generate embedding for single genome
+    // Pinned representative paths (pre-seeded before FPS)
+    std::unordered_set<std::string> pinned_rep_paths_;
+
+    // Async embedding save (started in build_index, joined in destructor)
+    std::future<void> async_save_future_;
+
+    // Whether Nyström embedding was applied (false → exact Jaccard FPS for small n)
+    bool nystrom_applied_ = false;
+
+    // Genomes that failed to read after retries: (file_path, reason).
+    // Written from OMP threads (mutex-protected); read by taxon_processor after build_index.
+    std::vector<std::pair<std::string, std::string>> failed_reads_;
+    std::mutex failed_reads_mutex_;
+
+    // Decompressed FASTA buffers cached during embed_genome() for reuse in
+    // materialize_sig2_for_indices() — avoids NFS re-read for anchor sig2 sketching.
+    // Indexed by genome id (== embeddings_ index). Freed after Nyström step.
+    static constexpr size_t kBufCacheLimitBytes = 2'500'000'000ULL;
+    std::vector<std::vector<char>> buf_cache_;
+    std::atomic<size_t> buf_cache_bytes_{0};
+
+    // Generate embedding for single genome (reads from NFS)
     GenomeEmbedding embed_genome(const std::filesystem::path& path, uint64_t id);
 
-    // CountSketch projection of OPH signature → unit embedding vector.
-    // E[dot(embed(A), embed(B))] ≈ J(A,B)  →  calibration-free ANI formula.
-    std::vector<float> countsketch_project(const std::vector<uint64_t>& oph_signature) const;
+    // Generate embedding from pre-decompressed FASTA buffer (producer-consumer path)
+    GenomeEmbedding embed_genome_from_buffer(const char* data, size_t len,
+                                              uint64_t id, const std::filesystem::path& path);
+
+    // Nyström spectral embedding: replace placeholder vectors with data-adapted
+    // projections onto the top eigenvectors of the OPH Jaccard kernel.
+    void apply_nystrom_embeddings();
+
+    // Lazily materialize oph_sig2 for a subset of genome indices by re-reading
+    // their FASTA files. Used for anchors (Gram matrix) and borderline candidates
+    // (Phase 7 verification). Skips indices that already have sig2 or lack a path.
+    void materialize_sig2_for_indices(const std::vector<size_t>& indices);
 
     // Brute-force O(n²) isolation scores for small n (no HNSW needed)
     void compute_isolation_scores_brute();

@@ -175,18 +175,29 @@ void ResultsWriter::write_contamination(db::DBManager& db) const {
     std::ofstream out(path);
     if (!out) throw std::runtime_error("Cannot open output file: " + path.string());
 
-    out << "taxonomy\taccession\tcentroid_distance\tisolation_score\tanomaly_score\n";
+    out << "taxonomy\taccession\tnn_outlier\tisolation_score\tkmer_div_zscore\t"
+           "genome_size_zscore\tcentroid_distance\tanomaly_score\t"
+           "genome_length_bp\tn_contigs\n";
 
     auto result = db.query(
-        "SELECT taxonomy, accession, centroid_distance, isolation_score, anomaly_score "
-        "FROM contamination_candidates ORDER BY taxonomy, anomaly_score DESC");
+        "SELECT c.taxonomy, c.accession, c.nn_outlier, c.isolation_score, "
+        "c.kmer_div_zscore, c.genome_size_zscore, c.centroid_distance, c.anomaly_score, "
+        "COALESCE(g.genome_length, 0), COALESCE(g.n_contigs, 0) "
+        "FROM contamination_candidates c "
+        "LEFT JOIN genomes g ON c.accession = g.accession "
+        "ORDER BY c.taxonomy, c.anomaly_score DESC");
 
     for (auto& row : *result) {
-        out << row.GetValue<std::string>(0) << '\t'
-            << row.GetValue<std::string>(1) << '\t'
-            << row.GetValue<double>(2) << '\t'
-            << row.GetValue<double>(3) << '\t'
-            << row.GetValue<double>(4) << '\n';
+        out << row.GetValue<std::string>(0) << '\t'   // taxonomy
+            << row.GetValue<std::string>(1) << '\t'   // accession
+            << row.GetValue<bool>(2) << '\t'          // nn_outlier
+            << row.GetValue<double>(3) << '\t'        // isolation_score
+            << row.GetValue<double>(4) << '\t'        // kmer_div_zscore
+            << row.GetValue<double>(5) << '\t'        // genome_size_zscore
+            << row.GetValue<double>(6) << '\t'        // centroid_distance
+            << row.GetValue<double>(7) << '\t'        // anomaly_score
+            << row.GetValue<int64_t>(8) << '\t'       // genome_length_bp
+            << row.GetValue<int32_t>(9) << '\n';      // n_contigs
     }
 
     spdlog::info("Wrote contamination candidates to {}", path.string());

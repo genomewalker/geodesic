@@ -23,6 +23,7 @@ void insert_genomes(DBManager& db, const std::vector<Genome>& genomes) {
         else
             appender.AppendDefault();
         appender.Append<double>(g.quality_score());
+        appender.Append<int32_t>(0);  // n_contigs: filled after sketching
         appender.EndRow();
     }
     appender.Close();
@@ -63,6 +64,7 @@ void insert_taxa_and_genomes_bulk(DBManager& db, const std::vector<Taxon>& taxa)
                 else
                     genome_app.AppendDefault();
                 genome_app.Append<double>(g.quality_score());
+                genome_app.Append<int32_t>(0);  // n_contigs: filled after sketching
                 genome_app.EndRow();
             }
         }
@@ -295,6 +297,9 @@ void insert_contamination_candidates(DBManager& db, const std::string& taxonomy,
         appender.Append<double>(c.centroid_distance);
         appender.Append<double>(c.isolation_score);
         appender.Append<double>(c.anomaly_score);
+        appender.Append<double>(c.genome_size_zscore);
+        appender.Append<bool>(c.nn_outlier);
+        appender.Append<double>(c.kmer_div_zscore);
         appender.EndRow();
     }
     appender.Close();
@@ -347,6 +352,31 @@ void mark_jobs_done(DBManager& db, const std::vector<Genome>& genomes) {
 
 bool is_taxon_complete(DBManager& db, const std::string& taxonomy) {
     return get_pipeline_stage(db, taxonomy) == PipelineStage::COMPLETE;
+}
+
+void update_genome_sizes(DBManager& db,
+                          const std::unordered_map<std::string,
+                              std::pair<uint64_t, uint32_t>>& accession_sizes) {
+    if (accession_sizes.empty()) return;
+    auto& conn = db.thread_connection();
+    // Bulk UPDATE via temp table + Appender — O(1) SQL vs O(n) prepared executions.
+    conn.Query("CREATE TEMP TABLE IF NOT EXISTS _tmp_genome_sizes "
+               "(accession VARCHAR, genome_length BIGINT, n_contigs INTEGER)");
+    conn.Query("DELETE FROM _tmp_genome_sizes");
+    {
+        duckdb::Appender app(conn, "_tmp_genome_sizes");
+        for (const auto& [acc, sz] : accession_sizes) {
+            app.BeginRow();
+            app.Append<duckdb::string_t>(duckdb::string_t(acc));
+            app.Append<int64_t>(static_cast<int64_t>(sz.first));
+            app.Append<int32_t>(static_cast<int32_t>(sz.second));
+            app.EndRow();
+        }
+        app.Close();
+    }
+    conn.Query("UPDATE genomes SET genome_length = s.genome_length, n_contigs = s.n_contigs "
+               "FROM _tmp_genome_sizes s WHERE genomes.accession = s.accession");
+    conn.Query("DROP TABLE _tmp_genome_sizes");
 }
 
 } // namespace derep::db::ops

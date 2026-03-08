@@ -49,10 +49,19 @@ struct ContaminationRecord {
     double centroid_distance;
     double isolation_score;
     double anomaly_score;
+    double genome_size_zscore = 0.0;
+    bool nn_outlier = false;
+    double kmer_div_zscore = 0.0;
 };
 
 void insert_contamination_candidates(DBManager& db, const std::string& taxonomy,
                                       const std::vector<ContaminationRecord>& candidates);
+
+// Batch-update genome_length and n_contigs after embedding (values not known at insert time).
+// accession_sizes: accession → {genome_length_bp, n_contigs}
+void update_genome_sizes(DBManager& db,
+                          const std::unordered_map<std::string,
+                              std::pair<uint64_t, uint32_t>>& accession_sizes);
 
 // ani_map: accession → ANI (0-100). Representatives get 100.0. Absent entries → NULL.
 void insert_genomes_derep(DBManager& db, const std::string& taxonomy,

@@ -11,7 +11,9 @@ struct Config {
     std::filesystem::path db_path{"geodesic.db"};
     std::optional<std::filesystem::path> selected_taxa_file;
     std::optional<std::filesystem::path> checkm2_file;
+    std::optional<std::filesystem::path> gunc_file;
     std::optional<std::filesystem::path> fixed_taxa_file;
+    std::optional<std::filesystem::path> fixed_reps_file;
     std::optional<std::filesystem::path> out_dir;
     std::string prefix;
     std::filesystem::path tmp_dir{"/tmp"};
@@ -25,10 +27,13 @@ struct Config {
     // Parallelism
     int workers = 2;
     int threads = 4;
+    // Max concurrent NFS file readers (0 = auto: threads)
+    int io_threads = 0;
 
     // Thresholds
     double z_threshold = 2.0;
     double ani_threshold = 95.0;
+    float chimera_zscore = 3.0f;
 
     // GEODESIC params (geodesic_ prefix dropped)
     bool auto_calibrate = true;
@@ -36,8 +41,11 @@ struct Config {
     int embedding_dim = 512;
     int kmer_size = 21;
     int sketch_size = 10000;
+    int syncmer_s = 0;
     float diversity_threshold = 0.02f;
     float max_rep_fraction = 0.2f;
+    float nystrom_diagonal_loading = 0.01f;
+    bool nystrom_degree_normalize = true;
 
     // Incremental embedding store (DuckDB-VSS)
     std::optional<std::filesystem::path> embedding_db;

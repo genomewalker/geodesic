@@ -36,6 +36,13 @@ struct CheckM2Quality {
     }
 };
 
+struct GuncQuality {
+    std::string genome_id;
+    bool pass_gunc = true;                  // pass.GUNC column
+    float clade_separation_score = 0.0f;    // CSS: higher = more chimeric; fail threshold ≈ 0.45
+    float contamination_portion = 0.0f;     // fraction of contaminated genes
+};
+
 [[nodiscard]] std::string canonical_accession(std::string_view acc);
 
 [[nodiscard]] std::vector<GenomeRow> read_genomes_tsv(
@@ -43,6 +50,10 @@ struct CheckM2Quality {
     const TsvReadOptions& opts = {});
 
 [[nodiscard]] std::unordered_map<std::string, CheckM2Quality> read_checkm2_tsv(
+    const std::filesystem::path& path,
+    const TsvReadOptions& opts = {});
+
+[[nodiscard]] std::unordered_map<std::string, GuncQuality> read_gunc_tsv(
     const std::filesystem::path& path,
     const TsvReadOptions& opts = {});
 

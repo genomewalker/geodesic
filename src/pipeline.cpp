@@ -179,8 +179,8 @@ int run_pipeline(Config& cfg) {
     spdlog::info("Temp dir: {}", temp_dir.string());
 
     // 3. Open DB and create schema
-    // Only override db_path if user didn't specify a custom path
-    if (cfg.db_path.filename() == "geodesic.db") {
+    // Only auto-place DB if user used the bare default name (not an explicit path)
+    if (cfg.db_path == fs::path("geodesic.db")) {
         cfg.db_path = results_dir / (cfg.prefix + ".db");
     }
     db::DBManager db({.db_path = cfg.db_path});
@@ -197,6 +197,15 @@ int run_pipeline(Config& cfg) {
         spdlog::info("CheckM2: {} of {} genomes have quality data",
                      matched, genome_rows.size());
     }
+
+    std::unordered_map<std::string, GuncQuality> gunc_scores;
+    if (cfg.gunc_file) {
+        gunc_scores = read_gunc_tsv(*cfg.gunc_file);
+        spdlog::info("GUNC: {} entries loaded from {}", gunc_scores.size(),
+                     cfg.gunc_file->string());
+    }
+    const std::unordered_map<std::string, GuncQuality>* gunc_scores_ptr =
+        cfg.gunc_file ? &gunc_scores : nullptr;
 
     std::unordered_map<std::string, std::string> fixed_taxa;
     if (cfg.fixed_taxa_file) {
@@ -263,10 +272,10 @@ int run_pipeline(Config& cfg) {
     std::vector<int> taxon_threads(taxa.size(), 1);
     {
         const size_t n = taxa.size();
-        if (n >= 4) {
+        if (n >= 50) {
+            // Large fleet: quantile-based tiers give reliable percentile thresholds.
             std::vector<size_t> sizes(n);
             for (size_t i = 0; i < n; ++i) sizes[i] = taxa[i].size();
-            // sorted copy for quantile thresholds
             std::vector<size_t> sorted_sizes = sizes;
             std::sort(sorted_sizes.begin(), sorted_sizes.end());
             const size_t p25 = sorted_sizes[n * 25 / 100];
@@ -280,7 +289,6 @@ int run_pipeline(Config& cfg) {
             const int t_giant  = total_budget;
             const int t_large  = std::max(1, total_budget / 4);
             const int t_medium = std::max(1, total_budget / 8);
-            // t_small = 1 (max concurrency for the majority)
             size_t cnt_giant = 0, cnt_large = 0, cnt_medium = 0, cnt_small = 0;
             for (size_t i = 0; i < n; ++i) {
                 if      (sizes[i] >= p95) { taxon_threads[i] = t_giant;  ++cnt_giant; }
@@ -293,8 +301,29 @@ int run_pipeline(Config& cfg) {
                 total_budget, cnt_giant, t_giant, total_budget / t_giant,
                 cnt_large, t_large, cnt_medium, t_medium, cnt_small);
         } else {
-            spdlog::info("Thread budget: {} total ({} workers x {} threads per taxon)",
-                         total_budget, cfg.workers, cfg.threads);
+            // Small fleet: quantile thresholds collapse with few taxa, so allocate
+            // threads proportional to genome count (work scales as O(n) for OPH+embed).
+            // Tiny taxa (≤10 genomes, handled as batches) always get 1 thread.
+            size_t large_genomes = 0;
+            for (size_t i = 0; i < n; ++i)
+                if (taxa[i].size() > 10)
+                    large_genomes += taxa[i].size();
+            if (large_genomes > 0) {
+                for (size_t i = 0; i < n; ++i) {
+                    if (taxa[i].size() <= 10) continue;
+                    taxon_threads[i] = std::max(1, static_cast<int>(std::round(
+                        static_cast<double>(total_budget) *
+                        static_cast<double>(taxa[i].size()) /
+                        static_cast<double>(large_genomes))));
+                }
+            } else {
+                for (size_t i = 0; i < n; ++i) taxon_threads[i] = total_budget;
+            }
+            spdlog::info("Execution plan (proportional, budget={}, {} taxa):",
+                         total_budget, n);
+            for (size_t i = 0; i < n; ++i)
+                spdlog::info("  [{}] {} genomes → {} threads",
+                             i, taxa[i].size(), taxon_threads[i]);
         }
     }
 
@@ -364,10 +393,10 @@ int run_pipeline(Config& cfg) {
             int desired  = taxon_threads[i];
             int acquired = budget_acquire(desired);
             pool.detach_task(
-                [&taxa, i, &cfg, &db, &cache, emb_store_ptr,
+                [&taxa, i, &cfg, &db, &cache, emb_store_ptr, gunc_scores_ptr,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release, acquired] {
-                    auto result = process_taxon(taxa[i], cfg, acquired, db, cache, emb_store_ptr);
+                    auto result = process_taxon(taxa[i], cfg, acquired, db, cache, emb_store_ptr, gunc_scores_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         done_queue.push(std::move(result));

@@ -7,6 +7,7 @@ namespace derep::db {
 DBManager::DBManager(Options options) : options_(std::move(options)) {
     spdlog::debug("Opening database: {}", options_.db_path.string());
     duckdb::DBConfig cfg;
+    cfg.options.maximum_threads = 2;  // DuckDB only does bulk I/O here; cap its thread pool
     database_ = std::make_unique<duckdb::DuckDB>(options_.db_path.string(), &cfg);
 }
 

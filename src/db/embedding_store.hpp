@@ -35,6 +35,16 @@ struct GenomeEmbedding {
     float isolation_score = 0.0f;
     float quality_score = 50.0f;
     uint64_t genome_size = 0;
+    // OPH signature (sketch_size uint16 values). 16-bit truncation gives 2× RAM
+    // reduction vs uint32; Jaccard bias correction applied in refine_jaccard().
+    std::vector<uint16_t> oph_sig;
+    std::vector<uint16_t> oph_sig2;  // Second OPH sketch (seed=1337)
+    // Real-bin bitmask: bit t=1 iff OPH bin t held a real k-mer before densification.
+    // ceil(sketch_size/64) uint64 words = 157 words (1256 bytes) for sketch_size=10000.
+    // Required for accurate coverage metrics; n_real_bins = popcount(real_bins_mask).
+    std::vector<uint64_t> real_bins_mask;
+    uint32_t n_real_bins = 0;
+    float chimera_score = 0.0f;
 };
 
 struct NearestNeighbor {

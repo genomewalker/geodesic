@@ -1,6 +1,7 @@
 #include "db/embedding_store.hpp"
 #include "core/logging.hpp"
 #include <spdlog/spdlog.h>
+#include <cstring>
 #include <sstream>
 #include <iomanip>
 
@@ -89,9 +90,8 @@ void EmbeddingStore::close() {
 bool EmbeddingStore::load_vss_extension() {
     try {
         conn_->Query("INSTALL vss; LOAD vss;");
-        conn_->Query("SET hnsw_enable_experimental_persistence = true");
         vss_loaded_ = true;
-        spdlog::info("[EmbeddingStore] VSS extension loaded (persistent HNSW enabled)");
+        spdlog::info("[EmbeddingStore] VSS extension loaded");
         return true;
     } catch (...) {
         vss_loaded_ = false;
@@ -129,12 +129,50 @@ bool EmbeddingStore::create_schema() {
                 "    isolation_score FLOAT DEFAULT 0.0,"
                 "    quality_score FLOAT DEFAULT 50.0,"
                 "    genome_size BIGINT DEFAULT 0,"
-                "    created_at TIMESTAMP DEFAULT current_timestamp"
+                "    created_at TIMESTAMP DEFAULT current_timestamp,"
+                "    oph_sig BLOB,"
+                "    oph_sig2 BLOB,"
+                "    real_bins_mask BLOB,"
+                "    chimera_score FLOAT DEFAULT 0.0"
                 ")";
             auto result = conn_->Query(create_sql);
             if (result->HasError()) {
                 spdlog::error("[EmbeddingStore] Schema error: {}", result->GetError());
                 return false;
+            }
+        }
+
+        // Backward compat: add oph_sig / real_bins_mask to existing DBs that predate these columns.
+        {
+            auto col_check = conn_->Query("SELECT oph_sig FROM genome_embeddings LIMIT 0");
+            if (col_check->HasError()) {
+                auto r = conn_->Query("ALTER TABLE genome_embeddings ADD COLUMN oph_sig BLOB");
+                if (r->HasError())
+                    spdlog::warn("[EmbeddingStore] Could not add oph_sig column: {}", r->GetError());
+            }
+        }
+        {
+            auto col_check = conn_->Query("SELECT real_bins_mask FROM genome_embeddings LIMIT 0");
+            if (col_check->HasError()) {
+                auto r = conn_->Query("ALTER TABLE genome_embeddings ADD COLUMN real_bins_mask BLOB");
+                if (r->HasError())
+                    spdlog::warn("[EmbeddingStore] Could not add real_bins_mask column: {}", r->GetError());
+            }
+        }
+        {
+            auto col_check = conn_->Query("SELECT oph_sig2 FROM genome_embeddings LIMIT 0");
+            if (col_check->HasError()) {
+                auto r = conn_->Query("ALTER TABLE genome_embeddings ADD COLUMN oph_sig2 BLOB");
+                if (r->HasError())
+                    spdlog::warn("[EmbeddingStore] Could not add oph_sig2 column: {}", r->GetError());
+            }
+        }
+        {
+            auto col_check = conn_->Query("SELECT chimera_score FROM genome_embeddings LIMIT 0");
+            if (col_check->HasError()) {
+                auto r = conn_->Query("ALTER TABLE genome_embeddings ADD COLUMN chimera_score FLOAT DEFAULT 0.0");
+                if (r->HasError())
+                    spdlog::warn("[EmbeddingStore] Could not add chimera_score column: {}", r->GetError());
             }
         }
 
@@ -276,7 +314,8 @@ bool EmbeddingStore::insert_embeddings(const std::vector<GenomeEmbedding>& embed
             "CREATE TEMP TABLE IF NOT EXISTS _emb_stage ("
             "  accession VARCHAR, taxonomy VARCHAR, file_path VARCHAR,"
             "  embedding FLOAT[],"
-            "  isolation_score FLOAT, quality_score FLOAT, genome_size BIGINT)");
+            "  isolation_score FLOAT, quality_score FLOAT, genome_size BIGINT,"
+            "  oph_sig BLOB, oph_sig2 BLOB, real_bins_mask BLOB, chimera_score FLOAT)");
         conn_->Query("DELETE FROM _emb_stage");
 
         {
@@ -290,6 +329,34 @@ bool EmbeddingStore::insert_embeddings(const std::vector<GenomeEmbedding>& embed
                 arr.reserve(emb.embedding.size());
                 for (float v : emb.embedding) arr.push_back(duckdb::Value::FLOAT(v));
 
+                // Store OPH signature as raw BLOB (BLOB_RAW bypasses UTF-8 validation)
+                duckdb::Value oph_val;
+                if (!emb.oph_sig.empty()) {
+                    std::string sig_bytes(emb.oph_sig.size() * sizeof(uint16_t), '\0');
+                    std::memcpy(sig_bytes.data(), emb.oph_sig.data(), sig_bytes.size());
+                    oph_val = duckdb::Value::BLOB_RAW(sig_bytes);
+                } else {
+                    oph_val = duckdb::Value(duckdb::LogicalType::BLOB);
+                }
+
+                duckdb::Value oph_val2;
+                if (!emb.oph_sig2.empty()) {
+                    std::string sig_bytes2(emb.oph_sig2.size() * sizeof(uint16_t), '\0');
+                    std::memcpy(sig_bytes2.data(), emb.oph_sig2.data(), sig_bytes2.size());
+                    oph_val2 = duckdb::Value::BLOB_RAW(sig_bytes2);
+                } else {
+                    oph_val2 = duckdb::Value(duckdb::LogicalType::BLOB);
+                }
+
+                duckdb::Value mask_val;
+                if (!emb.real_bins_mask.empty()) {
+                    std::string mask_bytes(emb.real_bins_mask.size() * sizeof(uint64_t), '\0');
+                    std::memcpy(mask_bytes.data(), emb.real_bins_mask.data(), mask_bytes.size());
+                    mask_val = duckdb::Value::BLOB_RAW(mask_bytes);
+                } else {
+                    mask_val = duckdb::Value(duckdb::LogicalType::BLOB);
+                }
+
                 appender.BeginRow();
                 appender.Append<duckdb::string_t>(duckdb::string_t(emb.accession));
                 appender.Append<duckdb::string_t>(duckdb::string_t(emb.taxonomy));
@@ -298,6 +365,10 @@ bool EmbeddingStore::insert_embeddings(const std::vector<GenomeEmbedding>& embed
                 appender.Append<float>(emb.isolation_score);
                 appender.Append<float>(emb.quality_score);
                 appender.Append<int64_t>(static_cast<int64_t>(emb.genome_size));
+                appender.Append(std::move(oph_val));
+                appender.Append(std::move(oph_val2));
+                appender.Append(std::move(mask_val));
+                appender.Append<float>(emb.chimera_score);
                 appender.EndRow();
             }
             appender.Close();
@@ -308,7 +379,7 @@ bool EmbeddingStore::insert_embeddings(const std::vector<GenomeEmbedding>& embed
             "INSERT OR REPLACE INTO genome_embeddings "
             "SELECT accession, taxonomy, file_path,"
             "  embedding::FLOAT[" + std::to_string(embedding_dim_) + "],"
-            "  isolation_score, quality_score, genome_size, current_timestamp"
+            "  isolation_score, quality_score, genome_size, current_timestamp, oph_sig, oph_sig2, real_bins_mask, chimera_score"
             " FROM _emb_stage";
         auto r = conn_->Query(upsert_sql);
         if (r->HasError()) {
@@ -562,7 +633,7 @@ std::vector<GenomeEmbedding> EmbeddingStore::load_embeddings(const std::string& 
     std::lock_guard<std::recursive_mutex> lock(mutex_);
         std::string sql =
             "SELECT accession, taxonomy, file_path, embedding, "
-            "isolation_score, quality_score, genome_size "
+            "isolation_score, quality_score, genome_size, oph_sig, oph_sig2, real_bins_mask, chimera_score "
             "FROM genome_embeddings";
         if (!taxonomy.empty()) {
             sql += " WHERE taxonomy = '" + taxonomy + "'";
@@ -581,7 +652,7 @@ std::vector<GenomeEmbedding> EmbeddingStore::load_embeddings(const std::string& 
                 emb.taxonomy = chunk->GetValue(1, i).GetValue<std::string>();
                 emb.file_path = chunk->GetValue(2, i).GetValue<std::string>();
 
-                // Extract embedding array
+                // Extract embedding array (placeholder zeros — actual vectors rebuilt by Nyström)
                 auto arr = chunk->GetValue(3, i);
                 auto& children = duckdb::ArrayValue::GetChildren(arr);
                 emb.embedding.reserve(children.size());
@@ -592,6 +663,40 @@ std::vector<GenomeEmbedding> EmbeddingStore::load_embeddings(const std::string& 
                 emb.isolation_score = chunk->GetValue(4, i).GetValue<float>();
                 emb.quality_score = chunk->GetValue(5, i).GetValue<float>();
                 emb.genome_size = chunk->GetValue(6, i).GetValue<int64_t>();
+
+                // Deserialize OPH signature from BLOB
+                auto oph_val = chunk->GetValue(7, i);
+                if (!oph_val.IsNull()) {
+                    const std::string& bytes = duckdb::StringValue::Get(oph_val);
+                    size_t n_hashes = bytes.size() / sizeof(uint16_t);
+                    emb.oph_sig.resize(n_hashes);
+                    std::memcpy(emb.oph_sig.data(), bytes.data(), bytes.size());
+                }
+
+                // Deserialize second OPH signature from BLOB
+                auto oph_val2 = chunk->GetValue(8, i);
+                if (!oph_val2.IsNull()) {
+                    const std::string& bytes = duckdb::StringValue::Get(oph_val2);
+                    size_t n_hashes = bytes.size() / sizeof(uint16_t);
+                    emb.oph_sig2.resize(n_hashes);
+                    std::memcpy(emb.oph_sig2.data(), bytes.data(), bytes.size());
+                }
+
+                // Deserialize real-bin bitmask from BLOB
+                auto mask_val = chunk->GetValue(9, i);
+                if (!mask_val.IsNull()) {
+                    const std::string& bytes = duckdb::StringValue::Get(mask_val);
+                    size_t n_words = bytes.size() / sizeof(uint64_t);
+                    emb.real_bins_mask.resize(n_words);
+                    std::memcpy(emb.real_bins_mask.data(), bytes.data(), bytes.size());
+                    emb.n_real_bins = 0;
+                    for (uint64_t w : emb.real_bins_mask)
+                        emb.n_real_bins += static_cast<uint32_t>(__builtin_popcountll(w));
+                }
+
+                auto chimera_val = chunk->GetValue(10, i);
+                if (!chimera_val.IsNull())
+                    emb.chimera_score = chimera_val.GetValue<float>();
 
                 embeddings.push_back(std::move(emb));
             }

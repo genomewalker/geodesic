@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS genomes (
     genome_length BIGINT DEFAULT 0,
     completeness DOUBLE,
     contamination DOUBLE,
-    quality_score DOUBLE
+    quality_score DOUBLE,
+    n_contigs INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_genomes_taxonomy ON genomes(taxonomy);
 )sql";
@@ -193,6 +194,9 @@ CREATE TABLE IF NOT EXISTS contamination_candidates (
     centroid_distance DOUBLE NOT NULL,
     isolation_score DOUBLE NOT NULL,
     anomaly_score DOUBLE NOT NULL,
+    genome_size_zscore DOUBLE NOT NULL DEFAULT 0,
+    nn_outlier BOOLEAN NOT NULL DEFAULT FALSE,
+    kmer_div_zscore DOUBLE NOT NULL DEFAULT 0,
     PRIMARY KEY (taxonomy, accession)
 );
 CREATE INDEX IF NOT EXISTS idx_contamination_taxonomy ON contamination_candidates(taxonomy);
@@ -244,10 +248,11 @@ inline void validate_required_objects(duckdb::Connection& conn) {
 
 // Apply schema migrations to existing databases (idempotent)
 inline void migrate(duckdb::Connection& conn) {
-    static constexpr std::array<std::string_view, 3> migrations = {
+    static constexpr std::array<std::string_view, 4> migrations = {
         "ALTER TABLE diversity_stats ADD COLUMN IF NOT EXISTS n_contaminated INTEGER DEFAULT 0",
         "ALTER TABLE genomes_derep ADD COLUMN IF NOT EXISTS taxonomy VARCHAR DEFAULT ''",
         "ALTER TABLE genomes_derep ADD COLUMN IF NOT EXISTS ani_to_rep DOUBLE",
+        "ALTER TABLE genomes ADD COLUMN IF NOT EXISTS n_contigs INTEGER DEFAULT 0",
     };
     for (const auto& sql : migrations) {
         auto r = conn.Query(std::string(sql));

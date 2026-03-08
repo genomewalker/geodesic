@@ -29,7 +29,15 @@ Config parse_args(int argc, char** argv) {
     derep->add_option("--checkm2", cfg.checkm2_file, "CheckM2 quality report file")
         ->check(CLI::ExistingFile);
 
+    derep->add_option("--gunc-scores", cfg.gunc_file,
+        "GUNC output TSV (genome_id, pass.GUNC, clade_separation_score, ...)")
+        ->check(CLI::ExistingFile);
+
     derep->add_option("--fixed-taxa", cfg.fixed_taxa_file, "File with fixed representative assignments")
+        ->check(CLI::ExistingFile);
+
+    derep->add_option("--fixed-reps", cfg.fixed_reps_file,
+        "File with accessions (one per line) to always include as representatives")
         ->check(CLI::ExistingFile);
 
     derep->add_option("-o,--out-dir", cfg.out_dir, "Output directory for representative copies");
@@ -42,6 +50,11 @@ Config parse_args(int argc, char** argv) {
     derep->add_option("--threads", cfg.threads, "Total CPU threads to use")
         ->default_val(1);
 
+    derep->add_option("--io-threads", cfg.io_threads,
+        "Max concurrent NFS file readers during genome embedding (0=auto: threads)")
+        ->default_val(0)
+        ->group("");
+
     bool user_set_workers = false;
     derep->add_option("-w,--workers", cfg.workers, "Workers (advanced: overrides total_budget = workers * threads)")
         ->default_val(1)
@@ -50,6 +63,10 @@ Config parse_args(int argc, char** argv) {
 
     derep->add_option("-z,--z-threshold", cfg.z_threshold, "Z-score threshold for filtering")
         ->default_val(2.0);
+
+    derep->add_option("--chimera-zscore", cfg.chimera_zscore,
+        "K-mer diversity z-score threshold for chimera flagging (default: 3.0)")
+        ->default_val(3.0f);
 
     derep->add_option("--ani-threshold", cfg.ani_threshold, "ANI threshold for clustering")
         ->default_val(95.0);
@@ -65,10 +82,19 @@ Config parse_args(int argc, char** argv) {
         "GEODESIC k-mer size (larger = more discriminative at high ANI)")->default_val(21);
     derep->add_option("--geodesic-sketch-size", cfg.sketch_size,
         "GEODESIC sketch size (larger = more accurate Jaccard)")->default_val(10000);
+    derep->add_option("--geodesic-syncmer-s", cfg.syncmer_s,
+        "GEODESIC open-syncmer submer length (0=disabled, smaller=faster/sparser OPH)")
+        ->default_val(0);
     derep->add_option("--geodesic-diversity-threshold", cfg.diversity_threshold,
         "Min embedding distance gain to add representative (lower = more reps)")->default_val(0.02f);
     derep->add_option("--geodesic-max-rep-fraction", cfg.max_rep_fraction,
         "Max fraction of genomes as representatives")->default_val(0.2f);
+    derep->add_option("--nystrom-diagonal-loading", cfg.nystrom_diagonal_loading,
+        "Tikhonov regularization fraction for Nyström Gram matrix diagonal (default: 0.01)")
+        ->default_val(0.01);
+    derep->add_flag("--no-nystrom-degree-normalize{false},--nystrom-degree-normalize{true}",
+        cfg.nystrom_degree_normalize,
+        "Symmetric Laplacian normalization of Nyström Gram matrix (default: on)");
 
     derep->add_option("--embedding-db", cfg.embedding_db,
         "Path to persistent embedding store (DuckDB). Enables incremental updates.");
