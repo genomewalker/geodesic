@@ -263,6 +263,7 @@ public:
     static double refine_jaccard(const std::vector<T>& sig_a, const std::vector<T>& sig_b) {
         if (sig_a.empty() || sig_b.empty()) return 0.0;
         const size_t m = std::min(sig_a.size(), sig_b.size());
+        if (m == 0) return 0.0;
         size_t matches = 0;
         for (size_t t = 0; t < m; ++t)
             if (sig_a[t] == sig_b[t]) ++matches;
@@ -341,6 +342,7 @@ public:
 
 private:
     Config cfg_;
+    int runtime_dim_ = 0;  // Actual embedding dim after Nystrom (may differ from cfg_.embedding_dim)
     std::vector<GenomeEmbedding> embeddings_;
     EmbeddingStore store_;  // SoA layout for SIMD-friendly access
     ANICalibrator calibrator_;

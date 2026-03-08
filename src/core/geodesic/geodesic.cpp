@@ -33,6 +33,12 @@
 #define GEODESIC_USE_AVX2 0
 #endif
 
+#if defined(__FMA__)
+#define GEODESIC_USE_FMA 1
+#else
+#define GEODESIC_USE_FMA 0
+#endif
+
 // OpenMP support
 #if defined(_OPENMP)
 #include <omp.h>
@@ -63,17 +69,28 @@ float dot_product_simd(const float* a, const float* b, size_t dim) {
         __m256 va3 = _mm256_loadu_ps(a + i + 24);
         __m256 vb3 = _mm256_loadu_ps(b + i + 24);
 
+#if GEODESIC_USE_FMA
         sum = _mm256_fmadd_ps(va0, vb0, sum);
         sum = _mm256_fmadd_ps(va1, vb1, sum);
         sum = _mm256_fmadd_ps(va2, vb2, sum);
         sum = _mm256_fmadd_ps(va3, vb3, sum);
+#else
+        sum = _mm256_add_ps(_mm256_mul_ps(va0, vb0), sum);
+        sum = _mm256_add_ps(_mm256_mul_ps(va1, vb1), sum);
+        sum = _mm256_add_ps(_mm256_mul_ps(va2, vb2), sum);
+        sum = _mm256_add_ps(_mm256_mul_ps(va3, vb3), sum);
+#endif
     }
 
     // Process remaining 8-float blocks
     for (; i + 8 <= dim; i += 8) {
         __m256 va = _mm256_loadu_ps(a + i);
         __m256 vb = _mm256_loadu_ps(b + i);
+#if GEODESIC_USE_FMA
         sum = _mm256_fmadd_ps(va, vb, sum);
+#else
+        sum = _mm256_add_ps(_mm256_mul_ps(va, vb), sum);
+#endif
     }
 
     // Horizontal sum
@@ -108,6 +125,7 @@ float dot_product_simd(const float* a, const float* b, size_t dim) {
 static double refine_jaccard_ptr(const uint16_t* __restrict a,
                                   const uint16_t* __restrict b,
                                   size_t m) {
+    if (m == 0) return 0.0;
     size_t matches = 0;
 #if GEODESIC_USE_AVX2
     const size_t avx_n = m & ~static_cast<size_t>(15);  // round down to multiple of 16
@@ -217,6 +235,7 @@ struct GeodesicDerep::HNSWIndex {
         float radius,
         const std::unordered_set<uint64_t>* filter = nullptr) const {
 
+        if (!index || !embeddings || embeddings->empty()) return {};
         std::vector<std::pair<uint64_t, float>> result;
         for (const auto& emb : *embeddings) {
             if (filter && filter->find(emb.genome_id) == filter->end()) continue;
@@ -293,6 +312,8 @@ void ANICalibrator::fit(const std::vector<std::pair<double, double>>& samples) {
 
         ani_lower_curve_[i] = nearby_anis[lower_idx] - lower_margin_;
         ani_upper_curve_[i] = nearby_anis[upper_idx] + upper_margin_;
+        ani_lower_curve_[i] = std::clamp(ani_lower_curve_[i], 0.0, 1.0);
+        ani_upper_curve_[i] = std::clamp(ani_upper_curve_[i], 0.0, 1.0);
     }
 
     // Enforce monotonicity (lower should decrease, upper should decrease with distance)
@@ -342,6 +363,10 @@ ANICalibrator::Bounds ANICalibrator::predict(double embedding_distance) const {
 
     double lower = ani_lower_curve_[idx - 1] + t * (ani_lower_curve_[idx] - ani_lower_curve_[idx - 1]);
     double upper = ani_upper_curve_[idx - 1] + t * (ani_upper_curve_[idx] - ani_upper_curve_[idx - 1]);
+
+    if (lower > upper) std::swap(lower, upper);
+    lower = std::clamp(lower, 0.0, 1.0);
+    upper = std::clamp(upper, 0.0, 1.0);
 
     return {lower, upper};
 }
@@ -638,6 +663,7 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
 
 GeodesicDerep::GeodesicDerep(Config cfg)
     : cfg_(std::move(cfg))
+    , runtime_dim_(cfg_.embedding_dim)
     , index_(std::make_unique<HNSWIndex>()) {
 }
 
@@ -651,8 +677,10 @@ GeodesicDerep::~GeodesicDerep() {
 
 float GeodesicDerep::angular_distance(const std::vector<float>& a,
                                        const std::vector<float>& b) {
+    const size_t d = std::min(a.size(), b.size());
+    if (a.size() != b.size()) spdlog::warn("angular_distance: dim mismatch {} vs {}", a.size(), b.size());
     // Cosine similarity → angular distance
-    float dot = dot_product_simd(a.data(), b.data(), std::min(a.size(), b.size()));
+    float dot = dot_product_simd(a.data(), b.data(), d);
     // Clamp for numerical stability
     dot = std::max(-1.0f, std::min(1.0f, dot));
     // Angular distance in [0, 1] range
@@ -730,12 +758,20 @@ private:
                 const std::string apath = paths_[look].string();
                 int fd = ::open(apath.c_str(), O_RDONLY);
                 if (fd >= 0) {
-                    ::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL | POSIX_FADV_WILLNEED);
+                    ::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+                    ::posix_fadvise(fd, 0, 0, POSIX_FADV_WILLNEED);
                     ::close(fd);
                 }
             }
 
-            auto d = GzReader::decompress_file(paths_[i].string());
+            std::vector<char> d;
+            try {
+                d = GzReader::decompress_file(paths_[i].string());
+            } catch (const std::exception& ex) {
+                spdlog::warn("GenomePrefetcher: read failed for {}: {}", paths_[i].filename().string(), ex.what());
+            } catch (...) {
+                spdlog::warn("GenomePrefetcher: read failed for {}: unknown error", paths_[i].filename().string());
+            }
 
             std::unique_lock<std::mutex> lk(mu_);
             not_full_.wait(lk, [&] { return queue_.size() < cap_ || cancelled_; });
@@ -779,6 +815,15 @@ GenomeEmbedding GeodesicDerep::embed_genome(const std::filesystem::path& path, u
                      path.filename().string(), read_error);
         std::lock_guard<std::mutex> lock(failed_reads_mutex_);
         failed_reads_.emplace_back(path.string(), read_error);
+
+        GenomeEmbedding emb;
+        emb.genome_id = id;
+        emb.vector.assign(cfg_.embedding_dim, 0.0f);
+        emb.isolation_score = 0.0f;
+        emb.quality_score = 0.0f;
+        emb.genome_size = 0;
+        emb.path = path;
+        return emb;
     }
 
     MinHasher hasher({
@@ -997,12 +1042,26 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
     #pragma omp parallel for schedule(dynamic, 1)
     for (size_t i = 0; i < n; ++i) {
         io_sem.acquire();
-        embeddings_[i] = embed_genome(genomes[i], i);
+        try {
+            embeddings_[i] = embed_genome(genomes[i], i);
+        } catch (const std::exception& e) {
+            spdlog::error("GEODESIC: embed_genome exception for {}: {}", genomes[i].filename().string(), e.what());
+            embeddings_[i].genome_id = i;
+            embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+            embeddings_[i].quality_score = 0.0f;
+            embeddings_[i].path = genomes[i];
+        } catch (...) {
+            spdlog::error("GEODESIC: embed_genome unknown exception for {}", genomes[i].filename().string());
+            embeddings_[i].genome_id = i;
+            embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+            embeddings_[i].quality_score = 0.0f;
+            embeddings_[i].path = genomes[i];
+        }
         io_sem.release();
         auto it = quality_scores.find(path_strs[i]);
         if (it != quality_scores.end())
             embeddings_[i].quality_score = static_cast<float>(it->second);
-        else
+        else if (embeddings_[i].quality_score != 0.0f)
             embeddings_[i].quality_score = 50.0f;
         progress.increment();
     }
@@ -1095,6 +1154,7 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
 }
 
 GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
+    if (embeddings_.empty()) return {0.0, 0.0, 0.0};
     if (!index_->index) {
         compute_isolation_scores_brute();
         // For small n (no HNSW), compute 1-NN distances brute-force from SoA
@@ -1402,7 +1462,7 @@ void GeodesicDerep::apply_nystrom_embeddings() {
         float cumsum = 0.0f;
         for (int i = static_cast<int>(n_anchors) - 1;
              i >= 0 && actual_d <= max_d; --i) {
-            cumsum += solver.eigenvalues()(i);
+            cumsum += std::max(0.0f, solver.eigenvalues()(i));
             if (cumsum / total_eig >= cfg_.nystrom_min_variance) break;
             if (actual_d < max_d) ++actual_d;
         }
@@ -1458,8 +1518,8 @@ void GeodesicDerep::apply_nystrom_embeddings() {
     }
 
     // Update store dim if actual_d differs from configured max
-    if (actual_d != cfg_.embedding_dim) {
-        cfg_.embedding_dim = actual_d;
+    if (actual_d != runtime_dim_) {
+        runtime_dim_ = actual_d;
         store_.resize(n, actual_d);
     }
 
@@ -1816,6 +1876,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     std::vector<uint64_t> sizes(store_.genome_sizes.begin(), store_.genome_sizes.end());
     std::nth_element(sizes.begin(), sizes.begin() + n / 2, sizes.end());
     double median_size = static_cast<double>(sizes[n / 2]);
+    median_size = std::max(1.0, median_size);
 
     for (size_t i = 0; i < n; ++i) {
         length_factors[i] = static_cast<float>(
@@ -1929,6 +1990,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         }
 
         // Partial sort: bring top-B to front (O(n) average)
+        if (fit_active.empty()) break;
         size_t b = std::min(FPS_BATCH, fit_active.size());
         std::nth_element(fit_active.begin(), fit_active.begin() + b, fit_active.end(),
                          [](const auto& x, const auto& y) { return x.first > y.first; });
@@ -1986,7 +2048,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     // nearest — Nyström error can displace the nearest-rep assignment) using dual-sketch
     // averaged OPH Jaccard. Promote only if no top-K rep truly covers it.
     if (nystrom_applied_ && !embeddings_.empty()) {
-        const float eps_nystrom = std::min(3.0f / std::sqrt(static_cast<float>(cfg_.embedding_dim)), 0.3f);
+        const float eps_nystrom = std::min(3.0f / std::sqrt(static_cast<float>(runtime_dim_)), 0.3f);
         const float lo_thresh = cfg_.diversity_threshold * (1.0f - eps_nystrom);
 
         std::unordered_set<uint64_t> rep_set_ids(representatives.begin(), representatives.end());
@@ -2263,7 +2325,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     const bool has_oph = !embeddings_.empty() && !embeddings_[0].oph_sig.empty();
     const double q_t = std::exp(-cfg_.kmer_size * (1.0 - cfg_.ani_threshold));
     const double J_threshold = q_t / (2.0 - q_t);
-    const double J_margin = 3.0 / std::sqrt(static_cast<double>(cfg_.embedding_dim));
+    const double J_margin = 3.0 / std::sqrt(static_cast<double>(runtime_dim_));
 
     for (size_t i = 0; i < n; ++i) {
         if (final_rep_set.count(store_.genome_ids[i])) continue;
@@ -2428,7 +2490,7 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
     if (embeddings_.size() <= SMALL_N_THRESHOLD) return {};
 
     size_t n   = embeddings_.size();
-    size_t dim = static_cast<size_t>(cfg_.embedding_dim);
+    size_t dim = static_cast<size_t>(runtime_dim_);
 
     // Isolation score z-score for nn_outlier: Welford online mean/std over all genomes.
     // Flagging: nn_outlier = isolation_score > mean + z_threshold * std.
@@ -2595,7 +2657,7 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
     for (size_t i = 0; i < embeddings_.size(); ++i) {
         const float* query = store_.row(i);
         // Skip zero-norm embeddings (failed sketch: empty/corrupt FASTA)
-        if (dot_product_simd(query, query, cfg_.embedding_dim) < 0.01f) {
+        if (dot_product_simd(query, query, runtime_dim_) < 0.01f) {
             coverage_dists[i] = std::numeric_limits<double>::quiet_NaN();
             continue;
         }
@@ -2605,7 +2667,7 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
         size_t best_rep = SIZE_MAX;
         for (size_t rep_idx : rep_indices) {
             const float* rep = store_.row(rep_idx);
-            float sim = dot_product_simd(query, rep, cfg_.embedding_dim);
+            float sim = dot_product_simd(query, rep, runtime_dim_);
             float clamped = std::max(-1.0f, std::min(1.0f, sim));
             double dist = std::acos(clamped) / M_PI;
             if (dist < min_dist) { min_dist = dist; best_rep = rep_idx; }
@@ -2707,7 +2769,7 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
                 for (size_t j = i + 1; j < rep_indices.size(); ++j) {
                     const float* a = store_.row(rep_indices[i]);
                     const float* b = store_.row(rep_indices[j]);
-                    float sim = dot_product_simd(a, b, cfg_.embedding_dim);
+                    float sim = dot_product_simd(a, b, runtime_dim_);
                     double dist = std::acos(std::max(-1.0f, std::min(1.0f, sim))) / M_PI;
                     pair_dists.push_back(dist);
                 }
@@ -2721,7 +2783,7 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
                 if (i == j) continue;
                 const float* a = store_.row(rep_indices[i]);
                 const float* b = store_.row(rep_indices[j]);
-                float sim = dot_product_simd(a, b, cfg_.embedding_dim);
+                float sim = dot_product_simd(a, b, runtime_dim_);
                 double dist = std::acos(std::max(-1.0f, std::min(1.0f, sim))) / M_PI;
                 pair_dists.push_back(dist);
             }
