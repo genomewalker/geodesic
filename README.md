@@ -8,7 +8,7 @@
 
 ## Algorithm
 
-1. **Sketch** — compute two independent [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signatures per genome ($k=21$, $m=10{,}000$ bins, seeds 42 and 1337). Each bin holds the minimum hash of all k-mers mapping to it, giving $\Pr[\mathrm{sig}_A[t] = \mathrm{sig}_B[t]] = J(A,B)$. Averaging two independent signatures halves Jaccard estimation variance. The per-bin occupancy bitmask enables containment estimation for sparse assemblies.
+1. **Sketch** — compute two independent [One-Permutation Hash (OPH)](https://files.ifi.uzh.ch/dbtg/sdbs13/T17.0.pdf) signatures per genome ($k=21$, $m=10{,}000$ bins, seeds 42 and 1337). Each bin holds the minimum hash of all k-mers mapping to it, giving $\Pr[\mathrm{sig}_A[t] = \mathrm{sig}_B[t]] = J(A,B)$. Averaging two independent signatures halves Jaccard estimation variance. The per-bin occupancy bitmask enables containment estimation for sparse assemblies.
 
 2. **Embed** — project all genomes onto a unit sphere via [Nyström spectral embedding](https://en.wikipedia.org/wiki/Nystr%C3%B6m_method), with adaptations for incomplete assemblies and uneven sampling:
    - *Stratified anchors*: anchors stratified by fill fraction $f_i = n_\text{real}/m$ across 5 quantile strata, ensuring sparse MAGs and complete genomes are equally represented as landmarks.
