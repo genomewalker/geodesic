@@ -52,50 +52,47 @@ namespace derep {
 // Skip HNSW build and IsolationForest for small taxa — brute-force is faster
 static constexpr size_t SMALL_N_THRESHOLD = 50;
 
-// AVX2 optimized dot product (unaligned loads — works with any allocation)
+// AVX2 optimized dot product — 4 independent accumulators to break
+// the FMA latency chain (4-cycle latency × 0.5-cycle throughput = 8 FMAs in flight).
 #if GEODESIC_USE_AVX2
-float dot_product_simd(const float* a, const float* b, size_t dim) {
-    __m256 sum = _mm256_setzero_ps();
+float dot_product_simd(const float* __restrict__ a, const float* __restrict__ b, size_t dim) {
+    __m256 sum0 = _mm256_setzero_ps();
+    __m256 sum1 = _mm256_setzero_ps();
+    __m256 sum2 = _mm256_setzero_ps();
+    __m256 sum3 = _mm256_setzero_ps();
     size_t i = 0;
 
-    // Process 32 floats per iteration (4 AVX2 registers)
     for (; i + 32 <= dim; i += 32) {
-        __m256 va0 = _mm256_loadu_ps(a + i);
-        __m256 vb0 = _mm256_loadu_ps(b + i);
-        __m256 va1 = _mm256_loadu_ps(a + i + 8);
-        __m256 vb1 = _mm256_loadu_ps(b + i + 8);
-        __m256 va2 = _mm256_loadu_ps(a + i + 16);
-        __m256 vb2 = _mm256_loadu_ps(b + i + 16);
-        __m256 va3 = _mm256_loadu_ps(a + i + 24);
-        __m256 vb3 = _mm256_loadu_ps(b + i + 24);
-
 #if GEODESIC_USE_FMA
-        sum = _mm256_fmadd_ps(va0, vb0, sum);
-        sum = _mm256_fmadd_ps(va1, vb1, sum);
-        sum = _mm256_fmadd_ps(va2, vb2, sum);
-        sum = _mm256_fmadd_ps(va3, vb3, sum);
+        sum0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),      _mm256_loadu_ps(b + i),      sum0);
+        sum1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8),   _mm256_loadu_ps(b + i + 8),  sum1);
+        sum2 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 16),  _mm256_loadu_ps(b + i + 16), sum2);
+        sum3 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 24),  _mm256_loadu_ps(b + i + 24), sum3);
 #else
-        sum = _mm256_add_ps(_mm256_mul_ps(va0, vb0), sum);
-        sum = _mm256_add_ps(_mm256_mul_ps(va1, vb1), sum);
-        sum = _mm256_add_ps(_mm256_mul_ps(va2, vb2), sum);
-        sum = _mm256_add_ps(_mm256_mul_ps(va3, vb3), sum);
+        sum0 = _mm256_add_ps(_mm256_mul_ps(_mm256_loadu_ps(a + i),      _mm256_loadu_ps(b + i)),      sum0);
+        sum1 = _mm256_add_ps(_mm256_mul_ps(_mm256_loadu_ps(a + i + 8),  _mm256_loadu_ps(b + i + 8)),  sum1);
+        sum2 = _mm256_add_ps(_mm256_mul_ps(_mm256_loadu_ps(a + i + 16), _mm256_loadu_ps(b + i + 16)), sum2);
+        sum3 = _mm256_add_ps(_mm256_mul_ps(_mm256_loadu_ps(a + i + 24), _mm256_loadu_ps(b + i + 24)), sum3);
 #endif
     }
 
+    // Reduce 4 accumulators to 1
+    sum0 = _mm256_add_ps(sum0, sum1);
+    sum2 = _mm256_add_ps(sum2, sum3);
+    sum0 = _mm256_add_ps(sum0, sum2);
+
     // Process remaining 8-float blocks
     for (; i + 8 <= dim; i += 8) {
-        __m256 va = _mm256_loadu_ps(a + i);
-        __m256 vb = _mm256_loadu_ps(b + i);
 #if GEODESIC_USE_FMA
-        sum = _mm256_fmadd_ps(va, vb, sum);
+        sum0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), sum0);
 #else
-        sum = _mm256_add_ps(_mm256_mul_ps(va, vb), sum);
+        sum0 = _mm256_add_ps(_mm256_mul_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)), sum0);
 #endif
     }
 
     // Horizontal sum
-    __m128 hi = _mm256_extractf128_ps(sum, 1);
-    __m128 lo = _mm256_castps256_ps128(sum);
+    __m128 hi = _mm256_extractf128_ps(sum0, 1);
+    __m128 lo = _mm256_castps256_ps128(sum0);
     __m128 s = _mm_add_ps(hi, lo);
     s = _mm_hadd_ps(s, s);
     s = _mm_hadd_ps(s, s);
@@ -1889,12 +1886,10 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         return dot_product_simd(store_.row(i), store_.row(j), dim);
     };
 
-    // Stopping criteria.
-    // Nyström: dot(e_A,e_B) ≈ J/c² after L2 normalisation, so threshold needs correction.
-    const float diversity_sim_threshold =
-        (1.0f - cfg_.diversity_threshold) / cfg_.nystrom_captured_variance;
-    const float min_rep_sim = 1.0f - cfg_.min_rep_distance;
-    (void)diversity_sim_threshold; (void)min_rep_sim;  // used implicitly via acos conversion
+    // Precomputed cosine thresholds: dist < threshold ↔ sim > cos(threshold * π)
+    // Avoids acos() in every FPS iteration (hot path).
+    const float cos_diversity = std::cos(cfg_.diversity_threshold * static_cast<float>(M_PI));
+    const float cos_min_rep   = std::cos(cfg_.min_rep_distance * static_cast<float>(M_PI));
 
     // Precompute length factors using SoA
     std::vector<float> length_factors(n);
@@ -1981,9 +1976,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     auto compact_active = [&]() {
         active.erase(
             std::remove_if(active.begin(), active.end(), [&](size_t i) {
-                float sim = max_sim_to_rep[i];
-                float dist = std::acos(std::clamp(sim, -1.0f, 1.0f)) / static_cast<float>(M_PI);
-                return dist < cfg_.diversity_threshold;
+                // dist < diversity_threshold ↔ sim > cos_diversity (no acos)
+                return max_sim_to_rep[i] > cos_diversity;
             }),
             active.end());
     };
@@ -2013,8 +2007,10 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         for (size_t ai = 0; ai < active.size(); ++ai) {
             size_t i = active[ai];
             float sim = max_sim_to_rep[i];
-            float d = std::acos(std::clamp(sim, -1.0f, 1.0f)) / static_cast<float>(M_PI);
-            fit_active[ai] = {d * (store_.quality_scores[i] / 100.0f) * length_factors[i], i};
+            // Fast angular distance proxy: sqrt(2(1-sim)) ≈ acos(sim) for sim near 1.
+            // Preserves ranking for FPS candidate selection (monotonic in sim).
+            float d_proxy = std::sqrt(2.0f * std::max(0.0f, 1.0f - sim));
+            fit_active[ai] = {d_proxy * (store_.quality_scores[i] / 100.0f) * length_factors[i], i};
         }
 
         // Partial sort: bring top-B to front (O(n) average)
@@ -2025,12 +2021,14 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         std::sort(fit_active.begin(), fit_active.begin() + b,
                   [](const auto& x, const auto& y) { return x.first > y.first; });
 
-        // Stopping criterion on the top-1 candidate
+        // Stopping criterion: top candidate covered ↔ sim > cos_diversity
         float top_sim = max_sim_to_rep[fit_active[0].second];
-        float top_dist = std::acos(std::max(-1.0f, std::min(1.0f, top_sim))) / static_cast<float>(M_PI);
-        if (top_dist < cfg_.diversity_threshold) {
-            if (is_verbose()) spdlog::info("GEODESIC: Diversity saturated (max_dist={:.4f} < threshold={:.4f})",
-                         top_dist, cfg_.diversity_threshold);
+        if (top_sim > cos_diversity) {
+            if (is_verbose()) {
+                float top_dist = std::acos(std::clamp(top_sim, -1.0f, 1.0f)) / static_cast<float>(M_PI);
+                spdlog::info("GEODESIC: Diversity saturated (max_dist={:.4f} < threshold={:.4f})",
+                             top_dist, cfg_.diversity_threshold);
+            }
             break;
         }
 
@@ -2040,9 +2038,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         std::vector<const float*> batch_vecs;
         for (size_t k = 0; k < b; ++k) {
             size_t i = fit_active[k].second;
-            float sim = max_sim_to_rep[i];
-            float dist = std::acos(std::max(-1.0f, std::min(1.0f, sim))) / static_cast<float>(M_PI);
-            if (dist < cfg_.diversity_threshold) continue;
+            // dist < diversity_threshold ↔ sim > cos_diversity
+            if (max_sim_to_rep[i] > cos_diversity) continue;
             batch_idx.push_back(i);
             batch_gids.push_back(store_.genome_ids[i]);
             batch_vecs.push_back(store_.row(i));
@@ -2077,6 +2074,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     if (nystrom_applied_ && !embeddings_.empty()) {
         const float eps_nystrom = std::min(3.0f / std::sqrt(static_cast<float>(runtime_dim_)), 0.3f);
         const float lo_thresh = cfg_.diversity_threshold * (1.0f - eps_nystrom);
+        const float cos_lo = std::cos(lo_thresh * static_cast<float>(M_PI));
 
         std::unordered_set<uint64_t> rep_set_ids(representatives.begin(), representatives.end());
 
@@ -2100,8 +2098,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                 if (rep_set_ids.count(store_.genome_ids[i])) continue;
                 if (store_.quality_scores[i] == 0.0f) continue;
                 float sim  = max_sim_to_rep[i];
-                float dist = std::acos(std::max(-1.0f, std::min(1.0f, sim))) / static_cast<float>(M_PI);
-                if (dist < cfg_.diversity_threshold && dist >= lo_thresh)
+                // dist in [lo_thresh, diversity_threshold) ↔ sim in (cos_diversity, cos_lo]
+                if (sim <= cos_diversity && sim >= cos_lo)
                     to_materialize.push_back(i);
             }
             // Deduplicate before re-reading NFS
@@ -2117,10 +2115,10 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             if (store_.quality_scores[i] == 0.0f) continue;
 
             float sim  = max_sim_to_rep[i];
-            float dist = std::acos(std::max(-1.0f, std::min(1.0f, sim))) / static_cast<float>(M_PI);
 
             // Only check borderline: dist in [lo_thresh, diversity_threshold)
-            if (dist >= cfg_.diversity_threshold || dist < lo_thresh) continue;
+            // ↔ sim in (cos_diversity, cos_lo]
+            if (sim > cos_diversity || sim < cos_lo) continue;
 
             // Find top-K reps by embedding dot product (linear scan, cheap relative to OPH).
             const float* vi = store_.row(i);
@@ -2143,8 +2141,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                     double jac2 = refine_jaccard(embeddings_[i].oph_sig2, embeddings_[rep_emb_i].oph_sig2);
                     jac_exact = (jac_exact + jac2) * 0.5;
                 }
-                float dist_exact = static_cast<float>(std::acos(std::clamp(jac_exact, 0.0, 1.0)) / M_PI);
-                if (dist_exact < cfg_.diversity_threshold) covered = true;
+                // dist_exact < diversity_threshold ↔ jac_exact > cos_diversity
+                if (static_cast<float>(jac_exact) > cos_diversity) covered = true;
             }
 
             if (!covered) {
@@ -2228,10 +2226,10 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             for (size_t j = i + 1; j < representatives.size(); ++j) {
                 size_t rj = gid_to_idx[representatives[j]];
                 double jac = refine_jaccard(embeddings_[ri].oph_sig, embeddings_[rj].oph_sig);
-                float dist = static_cast<float>(std::acos(std::clamp(jac, 0.0, 1.0)) / M_PI);
-                if (dist < cfg_.min_rep_distance) {
+                // dist < min_rep_distance ↔ jac > cos_min_rep
+                if (static_cast<float>(jac) > cos_min_rep) {
                     unite(i, j);
-                    spdlog::debug("GEODESIC: Merged rep {} into rep {} (jaccard_dist={:.4f})", j, i, dist);
+                    spdlog::debug("GEODESIC: Merged rep {} into rep {} (jaccard={:.4f})", j, i, jac);
                 }
             }
         }
@@ -2703,16 +2701,16 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
         }
         ++n_valid;
 
-        double min_dist = std::numeric_limits<double>::max();
+        float max_sim = -1.0f;
         size_t best_rep = SIZE_MAX;
         for (size_t rep_idx : rep_indices) {
             const float* rep = store_.row(rep_idx);
             float sim = dot_product_simd(query, rep, runtime_dim_);
-            float clamped = std::max(-1.0f, std::min(1.0f, sim));
-            double dist = std::acos(clamped) / M_PI;
-            if (dist < min_dist) { min_dist = dist; best_rep = rep_idx; }
+            if (sim > max_sim) { max_sim = sim; best_rep = rep_idx; }
         }
 
+        // Convert to angular distance once per genome (output path only)
+        double min_dist = std::acos(std::clamp(max_sim, -1.0f, 1.0f)) / M_PI;
         coverage_dists[i] = min_dist;
         nearest_rep_idx[i] = best_rep;
         coverage_sum += min_dist;
