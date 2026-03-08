@@ -611,11 +611,16 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     // Step 4: derive thresholds from final distance distribution
     // ----------------------------------------------------------------
     std::vector<double> sorted_f = final_dists;
-    std::sort(sorted_f.begin(), sorted_f.end());
     size_t nf = sorted_f.size();
-    double p5  = sorted_f[nf * 5  / 100];
-    double p50 = sorted_f[nf * 50 / 100];
-    double p95 = sorted_f[nf * 95 / 100];
+    size_t i95_f = nf * 95 / 100;
+    size_t i50_f = nf * 50 / 100;
+    size_t i5_f  = nf * 5  / 100;
+    std::nth_element(sorted_f.begin(), sorted_f.begin() + i95_f, sorted_f.end());
+    double p95 = sorted_f[i95_f];
+    std::nth_element(sorted_f.begin(), sorted_f.begin() + i50_f, sorted_f.begin() + i95_f);
+    double p50 = sorted_f[i50_f];
+    std::nth_element(sorted_f.begin(), sorted_f.begin() + i5_f, sorted_f.begin() + i50_f);
+    double p5 = sorted_f[i5_f];
 
     // Infer ANI range via OPH+CountSketch chain: ANI = (2J/(1+J))^(1/k), J ≈ cos(π*d)
     auto dist_to_ani = [&](double d) -> double {
