@@ -85,6 +85,8 @@ body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font
 #algorithm .alg-step-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:6px}
 #algorithm .alg-step-body{font-size:12px;color:var(--text2);line-height:1.6;display:none}
 #algorithm .alg-step.active .alg-step-body{display:block}
+#algorithm .alg-doc-link{display:block;margin-top:10px;font-size:11px;color:var(--text3);text-decoration:none;letter-spacing:.04em;transition:color .15s}
+#algorithm .alg-doc-link:hover{color:var(--green)}
 #algorithm .alg-controls{padding:16px 24px;border-top:1px solid var(--border);flex-shrink:0}
 #algorithm .alg-ctrl-row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
 #algorithm .alg-ctrl-row:last-child{margin-bottom:0}
@@ -151,51 +153,42 @@ body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font
   <div class="alg-panel-hdr">
     <div class="alg-logo">geodesic</div>
     <div class="alg-logo-sub">How it works</div>
+    <a class="alg-doc-link" href="https://github.com/genomewalker/geodesic/blob/main/wiki/ALGORITHM.md" target="_blank">Full algorithm documentation &#8599;</a>
   </div>
   <div class="alg-steps" id="alg-steps">
     <div class="alg-step active" data-step="0">
       <div class="alg-step-num">01 · Fingerprinting</div>
       <div class="alg-step-title">Each genome gets a unique fingerprint</div>
       <div class="alg-step-body">
-        Every genome's DNA is broken into overlapping 21-letter words (k-mers). These are hashed into 10,000 numerical bins — a compact signature that captures the genome's genetic content without storing the full sequence.
-        <div class="alg-insight">If two genomes share 95% of their DNA, roughly 95% of their fingerprint matches. No alignment needed.</div>
-        Each dot on the sphere is a genome. Similar genomes cluster together naturally.
+        Two independent OPH signatures (k=21, m=10,000 bins, seeds 42 and 1337). Averaging the two Jaccard estimates halves variance. Each dot on the sphere is a genome.
       </div>
     </div>
     <div class="alg-step" data-step="1">
       <div class="alg-step-num">02 · Projection</div>
       <div class="alg-step-title">Placing every genome on a sphere</div>
       <div class="alg-step-body">
-        The 10,000-number fingerprint is compressed into a 256-dimensional unit vector — a single point on the surface of a hypersphere. The angle between two points directly encodes their genetic distance.
-        <div class="alg-insight">Genetically identical genomes sit at the same point. Completely unrelated ones sit at opposite poles.</div>
-        Genetic similarity now equals a dot product — instant to compute at any scale.
+        Nyström spectral embedding via ~512 stratified anchors. Regularised with Laplacian normalisation and Tikhonov loading. The angle between two points encodes their genetic distance.
       </div>
     </div>
     <div class="alg-step" data-step="2">
       <div class="alg-step-num">03 · Indexing</div>
       <div class="alg-step-title">Finding every genome's closest relatives</div>
       <div class="alg-step-body">
-        A spatial index (HNSW graph) finds each genome's 10 nearest neighbors in milliseconds, even across millions of genomes. The average distance to those neighbors gives an <em>isolation score</em>.
-        <div class="alg-insight">A high isolation score means a genome has no close relatives — it represents a rare lineage that must be preserved as a reference.</div>
-        The most isolated genome always becomes the very first representative.
+        HNSW index for sub-linear kNN search. Isolation score = mean angular distance to k=10 nearest neighbours. The most isolated genome becomes the first representative.
       </div>
     </div>
     <div class="alg-step" data-step="3">
       <div class="alg-step-num">04 · Selection</div>
       <div class="alg-step-title">Choosing representatives to cover all diversity</div>
       <div class="alg-step-body">
-        Greedy farthest-point sampling: at each step, pick the genome most poorly covered by existing representatives. Stop when every genome is within the ANI similarity threshold of some representative.
-        <div class="alg-insight">This guarantees complete diversity coverage with the fewest possible representatives — a minimax coverage problem on the sphere.</div>
-        Colored circles show each representative's coverage zone. Watch the sphere fill in.
+        Quality-weighted farthest-point sampling: greedy 2-approximation to the k-center problem. Stops when every genome is within the ANI threshold of some representative. Colored zones show coverage.
       </div>
     </div>
     <div class="alg-step" data-step="4">
       <div class="alg-step-num">05 · Refinement</div>
       <div class="alg-step-title">Spreading representatives evenly</div>
       <div class="alg-step-body">
-        Representatives too close together (above the similarity threshold) are merged. The survivors then repel each other like electric charges on a sphere — spreading until coverage is as uniform as possible.
-        <div class="alg-insight">This is the Thomson problem: arrange N charges on a sphere to minimize total electrostatic potential energy. The solution maximizes the minimum pairwise distance.</div>
-        Press Run Thomson to simulate convergence to the equilibrium.
+        Union-Find merge collapses over-proximate representatives. Borderline non-reps are re-checked with exact dual-sketch OPH Jaccard. Press Run Thomson to simulate convergence.
       </div>
     </div>
   </div>
@@ -845,6 +838,8 @@ footer{padding:28px 40px;border-top:1px solid var(--border);display:flex;align-i
 #algorithm .alg-step-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:6px}
 #algorithm .alg-step-body{font-size:12px;color:var(--text2);line-height:1.6;display:none}
 #algorithm .alg-step.active .alg-step-body{display:block}
+#algorithm .alg-doc-link{display:block;margin-top:10px;font-size:11px;color:var(--text3);text-decoration:none;letter-spacing:.04em;transition:color .15s}
+#algorithm .alg-doc-link:hover{color:var(--green)}
 #algorithm .alg-controls{padding:16px 24px;border-top:1px solid var(--border);flex-shrink:0}
 #algorithm .alg-ctrl-row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
 #algorithm .alg-ctrl-row:last-child{margin-bottom:0}
@@ -1064,51 +1059,42 @@ footer{padding:28px 40px;border-top:1px solid var(--border);display:flex;align-i
   <div class="alg-panel-hdr">
     <div class="alg-logo">geodesic</div>
     <div class="alg-logo-sub">How it works</div>
+    <a class="alg-doc-link" href="https://github.com/genomewalker/geodesic/blob/main/wiki/ALGORITHM.md" target="_blank">Full algorithm documentation &#8599;</a>
   </div>
   <div class="alg-steps" id="alg-steps">
     <div class="alg-step active" data-step="0">
       <div class="alg-step-num">01 · Fingerprinting</div>
       <div class="alg-step-title">Each genome gets a unique fingerprint</div>
       <div class="alg-step-body">
-        Every genome's DNA is broken into overlapping 21-letter words (k-mers). These are hashed into 10,000 numerical bins — a compact signature that captures the genome's genetic content without storing the full sequence.
-        <div class="alg-insight">If two genomes share 95% of their DNA, roughly 95% of their fingerprint matches. No alignment needed.</div>
-        Each dot on the sphere is a genome. Similar genomes cluster together naturally.
+        Two independent OPH signatures (k=21, m=10,000 bins, seeds 42 and 1337). Averaging the two Jaccard estimates halves variance. Each dot on the sphere is a genome.
       </div>
     </div>
     <div class="alg-step" data-step="1">
       <div class="alg-step-num">02 · Projection</div>
       <div class="alg-step-title">Placing every genome on a sphere</div>
       <div class="alg-step-body">
-        The 10,000-number fingerprint is compressed into a 256-dimensional unit vector — a single point on the surface of a hypersphere. The angle between two points directly encodes their genetic distance.
-        <div class="alg-insight">Genetically identical genomes sit at the same point. Completely unrelated ones sit at opposite poles.</div>
-        Genetic similarity now equals a dot product — instant to compute at any scale.
+        Nyström spectral embedding via ~512 stratified anchors. Regularised with Laplacian normalisation and Tikhonov loading. The angle between two points encodes their genetic distance.
       </div>
     </div>
     <div class="alg-step" data-step="2">
       <div class="alg-step-num">03 · Indexing</div>
       <div class="alg-step-title">Finding every genome's closest relatives</div>
       <div class="alg-step-body">
-        A spatial index (HNSW graph) finds each genome's 10 nearest neighbors in milliseconds, even across millions of genomes. The average distance to those neighbors gives an <em>isolation score</em>.
-        <div class="alg-insight">A high isolation score means a genome has no close relatives — it represents a rare lineage that must be preserved as a reference.</div>
-        The most isolated genome always becomes the very first representative.
+        HNSW index for sub-linear kNN search. Isolation score = mean angular distance to k=10 nearest neighbours. The most isolated genome becomes the first representative.
       </div>
     </div>
     <div class="alg-step" data-step="3">
       <div class="alg-step-num">04 · Selection</div>
       <div class="alg-step-title">Choosing representatives to cover all diversity</div>
       <div class="alg-step-body">
-        Greedy farthest-point sampling: at each step, pick the genome most poorly covered by existing representatives. Stop when every genome is within the ANI similarity threshold of some representative.
-        <div class="alg-insight">This guarantees complete diversity coverage with the fewest possible representatives — a minimax coverage problem on the sphere.</div>
-        Colored circles show each representative's coverage zone. Watch the sphere fill in.
+        Quality-weighted farthest-point sampling: greedy 2-approximation to the k-center problem. Stops when every genome is within the ANI threshold of some representative. Colored zones show coverage.
       </div>
     </div>
     <div class="alg-step" data-step="4">
       <div class="alg-step-num">05 · Refinement</div>
       <div class="alg-step-title">Spreading representatives evenly</div>
       <div class="alg-step-body">
-        Representatives too close together (above the similarity threshold) are merged. The survivors then repel each other like electric charges on a sphere — spreading until coverage is as uniform as possible.
-        <div class="alg-insight">This is the Thomson problem: arrange N charges on a sphere to minimize total electrostatic potential energy. The solution maximizes the minimum pairwise distance.</div>
-        Press Run Thomson to simulate convergence to the equilibrium.
+        Union-Find merge collapses over-proximate representatives. Borderline non-reps are re-checked with exact dual-sketch OPH Jaccard. Press Run Thomson to simulate convergence.
       </div>
     </div>
   </div>

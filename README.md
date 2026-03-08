@@ -112,10 +112,10 @@ Benchmarked on GTDB r220 (5.2M genomes, 130k taxa, 24 workers × 4 threads on 96
 | Scale | Genomes | Representatives | Runtime |
 |-------|---------|-----------------|---------|
 | Full GTDB r220 | 5,195,094 | ~520,000 | ~6.5 h |
-| S. enterica (single taxon) | 367,440 | ~2,500 | ~16 min |
+| S. enterica (single taxon) | 367,440 | 9,415 | 18.5 min (24t) |
 | E. coli (single taxon) | 233,000 | ~15,000 | ~22 min |
 
-Coverage guarantee: mean ANI of each genome to its nearest representative >99% for typical species. Taxa with observed coverage below 95% are almost exclusively polyphyletic GTDB groups spanning genuinely distinct biological species.
+Coverage: 99.19% of S. enterica genomes within 99% ANI of their nearest representative. Mean coverage ANI 99.99%. See [wiki/ALGORITHM.md](wiki/ALGORITHM.md) for full algorithm documentation.
 
 ## License
 
