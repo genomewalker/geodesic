@@ -226,18 +226,23 @@ struct GeodesicDerep::HNSWIndex {
         return out;
     }
 
-    // Radius search - fallback to brute force (HNSW doesn't support radius natively)
+    // Radius search - brute force with dot product threshold (no per-element acos)
     std::vector<std::pair<uint64_t, float>> search_radius(
         const std::vector<float>& query,
         float radius,
         const std::unordered_set<uint64_t>* filter = nullptr) const {
 
         if (!index || !embeddings || embeddings->empty()) return {};
+        // Precompute: dist <= radius ↔ dot >= cos(radius * π)
+        const float cos_radius = std::cos(radius * static_cast<float>(M_PI));
+        const size_t d = query.size();
         std::vector<std::pair<uint64_t, float>> result;
         for (const auto& emb : *embeddings) {
             if (filter && filter->find(emb.genome_id) == filter->end()) continue;
-            float dist = GeodesicDerep::angular_distance(query, emb.vector);
-            if (dist <= radius) {
+            float dot = dot_product_simd(query.data(), emb.vector.data(), d);
+            if (dot >= cos_radius) {
+                // Convert to angular distance only for accepted results
+                float dist = std::acos(std::clamp(dot, -1.0f, 1.0f)) / static_cast<float>(M_PI);
                 result.emplace_back(emb.genome_id, dist);
             }
         }
@@ -2046,12 +2051,17 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             representatives.push_back(store_.genome_ids[i]);
         }
 
-        // Fused update: one parallel pass over all n, inner loop over batch
+        // Update only active (uncovered) genomes + compact.
+        // After 50% coverage, each iteration scans only the remainder → ~40-50% less total work.
+        for (size_t bi : batch_idx) max_sim_to_rep[bi] = 1.0f;
+
         const size_t nb = batch_idx.size();
+        const size_t n_active = active.size();
 #if GEODESIC_USE_OMP
-        #pragma omp parallel for
+        #pragma omp parallel for schedule(static)
 #endif
-        for (size_t j = 0; j < n; ++j) {
+        for (size_t ai = 0; ai < n_active; ++ai) {
+            size_t j = active[ai];
             for (size_t k = 0; k < nb; ++k) {
                 float sim = sim_fn(batch_idx[k], j);
                 if (sim > max_sim_to_rep[j]) {
@@ -2060,8 +2070,6 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                 }
             }
         }
-        for (size_t bi : batch_idx) max_sim_to_rep[bi] = 1.0f;
-
         compact_active();
     }
 
@@ -2072,7 +2080,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     // nearest — Nyström error can displace the nearest-rep assignment) using dual-sketch
     // averaged OPH Jaccard. Promote only if no top-K rep truly covers it.
     if (nystrom_applied_ && !embeddings_.empty()) {
-        const float eps_nystrom = std::min(3.0f / std::sqrt(static_cast<float>(runtime_dim_)), 0.3f);
+        const float eps_nystrom = std::min(1.5f / std::sqrt(static_cast<float>(runtime_dim_)), 0.3f);
         const float lo_thresh = cfg_.diversity_threshold * (1.0f - eps_nystrom);
         const float cos_lo = std::cos(lo_thresh * static_cast<float>(M_PI));
 
@@ -2299,12 +2307,20 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     if (merged_count > 0) {
         if (is_verbose()) spdlog::info("GEODESIC: Electrostatic coalescence removed {} redundant reps ({} → {})",
                      merged_count, representatives.size(), refined_reps.size());
+
+        // Identify merged-away rep IDs so we only recompute affected genomes.
+        std::unordered_set<uint64_t> refined_set(refined_reps.begin(), refined_reps.end());
+        std::unordered_set<uint64_t> merged_away;
+        for (uint64_t r : representatives)
+            if (!refined_set.count(r)) merged_away.insert(r);
+
         representatives = std::move(refined_reps);
 
-        // Recompute nearest_rep for the refined set using parallel SIMD
         rep_set.clear();
         rep_set.insert(representatives.begin(), representatives.end());
 
+        // Selective recompute: only genomes whose nearest_rep was merged away.
+        // Genomes assigned to surviving reps keep their current assignment.
 #if GEODESIC_USE_OMP
         #pragma omp parallel for
 #endif
@@ -2312,7 +2328,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             if (rep_set.count(store_.genome_ids[i])) {
                 max_sim_to_rep[i] = 1.0f;
                 nearest_rep[i] = store_.genome_ids[i];
-            } else {
+            } else if (merged_away.count(nearest_rep[i])) {
                 float max_sim = -1.0f;
                 uint64_t best_rep = representatives[0];
 
