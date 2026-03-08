@@ -32,20 +32,22 @@ canonical = fwd ^ ((fwd ^ rev) & -(uint64_t)(fwd > rev))
 
 This is `min(fwd, rev)` implemented without a branch. Ambiguous bases (N and other non-ACGT characters) reset the rolling state, discarding the current k-mer.
 
-**OPH hash.** A single 64-bit WyMix hash is computed from the canonical encoding and the sketch seed:
+**OPH hash.** A single 64-bit hash is computed from the canonical encoding and the sketch seed using a WyHash-based mixing step:
 
 ```
-h = WyMix(canonical, seed)         [seed = 42 for sig1, 1337 for sig2]
+h = wymix(canonical XOR (seed + P0),  canonical XOR P1)
 ```
+
+where `P0 = 0xa0761d6478bd642f`, `P1 = 0xe7037ed1a0b428db` are WyHash v4 constants, and `wymix(a, b) = lo64(a*b) XOR hi64(a*b)`. sig1 uses seed = 42, sig2 uses seed = 1337.
 
 Both the bin index and the per-bin value are derived from this one hash:
 
 ```
-t      = floor(h * m / 2^64)        [bin in {0, ..., m-1}, bias-free]
+t      = floor(h * m / 2^64)        [bin in {0, ..., m-1}, multiplication-based modulo, bias-free]
 sig[t] = min(sig[t], h >> 32)       [keep minimum high-32-bit value per bin]
 ```
 
-The stored uint32 value is later truncated to uint16 (`static_cast<uint16_t>(sig[t])`, keeping the low 16 bits). A single WyMix call per k-mer determines both bin and comparison value.
+The stored uint32 value is truncated to uint16 at storage time (`static_cast<uint16_t>(sig[t])`, retaining bits 32–47 of h). A single hash call per k-mer determines both bin and comparison value.
 
 **Densification.** After scanning all k-mers, empty bins are filled by nearest-neighbour propagation, following the OPH densification scheme of Li & König (2012):
 
