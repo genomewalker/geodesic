@@ -1893,6 +1893,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     std::vector<uint64_t> representatives;
     std::vector<SimilarityEdge> edges;
     size_t n = store_.n;
+    edges.reserve(n);
     size_t dim = store_.dim;
 #if GEODESIC_USE_OMP
     // Always enforce thread count — omp_set_num_threads() may not have been called
@@ -3005,10 +3006,9 @@ size_t GeodesicDerep::build_index_incremental(
     for (size_t i = 0; i < n; ++i)
         gid_to_row_[embeddings_[i].genome_id] = i;
 
-    // Copy metadata to SoA store
+    // Copy metadata to SoA store (data already zeroed by resize → value-init)
     store_.resize(n, cfg_.embedding_dim);
     for (size_t i = 0; i < n; ++i) {
-        std::fill(store_.row(i), store_.row(i) + cfg_.embedding_dim, 0.0f);
         store_.genome_ids[i] = embeddings_[i].genome_id;
         store_.isolation_scores[i] = embeddings_[i].isolation_score;
         store_.quality_scores[i] = embeddings_[i].quality_score;
