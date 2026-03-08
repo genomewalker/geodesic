@@ -6,7 +6,7 @@
 
 ## Overview
 
-`geodesic` selects a diverse set of representative genomes per taxon for reference-based short-read mapping. It uses OPH sketching, Nyström embedding, farthest-point sampling, Union-Find merge, and direct OPH verification to retain diversity while keeping every genome within an ANI threshold of some representative.
+`geodesic` selects a diverse set of representative genomes per taxon for reference-based short-read mapping. It uses OPH sketching, Nyström spectral embedding, farthest-point sampling, Union-Find merge, and OPH-sketch verification to retain diversity while keeping every genome within an ANI threshold of its nearest representative (measured in OPH-sketch Jaccard space, not exact ANI).
 
 The pipeline has seven phases:
 
@@ -20,104 +20,98 @@ Sketch → Embed → Index → Score → Select → Merge → Verify
 
 ### One-Permutation Hashing
 
-For each genome, geodesic computes a One-Permutation Hash (OPH) signature of m = 10,000 bins using k-mers of length k = 21.
+For each genome, geodesic computes a [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signature of m = 10,000 bins using k-mers of length k = 21.
 
-**Canonical k-mer hashing.** For each position in the genome, both the forward 21-mer and its reverse complement are hashed. The canonical hash is:
-
-```
-h_canonical = min(hash(kmer_fwd), hash(kmer_rev))
-```
-
-using rolling WyMix hashing for O(1) update per base:
+**Canonical k-mer selection.** For each position in the genome, both the forward k-mer and its reverse complement are encoded as a 64-bit integer (2 bits per base, A=0/C=1/G=2/T=3). The canonical k-mer is the lexicographic minimum of the two encodings, selected by a branchless comparison:
 
 ```
 fwd = ((fwd << 2) | base) & k_mask
-rev = (rev >> 2) | ((3 - base) << rev_shift)
-canonical = fwd XOR ((fwd XOR rev) & -(fwd > rev))
+rev = (rev >> 2) | ((3 ^ base) << rev_shift)
+canonical = fwd ^ ((fwd ^ rev) & -(uint64_t)(fwd > rev))
 ```
 
-**Bin assignment.** Each canonical hash h is assigned to a bin t in {0, ..., m-1} via:
+This is `min(fwd, rev)` implemented without a branch. Ambiguous bases (N and other non-ACGT characters) reset the rolling state, discarding the current k-mer.
+
+**OPH hash.** A single 64-bit WyMix hash is computed from the canonical encoding and the sketch seed:
 
 ```
-t = floor(h * m / 2^64)      [multiplication-based modulo, bias-free]
+h = WyMix(canonical, seed)         [seed = 42 for sig1, 1337 for sig2]
 ```
 
-The per-bin value stored is the high-32 bits of the hashed canonical:
+Both the bin index and the per-bin value are derived from this one hash:
 
 ```
-sig[t] = min(sig[t], high32(WyMix(canonical, seed)))
+t      = floor(h * m / 2^64)        [bin in {0, ..., m-1}, bias-free]
+sig[t] = min(sig[t], h >> 32)       [keep minimum high-32-bit value per bin]
 ```
 
-**Densification.** Empty bins are filled by deterministic propagation from neighbours:
+The stored uint32 value is later truncated to uint16 (`static_cast<uint16_t>(sig[t])`, keeping the low 16 bits). A single WyMix call per k-mer determines both bin and comparison value.
 
-1. Forward pass: if `sig[t]` is empty and `sig[t-1]` is real, set `sig[t] = mix(sig[t-1] XOR t)`
-2. Backward pass: if `sig[t]` is empty and `sig[t+1]` is real, set `sig[t] = mix(sig[t+1] XOR t)`
+**Densification.** After scanning all k-mers, empty bins are filled by nearest-neighbour propagation, following the OPH densification scheme of Li & König (2012):
 
-where `mix` is a 64-bit finalizer (SplitMix64). Nearest-neighbour densification preserves the unbiasedness property conditionally on the densified OPH construction (Li & König 2011).
+1. Forward pass: `if sig[t] = EMPTY and sig[t-1] != EMPTY: sig[t] = SplitMix64(sig[t-1] XOR t)`
+2. Backward pass: `if sig[t] = EMPTY and sig[t+1] != EMPTY: sig[t] = SplitMix64(sig[t+1] XOR t)`
 
-**Jaccard property.** After densification, for any bin t:
+The specific mixing function (SplitMix64 with a bin-index XOR) is a local implementation choice. Densified bins carry no independent information about k-mer overlap — their values are deterministic functions of real neighbours. The collision probability below applies only to real (pre-densification) bins.
+
+**Jaccard property.** For any bin t that is real in at least one genome:
 
 ```
 P[sig_A[t] = sig_B[t]] = J(A, B) = |A ∩ B| / |A ∪ B|
 ```
 
-where A, B are the sets of distinct canonical k-mers. Over m bins, the empirical collision fraction is an unbiased estimator of J with variance:
+where A and B are the sets of distinct canonical k-mers. Over m bins, the fraction of collisions is an unbiased estimator of J with approximate variance:
 
 ```
-Var(J_hat) = J(1-J) / m_eff
+Var(J_hat) ≈ J(1 - J) / m_real
 ```
 
-where m_eff <= m is the number of real (pre-densification) bins. For complete genomes with m_eff ~= m = 10,000, standard error is < 0.01 at J = 0.3. For MAGs with m_eff << m, variance is higher because densified bins carry no independent signal about the true set intersection.
+where m_real is the number of bins that are real in at least one of A or B. For complete bacterial genomes (m_real ≈ m = 10,000), standard error is < 0.01 at J = 0.3. For incomplete MAGs with m_real << m, variance is higher.
 
 ### OPH vs Bottom-k MinHash
 
-OPH is chosen over bottom-k MinHash for three reasons:
+[Bottom-k MinHash](https://en.wikipedia.org/wiki/MinHash) keeps the k smallest hash values across the entire genome — a one-pass streaming algorithm with fixed sketch size k. OPH partitions the hash space into m bins and keeps one value per bin. OPH is preferred here for two reasons:
 
-1. **Single pass**: all m bins are filled in one scan. Bottom-k requires maintaining a sorted heap.
-2. **Fixed memory**: m bins regardless of genome size. Bottom-k sketch size adapts to k-mer diversity.
-3. **Free byproduct**: the real-bin bitmask `mask_A` (bit t = 1 iff bin t has a real k-mer) is obtained at no extra cost and enables containment and fill-fraction estimation (see Phase 2).
+1. **Single pass, fixed memory**: one pass fills all m bins regardless of genome content.
+2. **Free bitmask**: the per-bin occupancy bitmask (bit t = 1 iff bin t has a real k-mer) is obtained with no extra cost. This bitmask is used for bin co-occupancy estimation in Phase 2 and for fill-fraction computation.
 
-The statistical weakness of OPH -- heteroskedastic variance driven by m_eff -- is partly corrected by the dual-sketch strategy below.
+The weakness of OPH is heteroskedastic variance: genomes with few real bins have higher estimation error. The dual-sketch strategy below partly addresses this.
 
 ### Dual OPH Sketches
 
-Two independent OPH signatures are computed per genome using different hash seeds (42 and 1337). The Gram matrix entry used for Nyström is:
+Two independent OPH signatures (sig1, sig2) are computed per genome using seeds 42 and 1337. Because different seeds produce different WyMix outputs, the two signatures have completely different bin assignments — they are independent sketches, not two values for the same bins.
+
+The anchor Gram matrix uses the dual-sketch average (see Phase 2):
 
 ```
-K[i,j] = (J_1(i,j) + J_2(i,j)) / 2
+K[i, j] = (J_1(i, j) + J_2(i, j)) / 2
 ```
 
-For two independent estimators of J, averaging reduces variance by 1/2:
+For two independent J estimators, averaging halves the variance:
 
 ```
-Var((J_1 + J_2)/2) = J(1-J) / (2 * m_eff)
+Var((J_1 + J_2) / 2) = J(1 - J) / (2 * m_real)
 ```
 
-The benefit is largest for MAGs where m_eff is small. For complete genomes where m_eff ~= 10,000, the improvement is modest (1/sqrt(2) in standard deviation) but adds robustness to hash collisions and outlier bins.
-
-The two sketches use independent seeds for both the bin-assignment hash and the within-bin comparison hash. Averaging two PSD collision matrices stays PSD.
-
-Each OPH value is truncated to 16 bits (`uint16_t`) for storage, halving RAM versus `uint32_t`. A b = 16 bit bias correction is applied when comparing:
+**16-bit storage.** Each per-bin value (a uint32) is stored as a uint16 (low 16 bits), halving RAM: 10,000 bins × 2 bytes = 20 KB per genome. Truncation increases the probability of false matches. The [b-bit MinHash bias correction](https://dl.acm.org/doi/10.1145/1989323.1989399) (Li & König 2011) corrects the raw collision fraction:
 
 ```
-J_corrected = max(0, (J_raw - 2^{-b}) / (1 - 2^{-b}))     [b = 16]
+J_corrected = max(0, (J_raw - 2^{-16}) / (1 - 2^{-16}))    [b = 16]
 ```
 
-**Lazy sig2 materialisation.** The second OPH sketch (seed 1337) is not computed for all n genomes during the sketch phase. Only the ~512 anchor genomes used for Nyström need sig2 for the Gram matrix. Sig2 is materialised on demand for anchors and for borderline verification candidates (Phase 7), avoiding a full NFS re-read and sketch pass for n - 512 genomes.
+**Lazy sig2 materialisation.** sig2 is not computed for all n genomes at sketch time. It is materialised on demand only for the ~512 anchor genomes (needed for the dual-sketch Gram matrix) and for borderline verification candidates (Phase 7). Non-anchor Nyström extension uses sig1 only.
 
-**Buffer cache.** The decompressed FASTA buffer for each genome (up to a 2.5 GB aggregate budget) is retained in memory after the sig1 sketch pass. Anchor sig2 materialisation reads from this cache rather than the NFS mount, eliminating the re-read latency for anchor genomes entirely.
+**Buffer cache.** The decompressed FASTA buffer for each genome (up to a 2.5 GB aggregate per taxon) is held in memory after the sig1 sketch pass. Anchor sig2 materialisation reads from this in-memory buffer rather than the NFS mount, avoiding a second disk read for anchor genomes.
 
-### Fill Fraction and Completeness Proxy
+### Fill Fraction
 
-The fill fraction f_i = n_real_bins_i / m (fraction of bins with at least one real k-mer before densification) serves as a proxy for genome completeness. Under a Poisson occupancy model:
+The fill fraction f_i = n_real_bins_i / m is the fraction of bins with at least one real k-mer before densification. Under a Poisson occupancy model for the bin-assignment process:
 
 ```
-E[f_i] ~= 1 - exp(-|G_i| / m)
+E[f_i] ≈ 1 - exp(-|G_i| / m)
 ```
 
-where |G_i| is the number of distinct canonical k-mers in genome G_i. For complete bacterial genomes (|G| ~= 10^6 k-mers, m = 10,000), f ~= 1. Even at 1% completeness (|G| ~= 10^4 k-mers), f ~= 0.63.
-
-f_i is not a direct completeness estimator for typical bacterial genomes (bins saturate quickly). Its value lies in identifying the extreme tail of highly incomplete, short assemblies where OPH variance is highest.
+where |G_i| is the number of distinct canonical k-mers. Fill fraction saturates quickly for complete bacterial genomes (|G| ~ 10^6 k-mers, m = 10,000 → f ≈ 1). Its practical role is identifying highly incomplete assemblies (f << 0.2) where OPH variance is elevated and containment-based corrections are needed.
 
 ---
 
@@ -125,125 +119,102 @@ f_i is not a direct completeness estimator for typical bacterial genomes (bins s
 
 ### Motivation
 
-Exact pairwise Jaccard over n genomes requires O(n^2 * m) computations -- infeasible for n = 10^5. The Nyström method approximates the n*n Gram matrix K from a small anchor subset, enabling O(n*m + p^2*m) work where p << n is the number of anchors.
+Exact pairwise Jaccard over n genomes requires O(n² × m) operations — infeasible for n = 10^5. The [Nyström method](https://en.wikipedia.org/wiki/Nystr%C3%B6m_method) (Williams & Seeger 2001) approximates the n×n kernel matrix from a small anchor subset of size p << n. The dominant cost becomes O(n × p × m) for the genome-to-anchor similarities.
 
 ### Anchor Sampling
 
-A subset of p anchors is selected from the n genomes. The auto-selected count is:
+The anchor count is:
 
 ```
-p = min(n, max(200, 2 * d))
+p = min(n, max(200, 2 × d_cfg))
 ```
 
-where d is the target embedding dimension.
-
-Genomes are stratified by fill fraction f_i into Q = 5 quantile strata. An equal number of anchors is drawn from each stratum by Fisher-Yates shuffle. This ensures the anchor Gram matrix covers the full spectrum of genome completeness, preventing the eigenvectors from being dominated by the geometry of complete genomes alone.
+where d_cfg is the configured maximum embedding dimension (default 256, see `--geodesic-dim`). The actual embedding dimension d is auto-selected from the anchor eigenspectrum (see Eigendecomposition below) and may be less than d_cfg. Genomes are stratified by fill fraction f_i into Q = 5 quantile strata, and an equal number of anchors is drawn from each stratum by Fisher-Yates shuffle. Stratification ensures the anchor Gram matrix covers the full range of genome completeness — without it, uniform sampling over-represents the abundant complete genomes and the eigenvectors become insensitive to MAG geometry.
 
 ### Anchor Gram Matrix
 
-The p*p anchor Gram matrix K_raw is computed as:
+The p×p anchor Gram matrix K_raw is computed using **dual-sketch averaged Jaccard** (both sig1 and sig2 are materialised for all p anchors):
 
 ```
-K_raw[i,j] = (J_1(anchor_i, anchor_j) + J_2(anchor_i, anchor_j)) / 2
+K_raw[i, j] = (J_1(anchor_i, anchor_j) + J_2(anchor_i, anchor_j)) / 2
 ```
 
-When either genome in a pair has fill fraction f_i < 0.2 (fewer than 2,000 of 10,000 bins are real), Jaccard is blended with a bin co-occupancy statistic:
+**Bin co-occupancy blend for sparse anchors.** When either anchor in a pair has f_i < 0.2 (fewer than 2,000 of 10,000 bins occupied, a heuristic threshold), raw Jaccard underestimates similarity because most of both genomes' k-mers land in the same few bins. A bin co-occupancy statistic is blended in:
 
 ```
-C_occ(A in B) = popcount(mask_A AND mask_B) / n_real_bins_A
+C_occ(A→B) = popcount(mask_A AND mask_B) / n_real_bins_A
 ```
 
-This statistic measures what fraction of A's occupied bins are also occupied by B. It is not a rigorous k-mer containment estimator (C(A in B) = |A ∩ B|/|A|), because under the Poisson model:
+This approximates the conditional probability that a bin occupied in A is also occupied in B. It is not a rigorous containment estimator because it conflates true k-mer overlap with B's overall bin occupancy rate. In the fully saturated regime (f ≈ 1), C_occ ≈ 1 regardless of similarity and carries no signal. The correction is only applied for f_i < 0.2, where sparse bins correlate with true k-mer overlap.
+
+The blended kernel:
 
 ```
-E[C_occ(A in B)] = P(bin_t real in B | bin_t real in A)
+K_blend[i, j] = (1 - α) × K_raw[i, j] + α × max(C_occ(i→j), C_occ(j→i))
 ```
 
-which confounds true overlap with B's total bin occupancy rate. In the saturated-bin regime (complete bacterial genomes), all bins are occupied and C_occ ~= 1 regardless of true similarity -- it carries no signal. The correction is only applied when f_i < 0.2, where bins are sparse enough that co-occupancy correlates with true overlap.
-
-The blended kernel value is:
-
-```
-K_blend[i,j] = (1 - alpha) * K_raw[i,j] + alpha * max(C_occ(i in j), C_occ(j in i))
-```
-
-with alpha = max(alpha_i, alpha_j) where alpha_i = max(0, 1 - f_i / 0.2). For f_i >= 0.2, alpha_i = 0 and raw Jaccard is used unmodified.
-
-After containment blending, K_blend is no longer guaranteed to be positive semi-definite. The implementation floors selected eigenvalues at 1e-10 before inversion.
+with α = max(α_i, α_j), α_i = max(0, 1 - f_i / 0.2) (linear ramp: α_i = 1 at f_i = 0, α_i = 0 at f_i = 0.2). The threshold 0.2 and the linear schedule are engineering heuristics, not derived from theory. After blending, K_blend is no longer guaranteed positive semi-definite; near-zero eigenvalues are floored at 1e-10 before inversion.
 
 ### Gram Matrix Regularisation
 
-Two regularisation steps are applied to K_blend before eigendecomposition.
+Two steps are applied to K_blend before eigendecomposition.
 
-**Symmetric Laplacian normalisation.** Hub anchors -- those similar to many other anchors -- have inflated row sums and bias the eigenspectrum. Normalising by anchor degree d_i = sum_j K[i,j] corrects this:
-
-```
-K_norm[i,j] = K_blend[i,j] / sqrt(d_i * d_j)
-```
-
-equivalently K_norm = D^{-1/2} K_blend D^{-1/2} where D = diag(d_1, ..., d_p).
-
-After this transformation, the embedding approximates community structure in the similarity graph, not raw pairwise Jaccard. Downstream dot products dot(e_A, e_B) approximate a normalised-graph similarity, not J(A,B) directly. The exact-Jaccard borderline verification step (Phase 7) corrects threshold decisions back to raw Jaccard space.
-
-**Tikhonov diagonal loading.** Small or near-zero eigenvalues blow up the inverse-square-root W = U * diag(lambda^{-1/2}) during the Nyström projection. A ridge is added:
+**Symmetric Laplacian normalisation** (degree normalisation). Hub anchors with high similarity to many others inflate their row sums and distort the eigenspectrum. Degree-normalising removes this bias:
 
 ```
-K_reg = K_norm + lambda * I       where  lambda = 0.01 * max(mean_diagonal(K_norm), 1e-4)
+K_norm[i, j] = K_blend[i, j] / sqrt(d_i × d_j)     [d_i = sum_j K_blend[i, j]]
 ```
 
-The floor on lambda ensures meaningful regularisation even when degree normalisation compresses the diagonal toward zero in high-connectivity anchor sets.
+equivalently K_norm = D^{-1/2} K_blend D^{-1/2}. After this step, dot products in embedding space approximate a normalised-graph similarity, not raw k-mer Jaccard. The exact-Jaccard verification step (Phase 7) corrects borderline threshold decisions back to raw Jaccard space.
+
+**Tikhonov diagonal loading** (ridge regularisation). Near-zero eigenvalues blow up the Nyström projection W = U × Λ^{-1/2}. A ridge is added:
+
+```
+K_reg = K_norm + λI     where  λ = 0.01 × max(mean_diagonal(K_norm), 1e-4)
+```
+
+The adaptive floor on λ ensures meaningful regularisation even when degree normalisation compresses the diagonal toward zero.
 
 ### Nyström Extension
 
-Each genome G_i is mapped to a d-dimensional unit vector via:
+The anchor Gram matrix K_reg (p×p, symmetric) is eigendecomposed:
 
 ```
-k(G_i) = [similarity(G_i, anchor_1), ..., similarity(G_i, anchor_p)]
-e_tilde(G_i) = W^T * k(G_i)
-e(G_i) = e_tilde(G_i) / ||e_tilde(G_i)||_2
+K_reg = U Λ U^T     [SelfAdjointEigenSolver, p×p]
 ```
 
-For anchor genomes k(anchor_i) = K_reg[row i] (exact; already normalised). For non-anchors, each entry is the dual-sketch Jaccard (with containment blend if sparse), then degree-normalised.
-
-For non-anchor genome G_i, the raw similarity vector k_raw[a] uses the dual-sketch averaged Jaccard to anchor a, with the same containment blend applied when f_i < 0.2 or f_anchor < 0.2. If degree normalisation is enabled, k[a] = k_raw[a] / sqrt(d_i * d_anchor_a) where d_i = sum_a k_raw[a].
-
-The Nyström approximation gives:
+The embedding dimension d is auto-selected as the smallest d' such that the top d' eigenvalues explain ≥ 95% of total non-negative variance:
 
 ```
-K ~= K_{n,p} * K_{p,p}^{-1} * K_{p,n}
+d = min{ d' : Σ_{i=p-d'+1}^{p} λ_i / Σ_i max(λ_i, 0) ≥ 0.95 }
 ```
 
-where K_{n,p}[i,a] = K(G_i, anchor_a). On the unit sphere, dot(e_A, e_B) approximates the normalised Gram matrix entry.
-
-### Eigendecomposition and Dimension Selection
-
-The regularised matrix K_reg (p*p, symmetric) is eigendecomposed:
+The projection matrix:
 
 ```
-K_reg = U Lambda U^T     [SelfAdjointEigenSolver]
+W = U[:, top-d] × diag(λ_{top-d}^{-1/2})     [p × d]
 ```
 
-The embedding dimension d is auto-selected as the minimum d such that the top-d eigenvalues capture >= 95% of the total non-negative eigenvalue sum:
+Each genome G_i is mapped to a d-dimensional unit vector. For anchors, the embedding vector is read directly from K_reg (row i, already degree-normalised). For non-anchor genomes, sig1 is used to compute the genome-to-anchor similarity vector k_G, which is then degree-normalised and projected:
 
 ```
-d = min{ d' : sum_{i=n-d'+1}^{n} lambda_i / sum_i max(lambda_i, 0) >= 0.95 }
+k_G[a]    = J_1(G_i, anchor_a)  [with containment blend if f_i or f_a < 0.2]
+k_G       = k_G ⊙ d_anchor^{-1/2} / sqrt(sum(k_G))   [degree normalisation]
+ẽ(G_i)   = W^T × k_G
+e(G_i)   = ẽ(G_i) / ‖ẽ(G_i)‖₂    [unit sphere projection]
 ```
 
-The projection matrix is:
-
-```
-W = U[:, top-d] * diag(lambda_{top-d}^{-1/2})     [p * d]
-```
+Non-anchors use sig1 only for this step — sig2 is not materialised for them.
 
 ---
 
 ## Phase 3: HNSW Index
 
-An HNSW (Hierarchical Navigable Small World) index is built over the n unit-sphere embeddings using the inner product metric. Default parameters: M = 48, ef_construction = 400, ef_search = 200.
+An [HNSW (Hierarchical Navigable Small World)](https://arxiv.org/abs/1603.09320) index (Malkov & Yashunin 2018) is built over all n unit-sphere embeddings using inner product as the metric. Default parameters: M = 48, ef_construction = 400, ef_search = 200. HNSW provides approximate nearest-neighbour queries in O(log n) amortised time; recall is high but not 100%.
 
-The index is used for:
+The index serves two purposes:
 - Computing isolation scores (Phase 4)
-- Electrostatic merge during representative selection (Phase 6)
+- Finding too-close representative pairs for merging (Phase 6)
 
 ---
 
@@ -251,66 +222,58 @@ The index is used for:
 
 ### Isolation Score
 
-For each genome G_i, the isolation score is the mean angular distance to its k = 10 nearest neighbours:
+For each genome G_i, the isolation score is the mean angular distance to its k = 10 nearest neighbours (self excluded):
 
 ```
-isolation(G_i) = (1/k) * sum_{j in kNN(G_i)} arccos(dot(e_i, e_j)) / pi
+isolation(G_i) = (1/k) × Σ_{j ∈ kNN(G_i)} arccos(dot(e_i, e_j)) / π
 ```
 
-Higher isolation score = more isolated = better candidate for a representative.
+Higher isolation = more separated from neighbours = stronger candidate for a representative.
 
 ### Diversity Threshold
 
-The diversity threshold theta controls when FPS stops. It is set to the minimum of:
+The diversity threshold θ controls when FPS stops. It is set to the minimum of:
 
-1. The 95th percentile of all nearest-neighbour angular distances (typical separation in the taxon)
-2. The user ANI threshold converted to angular distance via the Mash formula
+1. The 95th percentile of all pairwise nearest-neighbour angular distances (NN_P95 — typical separation in the taxon)
+2. The ANI threshold converted to angular distance via the Mash formula (see §ANI from Jaccard)
 
 ```
-theta = min(NN_P95, arccos(J_ANI_threshold) / pi)
+θ = min(NN_P95, arccos(J_ANI) / π)
 ```
 
-For clonal taxa (tight cluster), NN_P95 is small -- few representatives selected. For diverse taxa, NN_P95 >= ANI angular threshold -- the ANI threshold is the binding constraint.
+For clonal taxa with a tight distribution, NN_P95 is small and drives selection of fewer representatives. For diverse taxa, the user ANI threshold is the binding constraint.
 
 ---
 
 ## Phase 5: Farthest Point Sampling
 
-### Quality-Weighted FPS
+[Farthest Point Sampling (FPS)](https://en.wikipedia.org/wiki/Farthest-first_traversal) selects representatives greedily: each step adds the genome farthest from all current representatives. For unweighted FPS on a metric space, this gives a 2-approximation to the k-center problem (Gonzalez 1985): if OPT_k is the optimal k-center radius, FPS gives radius ≤ 2 × OPT_k.
 
-FPS selects representatives greedily: at each step, the unrepresented genome with maximum distance to any current representative is added.
-
-The fitness score combines coverage distance with genome quality and size:
+**Quality and size weighting.** Each genome is assigned a fitness score:
 
 ```
-fitness(G_i) = dist_to_nearest_rep(G_i) * (quality_i / 100) * sqrt(size_i / median_size)
+fitness(G_i) = dist_to_nearest_rep(G_i) × (quality_i / 100) × sqrt(size_i / median_size)
 ```
 
-where quality = completeness - 5 * contamination (CheckM2 scale, 0-100).
+where `quality = completeness - 5 × contamination` (a heuristic combining CheckM2 completeness and contamination estimates, commonly used in genome quality filtering but not a CheckM2-defined metric). This weighting biases selection toward high-quality complete genomes. The formal 2-approximation guarantee of unweighted FPS does not carry over; coverage is evaluated empirically.
 
-Algorithm:
-1. Start with the genome maximising isolation * quality * size as the first representative
-2. Update max_sim_to_rep[j] = max(max_sim_to_rep[j], dot(e_rep, e_j)) for all j
-3. Repeat: select top-B = 16 candidates (partial sort for efficiency), add those above threshold theta
-4. Terminate when all non-excluded genomes have dist_to_nearest_rep < theta
+**Algorithm:**
+1. Start with the genome maximising `isolation × quality × size` as the first representative
+2. Track `max_sim_to_rep[j]` = max dot product to any current representative
+3. Repeat: compute `fitness` for all uncovered genomes, add the top-B = 16 candidates (partial sort) in a single parallel pass, then update `max_sim_to_rep` for all n genomes
+4. Terminate when all non-excluded genomes satisfy `dist_to_nearest_rep < θ`
 
-FPS is a greedy 2-approximation to the k-center problem: minimise the maximum distance from any genome to its nearest representative. Formally, if OPT_k is the optimal k-center radius, the FPS solution has radius <= 2 * OPT_k (Gonzalez 1985).
-
-In each iteration, the top-B = 16 candidates are added as representatives simultaneously. Their distance updates are fused into a single parallel pass over all n genomes, reducing OpenMP launch overhead by 16x and improving cache reuse.
-
-Covered genomes (dist < theta) are removed from the active set after each iteration. For clonal taxa where most genomes are quickly covered, this reduces per-iteration work from O(n) to O(n_uncovered) -- roughly 10x speedup in practice.
+Batching B = 16 candidates per iteration fuses 16 distance updates into one parallel pass over n genomes, reducing OpenMP synchronisation overhead. Covered genomes are removed from the active set after each batch, reducing per-iteration work from O(n) to O(n_uncovered).
 
 ---
 
-## Phase 6: Electrostatic Merge
+## Phase 6: Union-Find Merge
 
-Representatives that landed too close together (due to quality * size weighting pushing them toward high-quality dense regions) are merged via Union-Find:
+Quality and size weighting can push representatives toward dense high-quality regions, leaving some representative pairs closer than intended. Representatives with embedding distance below `min_rep_distance` are merged via [Union-Find](https://en.wikipedia.org/wiki/Disjoint-set_data_structure): for each such pair (rep_i, rep_j), they are merged into one cluster with the surviving representative chosen by quality × size.
 
-For each representative pair with dist(rep_i, rep_j) < min_rep_distance, they are merged into one. The surviving representative is chosen by quality * size.
+Merge candidates are found via HNSW search over the representative set, avoiding an O(r²) brute-force scan. Because HNSW is approximate, a small fraction of too-close pairs may be missed.
 
-In Nyström mode: merging candidates are found via HNSW search (parallel over representatives, serial Union-Find), avoiding the O(r^2) brute-force needed for r representatives.
-
-`min_rep_distance` is set to `min(NN_P5, theta / 2)`, ensuring it stays below the diversity threshold and only genuinely over-proximate reps are merged.
+`min_rep_distance` is set to `min(NN_P5, θ / 2)`, keeping it below the diversity threshold.
 
 ---
 
@@ -318,74 +281,60 @@ In Nyström mode: merging candidates are found via HNSW search (parallel over re
 
 ### Approximation Error
 
-The Nyström approximation can introduce angular error on the order of 3/sqrt(d). The implementation uses epsilon = min(3/sqrt(d), 0.3) as a cap (at d = 64, 3/sqrt(64) = 0.375, capped at 0.3).
-
-A genome with embedding distance in:
+Nyström embedding introduces geometric error. The implementation uses ε = min(3/√d, 0.3) as an empirical error tolerance (not a derived bound; for d = 100, ε = 0.3). A genome at embedding distance in:
 
 ```
-[theta * (1 - epsilon),  theta)
+[θ × (1 - ε),  θ)
 ```
 
-is borderline covered: the embedding says it is within the threshold of some representative, but the approximation error may push the true similarity below the threshold.
+is borderline covered. The multiplicative form is a practical heuristic: the true approximation error depends on the specific taxon geometry, not just d. Borderline cases are resolved by a direct sketch comparison (see OPH Sketch Jaccard Check below).
 
-### OPH Exact Jaccard Check
+### OPH Sketch Jaccard Check
 
 For each borderline-covered genome G_i:
 
-1. Find the top-K = 3 current representatives by embedding dot product (linear scan over all reps).
-2. For each candidate representative R_k, compute dual-sketch averaged OPH Jaccard:
-   `J_dual = (refine_jaccard(sig1_i, sig1_Rk) + refine_jaccard(sig2_i, sig2_Rk)) / 2`
-3. Convert to angular distance: `d_exact = arccos(clamp(J_dual, 0, 1)) / pi`
-4. Promote G_i only if all checked representatives satisfy `d_exact >= theta` (none truly covers it).
-5. After all promotions, update max-similarity bookkeeping in one batched parallel pass.
+1. Find the top-3 closest representatives by embedding dot product (linear scan over all current representatives). Three is a heuristic: if the embedding ranking is wrong, the true covering representative may not be among the top 3.
+2. For each candidate representative R_k, compute the dual-sketch averaged OPH Jaccard (sig2 is materialised on demand for both G_i and all current representatives):
+   ```
+   J_dual = (J(sig1_i, sig1_Rk) + J(sig2_i, sig2_Rk)) / 2
+   ```
+3. Convert: `d_sketch = arccos(clamp(J_dual, 0, 1)) / π`
+4. Promote G_i to representative only if all checked representatives satisfy `d_sketch ≥ θ`.
+5. Batch-update `max_sim_to_rep` for all promoted genomes.
 
-The threshold theta is defined via the Mash formula from the user's ANI threshold, which is a Jaccard-based quantity. The borderline check uses the same metric as the threshold definition, not the normalised embedding space used by FPS.
+This check uses OPH sketch Jaccard (m = 10,000 bin comparison), not exact ANI. It is more accurate than the embedding approximation but remains a sketch estimator with variance J(1-J) / (2 × m_real).
 
 ---
 
 ## ANI from Jaccard
 
-Average Nucleotide Identity (ANI) is related to Jaccard similarity of k-mer sets via the Mash formula (Ondov et al. 2016):
+[Average Nucleotide Identity (ANI)](https://en.wikipedia.org/wiki/Average_nucleotide_identity) is related to k-mer Jaccard via the [Mash formula](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0997-x) (Ondov et al. 2016). Under a Poisson substitution model with per-base substitution rate r = 1 - ANI/100, the probability that a specific k-mer is shared between two equal-length genomes is approximately (1 - r)^k = (ANI/100)^k. For equal-size genomes, k-mer Jaccard relates to this probability as:
 
 ```
-ANI = (2J / (1 + J))^{1/k} * 100
+J ≈ p^k / (2 - p^k)     where p = ANI / 100
 ```
 
-This assumes random i.i.d. substitutions (Jukes-Cantor), similar genome sizes, and negligible indels relative to substitutions.
-
-Under these assumptions, the probability that a k-mer is shared between two genomes at ANI p is p^k, and Jaccard of k-mer sets equals this probability:
+Inverting:
 
 ```
-J ~= p^k / (2 - p^k)     [Mash formula, solved for J given ANI]
-ANI ~= (2J / (1+J))^{1/k} * 100     [inverted]
+ANI = (2J / (1 + J))^{1/k} × 100
 ```
 
-The angular distance on the unit sphere (after embedding) is:
+This approximation assumes equal genome sizes, negligible indels, and independence of substitutions across sites. It degrades for highly divergent sequences or assemblies with large size differences.
+
+The angular distance on the unit sphere is:
 
 ```
-d_angular(A, B) = arccos(dot(e_A, e_B)) / pi  in [0, 1]
+d_angular(A, B) = arccos(dot(e_A, e_B)) / π  ∈ [0, 1]
 ```
 
-Since dot(e_A, e_B) ~= J(A, B) (after Nyström embedding, before degree normalisation):
+After Nyström embedding **without** degree normalisation, `dot(e_A, e_B) ≈ J(A, B)`, so the angular threshold corresponding to an ANI cutoff is:
 
 ```
-theta_ANI = arccos(J_threshold) / pi
+θ_ANI = arccos(J_threshold) / π
 ```
 
-After degree normalisation, this relationship is a surrogate: FPS operates on normalised-kernel space, and the exact OPH check (Phase 7) corrects borderline cases back to true Jaccard space.
-
----
-
-## Robustness Improvements
-
-| # | Improvement | Where | Problem solved |
-|---|-------------|-------|----------------|
-| 1 | Stratified anchor sampling (5 strata by f_i) | Phase 2 | MAGs under-represented in uniform sampling -- biased eigenvectors |
-| 2 | Symmetric Laplacian normalisation | Phase 2 | Hub anchors dominate spectrum -- distorted embedding geometry |
-| 3 | Tikhonov diagonal loading (lambda = 0.01) | Phase 2 | Near-zero eigenvalues blow up W = U * Lambda^{-1/2} -- numerical instability |
-| 4 | Bin co-occupancy blend for sparse anchors (f_i < 0.2) | Phase 2 | OPH Jaccard underestimates similarity for sparse MAGs -- k-mer void bias |
-| 5 | Dual OPH sketches (seeds 42 + 1337), averaged kernel | Phases 1, 2 | High-variance Jaccard estimates for low-m_eff genomes -- noisy Gram matrix |
-| 6 | FPS borderline refinement: top-K=3 reps, dual-sketch OPH, epsilon = min(3/sqrt(d), 0.3) | Phase 7 | Nyström approximation error misclassifies borderline genomes as covered |
+After degree normalisation, dot products approximate a normalised-graph similarity, not raw Jaccard. FPS operates in this normalised space; Phase 7 corrects borderline threshold decisions back to sketch Jaccard space.
 
 ---
 
@@ -393,37 +342,37 @@ After degree normalisation, this relationship is a surrogate: FPS operates on no
 
 | Phase | Operation | Complexity |
 |-------|-----------|------------|
-| Sketch | OPH per genome | O(L*k) where L = genome length |
-| Embed anchors | Gram matrix K | O(p^2 * m) |
-| Embed all | Nyström extension | O(n*p*m) |
-| Eigendecomp | K_reg (p*p) | O(p^3) |
-| Index | HNSW build | O(n * log n) |
-| Score | kNN isolation | O(n * log n) |
-| Select | FPS (batched) | O(n*r*d) where r = n_reps |
-| Merge | Union-Find | O(r * log n) |
-| Verify | OPH exact Jaccard | O(n_borderline * m) |
+| Sketch | OPH per genome (rolling hash) | O(L) where L = genome length |
+| Embed anchors | Gram matrix K | O(p² × m) |
+| Embed all | Nyström extension (sig1 only) | O(n × p × m) |
+| Eigendecomp | K_reg (p×p) | O(p³) |
+| Index | HNSW build | O(n × M × log n) |
+| Score | kNN isolation | O(n × log n) |
+| Select | FPS batched (B=16) | O(n × r × d / B) |
+| Merge | HNSW search + Union-Find | O(r × log r) |
+| Verify | OPH sketch Jaccard | O(n_borderline × m) |
 
-For GTDB r220: n = 5.2M, p ~= 512, m = 10,000, d ~= 64-256, r ~= 2,500 per large taxon. Embedding dominates for giant taxa; FPS dominates for medium taxa.
+Typical values for a large taxon: p ≈ 512, m = 10,000, d ≈ 64–256. Embedding (Nyström extension) dominates for taxa with n > 10,000; FPS dominates for medium-size taxa.
 
 ---
 
 ## Implementation Notes
 
-- **SIMD**: AVX2 dot products (8 floats/cycle) accelerate isolation, FPS updates, and Gram matrix build. AVX2 equality comparison (`_mm256_cmpeq_epi16`) is used in the anchor-slab Gram matrix loop, processing 16 uint16 bins per cycle.
-- **OpenMP**: parallel OPH sketching, parallel Gram matrix rows, parallel FPS fitness/update loops, parallel HNSW isolation.
-- **DuckDB**: all results persisted incrementally; interrupted runs resume automatically.
-- **16-bit OPH storage**: halves RAM vs uint32 with b-bit bias correction; 10,000 bins * 16 bits = 20 KB per genome.
-- **Anchor slab**: anchor signatures (p * m * 2 bytes = ~10 MB for p=512, m=10,000) are packed into a contiguous aligned buffer for cache-friendly Gram matrix computation.
-- **Lazy sig2**: the second OPH sketch (seed 1337) is materialised only for anchors and borderline candidates on demand, not for all n genomes. Saves one full NFS read + sketch pass per non-anchor genome.
-- **Buffer cache**: decompressed FASTA buffers (up to 2.5 GB aggregate) are held in memory after the sig1 sketch pass and consumed by anchor sig2 materialisation. After Nyström completes, the cache is freed.
-- **NFS robustness**: `embed_genome()` retries failed reads up to 3 times with 500 ms/1 s backoff. Permanently failed genomes are recorded in the `jobs_failed` database table with their error reason.
-- **Producer-consumer I/O**: genome decompression is overlapped with k-mer computation via a bounded semaphore, capping simultaneous NFS file opens to avoid metadata-op saturation.
+- **SIMD**: AVX2 is used in the OPH sketching inner loop (`scan_valid_run`, 32 bytes/cycle), in the anchor-slab Gram matrix loop (`_mm256_cmpeq_epi16`, 16 uint16 comparisons per instruction), and in FPS distance update loops.
+- **OpenMP**: parallel OPH sketching, parallel Gram matrix rows, parallel FPS fitness/update loops, parallel HNSW isolation queries.
+- **DuckDB**: all results persisted incrementally; interrupted runs resume by skipping completed taxa.
+- **Anchor slab**: anchor signatures (p × m × 2 bytes ≈ 10 MB for p = 512, m = 10,000) are packed into a contiguous aligned buffer for cache-friendly Gram matrix computation.
+- **Producer-consumer I/O**: genome decompression is overlapped with k-mer computation via a bounded semaphore, capping simultaneous NFS file opens.
+- **NFS robustness**: `embed_genome()` retries failed reads up to 3 times with 500 ms / 1 s backoff. Permanently failed genomes are recorded in the `jobs_failed` table.
 
 ---
 
 ## References
 
-- Ondov et al. (2016) *Mash: fast genome and metagenome distance estimation using MinHash*. Genome Biology.
-- Li & König (2011) *b-Bit Minwise Hashing*. VLDB.
-- Gonzalez (1985) *Clustering to minimize the maximum intercluster distance*. TCS.
-- Malkov & Yashunin (2018) *Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs*. TPAMI.
+- Ondov et al. (2016) *Mash: fast genome and metagenome distance estimation using MinHash*. Genome Biology. doi:10.1186/s13059-016-0997-x
+- Li, P. & König, A.C. (2011) *b-Bit Minwise Hashing*. Proceedings of WWW 2011.
+- Li, P. & König, A.C. (2012) *One Permutation Hashing*. Advances in Neural Information Processing Systems (NIPS).
+- Williams, C.K.I. & Seeger, M. (2001) *Using the Nyström Method to Speed Up Kernel Machines*. NIPS.
+- Gonzalez, T.F. (1985) *Clustering to minimize the maximum intercluster distance*. Theoretical Computer Science 38:293–306.
+- Malkov, Y.A. & Yashunin, D.A. (2018) *Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs*. IEEE TPAMI 42(4):824–836.
+- Chowdhury et al. (2023) *CheckM2: a rapid, scalable and accurate tool for assessing microbial genome quality using machine learning*. Nature Methods.
