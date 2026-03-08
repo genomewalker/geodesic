@@ -609,11 +609,16 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     // Step 4: derive thresholds from final distance distribution
     // ----------------------------------------------------------------
     std::vector<double> sorted_f = final_dists;
-    std::sort(sorted_f.begin(), sorted_f.end());
     size_t nf = sorted_f.size();
-    double p5  = sorted_f[nf * 5  / 100];
-    double p50 = sorted_f[nf * 50 / 100];
-    double p95 = sorted_f[nf * 95 / 100];
+    size_t i95_f = nf * 95 / 100;
+    size_t i50_f = nf * 50 / 100;
+    size_t i5_f  = nf * 5  / 100;
+    std::nth_element(sorted_f.begin(), sorted_f.begin() + i95_f, sorted_f.end());
+    double p95 = sorted_f[i95_f];
+    std::nth_element(sorted_f.begin(), sorted_f.begin() + i50_f, sorted_f.begin() + i95_f);
+    double p50 = sorted_f[i50_f];
+    std::nth_element(sorted_f.begin(), sorted_f.begin() + i5_f, sorted_f.begin() + i50_f);
+    double p5 = sorted_f[i5_f];
 
     // Infer ANI range via OPH+CountSketch chain: ANI = (2J/(1+J))^(1/k), J ≈ cos(π*d)
     auto dist_to_ani = [&](double d) -> double {
@@ -1119,6 +1124,7 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
 
     // Build canonical ID → row map (identity at this point, but needed after future sorts)
     gid_to_row_.clear();
+    gid_to_row_.reserve(n);
     for (size_t i = 0; i < n; ++i)
         gid_to_row_[embeddings_[i].genome_id] = i;
 
@@ -1240,11 +1246,24 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     // different sort order → IForest sees different row indices → different contamination
     // counts on identical data. genome_id sort is fully deterministic.
     // FPS Phase 1 now finds the most-isolated genome by argmax scan instead of [0].
-    std::sort(embeddings_.begin(), embeddings_.end(),
-              [](const auto& a, const auto& b) { return a.genome_id < b.genome_id; });
+    // Permutation sort: GenomeEmbedding structs are large (~80KB each due to OPH
+    // signatures). Sort a small index vector, then rearrange with one sequential
+    // pass of moves instead of O(n log n) random swaps of 80KB structs.
+    {
+        std::vector<size_t> perm(n_emb);
+        std::iota(perm.begin(), perm.end(), 0);
+        std::sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
+            return embeddings_[a].genome_id < embeddings_[b].genome_id;
+        });
+        std::vector<GenomeEmbedding> sorted;
+        sorted.reserve(n_emb);
+        for (size_t idx : perm) sorted.push_back(std::move(embeddings_[idx]));
+        embeddings_ = std::move(sorted);
+    }
 
     // Rebuild canonical ID → row map after sort
     gid_to_row_.clear();
+    gid_to_row_.reserve(n_emb);
     for (size_t i = 0; i < n_emb; ++i)
         gid_to_row_[embeddings_[i].genome_id] = i;
 
@@ -1377,8 +1396,9 @@ void GeodesicDerep::apply_nystrom_embeddings() {
     // K[i,j] = OPH Jaccard(anchor_i, anchor_j) — symmetric PD kernel.
     // RowMajor: each thread writes its own contiguous row (no false sharing).
     using RowMajorMatXf = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-    RowMajorMatXf K_rm = RowMajorMatXf::Zero(
-        static_cast<int>(n_anchors), static_cast<int>(n_anchors));
+    // Uninitialized: every element is written — diagonal in the parallel loop,
+    // upper triangle in the parallel loop, lower triangle from upper after.
+    RowMajorMatXf K_rm(static_cast<int>(n_anchors), static_cast<int>(n_anchors));
 
     // Improvement 4: Containment blend for MAG anchors.
     static constexpr float kContainmentBlendThresh = 0.2f;
@@ -1726,18 +1746,27 @@ void GeodesicDerep::compute_isolation_scores_brute() {
     float median_sz = static_cast<float>(sizes[n / 2]);
     if (median_sz == 0.0f) median_sz = 1.0f;
 
-    std::sort(embeddings_.begin(), embeddings_.end(),
-              [median_sz](const auto& a, const auto& b) {
-                  float la = std::sqrt(static_cast<float>(a.genome_size) / median_sz);
-                  float lb = std::sqrt(static_cast<float>(b.genome_size) / median_sz);
-                  float fa = a.isolation_score * (a.quality_score / 100.0f) * la;
-                  float fb = b.isolation_score * (b.quality_score / 100.0f) * lb;
-                  if (fa != fb) return fa > fb;
-                  return a.genome_id < b.genome_id;
-              });
+    // Permutation sort: avoid O(n log n) random swaps of large GenomeEmbedding structs.
+    {
+        std::vector<size_t> perm(n);
+        std::iota(perm.begin(), perm.end(), 0);
+        std::sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
+            float la = std::sqrt(static_cast<float>(embeddings_[a].genome_size) / median_sz);
+            float lb = std::sqrt(static_cast<float>(embeddings_[b].genome_size) / median_sz);
+            float fa = embeddings_[a].isolation_score * (embeddings_[a].quality_score / 100.0f) * la;
+            float fb = embeddings_[b].isolation_score * (embeddings_[b].quality_score / 100.0f) * lb;
+            if (fa != fb) return fa > fb;
+            return embeddings_[a].genome_id < embeddings_[b].genome_id;
+        });
+        std::vector<GenomeEmbedding> sorted;
+        sorted.reserve(n);
+        for (size_t idx : perm) sorted.push_back(std::move(embeddings_[idx]));
+        embeddings_ = std::move(sorted);
+    }
 
     // Rebuild canonical ID → row map after sort
     gid_to_row_.clear();
+    gid_to_row_.reserve(n);
     for (size_t i = 0; i < n; ++i)
         gid_to_row_[embeddings_[i].genome_id] = i;
 
@@ -2858,6 +2887,7 @@ size_t GeodesicDerep::build_index_incremental(
 
     // Clear reuse-sensitive state from prior invocations
     embeddings_.clear();
+    embeddings_.reserve(genomes.size());
     failed_reads_.clear();
     last_representative_ids_.clear();
     nystrom_applied_ = false;
@@ -2976,6 +3006,7 @@ size_t GeodesicDerep::build_index_incremental(
 
     // Build canonical ID → row map
     gid_to_row_.clear();
+    gid_to_row_.reserve(n);
     for (size_t i = 0; i < n; ++i)
         gid_to_row_[embeddings_[i].genome_id] = i;
 
