@@ -2856,6 +2856,12 @@ size_t GeodesicDerep::build_index_incremental(
 
     if (genomes.empty()) return 0;
 
+    // Clear reuse-sensitive state from prior invocations
+    embeddings_.clear();
+    failed_reads_.clear();
+    last_representative_ids_.clear();
+    nystrom_applied_ = false;
+
     // Build path → accession map (stem-based extraction)
     path_to_accession_.clear();
     std::vector<std::string> all_accessions;
@@ -2961,6 +2967,10 @@ size_t GeodesicDerep::build_index_incremental(
         embeddings_.push_back(std::move(emb));
     }
 
+    // Reassign genome_ids sequentially so genome_id == index
+    for (size_t i = 0; i < embeddings_.size(); ++i)
+        embeddings_[i].genome_id = static_cast<uint64_t>(i);
+
     size_t n = embeddings_.size();
     if (n == 0) return 0;
 
@@ -2986,7 +2996,8 @@ size_t GeodesicDerep::build_index_incremental(
     if (n > SMALL_N_THRESHOLD) {
         apply_nystrom_embeddings();  // sets nystrom_applied_ = true, updates store_.data
     } else {
-        nystrom_applied_ = true;  // small n: use dot products on placeholder zeros
+        // Small n: use exact OPH Jaccard (do NOT set nystrom_applied_ = true)
+        nystrom_applied_ = false;
     }
 
     // Build HNSW index from Nyström (or placeholder) vectors
