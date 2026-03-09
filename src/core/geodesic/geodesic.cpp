@@ -1258,14 +1258,33 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     // This is the minimum θ at which the k-NN graph becomes connected — the natural
     // population-structure scale, analogous to the Python binary_search_filter which
     // finds the maximum similarity threshold where the graph stays connected.
+    //
+    // Contamination candidates (high isolation score) are excluded from the MST.
+    // This mirrors binary_search_filter's behavior: the SKANI graph it operates on
+    // has no edges for outlier genomes (too distant from the species cluster), so
+    // they never inflate the connectivity threshold.
     double mst_max_edge = 0.0;
     {
-        // Filter sentinel edges (dist = 1.0f) and deduplicate (u < v only).
-        // Deduplication avoids double-counting symmetric edges; doesn't affect MST correctness.
+        // Compute mean + 2σ of isolation scores to identify outliers.
+        // Same formula used by detect_contamination_candidates() — ensures consistent exclusion.
+        double iso_mean = 0.0, iso_m2 = 0.0;
+        size_t iso_n = 0;
+        for (size_t i = 0; i < n_emb; ++i) {
+            double d = embeddings_[i].isolation_score - iso_mean;
+            iso_mean += d / ++iso_n;
+            iso_m2   += d * (embeddings_[i].isolation_score - iso_mean);
+        }
+        const double iso_std = (iso_n > 1) ? std::sqrt(iso_m2 / iso_n) : 0.0;
+        const float  iso_thr = static_cast<float>(iso_mean + 2.0 * iso_std);
+
+        // Build edge list excluding edges where either endpoint is an outlier.
+        // Deduplicate (u < v only): symmetric edges don't affect MST correctness.
         std::vector<KNNEdge> edges;
         edges.reserve(knn_edges.size());
         for (const auto& e : knn_edges) {
             if (e.dist >= 1.0f) continue;
+            if (embeddings_[e.u].isolation_score >= iso_thr) continue;
+            if (e.v >= n_emb || embeddings_[e.v].isolation_score >= iso_thr) continue;
             if (e.u < e.v) edges.push_back(e);
             else if (e.u > e.v) edges.push_back({e.v, e.u, e.dist});
             // u == v: self-loop, skip
@@ -1274,36 +1293,53 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
         std::sort(edges.begin(), edges.end(),
                   [](const KNNEdge& a, const KNNEdge& b) { return a.dist < b.dist; });
 
-        // Union-Find (path-compressed, union-by-rank) over genome indices
-        std::vector<uint32_t> parent(n_emb);
-        std::vector<uint8_t>  rank(n_emb, 0);
-        std::iota(parent.begin(), parent.end(), 0);
-        auto find = [&](uint32_t x) -> uint32_t {
-            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
-            return x;
-        };
-        auto unite = [&](uint32_t a, uint32_t b) -> bool {
-            a = find(a); b = find(b);
-            if (a == b) return false;
-            if (rank[a] < rank[b]) std::swap(a, b);
-            parent[b] = a;
-            if (rank[a] == rank[b]) ++rank[a];
-            return true;
-        };
-
-        size_t components = n_emb;
-        for (const auto& e : edges) {
-            if (unite(e.u, e.v)) {
-                mst_max_edge = e.dist;
-                if (--components == 1) break;
-            }
+        // Count non-outlier genomes for union-find range
+        size_t n_main = 0;
+        std::vector<uint32_t> main_remap(n_emb, UINT32_MAX);
+        for (size_t i = 0; i < n_emb; ++i) {
+            if (embeddings_[i].isolation_score < iso_thr)
+                main_remap[i] = static_cast<uint32_t>(n_main++);
         }
-        // If components > 1 (k-NN graph disconnected), mst_max_edge is the largest
-        // edge in the partial MST — still a valid data-driven threshold; outlier/
-        // contamination genomes that remain isolated are handled by θ_ANI cap in caller.
-        if (is_verbose()) {
-            spdlog::info("GEODESIC: MST connectivity (components={}, max_edge={:.5f})",
-                         components, mst_max_edge);
+
+        if (n_main >= 2) {
+            // Remap edge endpoints to contiguous [0, n_main)
+            for (auto& e : edges) {
+                e.u = main_remap[e.u];
+                e.v = main_remap[e.v];
+            }
+            edges.erase(std::remove_if(edges.begin(), edges.end(),
+                [](const KNNEdge& e){ return e.u == UINT32_MAX || e.v == UINT32_MAX; }),
+                edges.end());
+
+            // Union-Find (path-compressed, union-by-rank) over non-outlier genomes
+            std::vector<uint32_t> parent(n_main);
+            std::vector<uint8_t>  rank(n_main, 0);
+            std::iota(parent.begin(), parent.end(), 0);
+            auto find_uf = [&](uint32_t x) -> uint32_t {
+                while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+                return x;
+            };
+            auto unite = [&](uint32_t a, uint32_t b) -> bool {
+                a = find_uf(a); b = find_uf(b);
+                if (a == b) return false;
+                if (rank[a] < rank[b]) std::swap(a, b);
+                parent[b] = a;
+                if (rank[a] == rank[b]) ++rank[a];
+                return true;
+            };
+
+            size_t components = n_main;
+            for (const auto& e : edges) {
+                if (unite(e.u, e.v)) {
+                    mst_max_edge = e.dist;
+                    if (--components == 1) break;
+                }
+            }
+            if (is_verbose()) {
+                spdlog::info("GEODESIC: MST over {} non-outlier genomes "
+                             "(components={}, max_edge={:.5f})",
+                             n_main, components, mst_max_edge);
+            }
         }
     }
 
