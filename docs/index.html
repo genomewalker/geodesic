@@ -74,14 +74,16 @@ body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font
 #algorithm .alg-legend-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 
 @media (max-width: 767px) {
-  #algorithm{flex-direction:column}
-  #algorithm .alg-canvas-wrap{flex:none;height:45vh;min-height:200px;order:1}
+  html,body{height:auto;min-height:100%;overflow-y:auto}
+  body{display:block}
+  #algorithm{flex-direction:column;overflow:visible;height:auto;flex:none}
+  #algorithm .alg-canvas-wrap{flex:none;height:45vw;min-height:180px;max-height:40vh;order:1}
   #algorithm .alg-panel{
     width:100%;min-width:0;border-right:none;border-top:1px solid var(--border);
-    order:2;flex:1;overflow:hidden;
+    order:2;flex:none;overflow:visible;height:auto;
   }
   #algorithm .alg-panel-hdr{padding:12px 16px 10px}
-  #algorithm .alg-steps{max-height:28vh}
+  #algorithm .alg-steps{max-height:none;overflow-y:visible}
   #algorithm .alg-step{padding:10px 16px}
   #algorithm .alg-controls{padding:10px 16px}
   #algorithm .alg-info-grid{grid-template-columns:1fr 1fr}
@@ -188,7 +190,7 @@ body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font
     <div class="alg-ctrl-row">
       <button class="alg-btn primary" id="alg-btn-action" style="flex:1;display:none">▶ Run</button>
       <button class="alg-btn" id="alg-btn-autoplay" style="display:none">Step</button>
-      <button class="alg-btn" id="alg-btn-thomson" style="flex:1;display:none">▶ Simulate</button>
+      <button class="alg-btn" id="alg-btn-simulate" style="flex:1;display:none">▶ Simulate</button>
       <button class="alg-btn" id="alg-btn-reset">↺</button>
     </div>
     <div class="alg-progress" id="alg-progress" style="display:none">
@@ -335,10 +337,10 @@ const circleGroup= new THREE.Group(); scene.add(circleGroup);
 
 const selected = [];
 const repPositions = [];
-let thomsonActive = false;
+let simulateActive = false;
 let autoplayTimer = null;
 let currentStep = 0;
-let thomsonEnergy = 0;
+let simulateEnergy = 0;
 let coverageDone = false;
 let tourActive = false;
 const tourTimeouts = [];
@@ -514,12 +516,12 @@ function updateInfo() {
   } else {
     document.getElementById('alg-info-radius').textContent = '—';
   }
-  if (thomsonActive) {
-    document.getElementById('alg-info-energy').textContent = 'U='+thomsonEnergy.toFixed(0);
+  if (simulateActive) {
+    document.getElementById('alg-info-energy').textContent = 'U='+simulateEnergy.toFixed(0);
   }
 }
 
-function thomsonStep() {
+function simulateStep() {
   const n=repPositions.length;
   if(n<2) return;
   const forces=repPositions.map(()=>new THREE.Vector3());
@@ -533,7 +535,7 @@ function thomsonStep() {
       forces[i].add(f); forces[j].sub(f);
     }
   }
-  thomsonEnergy=energy;
+  simulateEnergy=energy;
   repPositions.forEach((rp,i)=>{rp.addScaledVector(forces[i],0.0008);rp.normalize();});
   let k=0;
   repGroup.children.forEach(m=>{m.position.copy(repPositions[Math.floor(k/2)]);k++;});
@@ -542,11 +544,11 @@ function thomsonStep() {
 
 function reset() {
   selected.length=0; repPositions.length=0;
-  thomsonActive=false; coverageDone=false;
+  simulateActive=false; coverageDone=false;
   if(autoplayTimer){clearInterval(autoplayTimer);autoplayTimer=null;}
   document.getElementById('alg-btn-action').textContent='▶ Run';
   document.getElementById('alg-btn-action').disabled=false;
-  document.getElementById('alg-btn-thomson').textContent='▶ Simulate';
+  document.getElementById('alg-btn-simulate').textContent='▶ Simulate';
   document.getElementById('alg-info-energy').textContent='—';
   while(repGroup.children.length)   repGroup.remove(repGroup.children[0]);
   while(lineGroup.children.length)  lineGroup.remove(lineGroup.children[0]);
@@ -561,12 +563,12 @@ function setStep(s) {
   document.getElementById('alg-step-indicator').textContent=(currentStep+1)+' / 5';
   const labels=['FINGERPRINTING','SPHERE PROJECTION','NEIGHBOR INDEX','REPRESENTATIVE SELECTION','THOMSON REFINEMENT'];
   document.getElementById('alg-canvas-label').textContent=labels[currentStep];
-  const inFPS=currentStep===3, inThomson=currentStep===4;
+  const inFPS=currentStep===3, inSimulate=currentStep===4;
   const btnAction=document.getElementById('alg-btn-action');
   btnAction.style.display=inFPS?'':'none';
   if(inFPS&&!coverageDone){btnAction.textContent='▶ Run';btnAction.disabled=false;}
   document.getElementById('alg-btn-autoplay').style.display=inFPS?'':'none';
-  document.getElementById('alg-btn-thomson').style.display=inThomson?'':'none';
+  document.getElementById('alg-btn-simulate').style.display=inSimulate?'':'none';
   const prog=document.getElementById('alg-progress');
   if(prog) prog.style.display=inFPS?'':'none';
 }
@@ -605,12 +607,12 @@ function startTour() {
       clearInterval(tourPoll);tourPoll=null;
       tourAt(1200,()=>{
         setStep(4);
-        thomsonActive=true;
-        document.getElementById('alg-btn-thomson').textContent='⏸ Pause';
+        simulateActive=true;
+        document.getElementById('alg-btn-simulate').textContent='⏸ Pause';
         document.getElementById('alg-info-energy').textContent='running…';
         tourAt(8000,()=>{
-          thomsonActive=false;updateScene();
-          document.getElementById('alg-btn-thomson').textContent='▶ Simulate';
+          simulateActive=false;updateScene();
+          document.getElementById('alg-btn-simulate').textContent='▶ Simulate';
           stopTour();
         });
       });
@@ -645,10 +647,10 @@ document.getElementById('alg-btn-action').onclick=function(){
 
 document.getElementById('alg-btn-autoplay').onclick=function(){if(!coverageDone)fpsStep();};
 
-document.getElementById('alg-btn-thomson').onclick=function(){
-  thomsonActive=!thomsonActive;
-  this.textContent=thomsonActive?'⏸ Pause':'▶ Simulate';
-  if(!thomsonActive)updateScene();
+document.getElementById('alg-btn-simulate').onclick=function(){
+  simulateActive=!simulateActive;
+  this.textContent=simulateActive?'⏸ Pause':'▶ Simulate';
+  if(!simulateActive)updateScene();
 };
 
 document.querySelectorAll('#algorithm .alg-step').forEach((el,i)=>{
@@ -660,7 +662,7 @@ setStep(0);
 function animate(){
   requestAnimationFrame(animate);
   controls.update();
-  if(thomsonActive)thomsonStep();
+  if(simulateActive)simulateStep();
   renderer.render(scene,camera);
 }
 animate();
