@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "core/geodesic/geodesic.hpp"
 #include "core/sketch/minhash.hpp"
 
 #include <array>
@@ -372,4 +373,44 @@ TEST_CASE("MinHasher: syncmer OPH uses strict open-syncmer selection", "[minhash
     REQUIRE(actual.n_real_bins == expected.n_real_bins);
     REQUIRE(actual.signature == expected.signature);
     REQUIRE(actual.real_bins_bitmask == expected.real_bins_bitmask);
+}
+
+// ---------------------------------------------------------------------------
+// find_diversity_threshold tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("find_diversity_threshold bimodal", "[geodesic][threshold]") {
+    // Bimodal: 1000 points near 0.01, 1000 points near 0.10
+    std::vector<float> dists;
+    dists.reserve(2000);
+    std::mt19937 rng(42);
+    std::normal_distribution<float> close(0.01f, 0.002f);
+    std::normal_distribution<float> far(0.10f, 0.02f);
+    for (int i = 0; i < 1000; ++i) dists.push_back(std::abs(close(rng)));
+    for (int i = 0; i < 1000; ++i) dists.push_back(std::abs(far(rng)));
+    std::sort(dists.begin(), dists.end());
+    float thresh = derep::GeodesicDerep::find_diversity_threshold(dists, 0.5f);
+    REQUIRE(thresh > 0.02f);  // above intra-strain peak
+    REQUIRE(thresh < 0.08f);  // below inter-strain peak
+}
+
+TEST_CASE("find_diversity_threshold unimodal fallback", "[geodesic][threshold]") {
+    // Unimodal: all near 0.05
+    std::vector<float> dists;
+    dists.reserve(2000);
+    std::mt19937 rng(42);
+    std::normal_distribution<float> d(0.05f, 0.01f);
+    for (int i = 0; i < 2000; ++i) dists.push_back(std::abs(d(rng)));
+    std::sort(dists.begin(), dists.end());
+    float thresh = derep::GeodesicDerep::find_diversity_threshold(dists, 0.5f);
+    REQUIRE(thresh > 0.03f);
+    REQUIRE(thresh < 0.15f);
+}
+
+TEST_CASE("find_diversity_threshold respects ANI cap", "[geodesic][threshold]") {
+    // All points far apart — fallback MAD would exceed cap; result must stay <= cap
+    std::vector<float> dists(1000, 0.50f);
+    std::sort(dists.begin(), dists.end());
+    float thresh = derep::GeodesicDerep::find_diversity_threshold(dists, 0.10f);
+    REQUIRE(thresh <= 0.10f);
 }

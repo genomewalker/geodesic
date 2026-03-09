@@ -96,6 +96,7 @@ add_executable(geodesic
     src/core/similarity/skani.cpp
     src/core/sketch/minhash.cpp
     src/core/geodesic/geodesic.cpp
+    src/core/geodesic/diversity_threshold.cpp
     src/parallel/taxon_processor.cpp
 )
 
