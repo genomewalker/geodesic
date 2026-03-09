@@ -456,26 +456,20 @@ TaxonResult process_taxon(
         // Phase 3: single HNSW pass — isolation scores + 1-NN distribution fused.
         auto nn = geodesic.compute_isolation_scores();
 
-        // diversity_threshold = min(θ_ANI, data_threshold, MST_max_edge):
-        //   data_threshold: bimodal-aware valley detector on NN distance histogram.
+        // diversity_threshold = min(θ_ANI, MST_max_edge):
         //   MST_max_edge: maximum edge in the minimum spanning tree of the k-NN graph.
         //   θ_ANI is the hard upper cap from --ani-threshold (never merge across species).
         //   Falls back to NN_P95 if MST is unavailable (brute-force small-n path).
         // min_rep_distance = P5 of NN distances: electrostatic merge collapses near-duplicates.
         {
-            // Primary: bimodal-aware valley detector
-            float data_threshold = GeodesicDerep::find_diversity_threshold(
-                nn.sorted_nn_dists, diversity_threshold);
-
-            // Secondary: MST connectivity scale
+            // Use MST connectivity scale as the diversity threshold.
+            // Falls back to NN_P95 when MST unavailable (brute-force path).
             float mst_threshold = (nn.mst_max_edge > 0.0)
                 ? static_cast<float>(nn.mst_max_edge)
                 : static_cast<float>(nn.p95);
 
-            // Take the more conservative (smaller) of the two
-            float knn_thr = std::min(data_threshold, mst_threshold);
             diversity_threshold = std::max(1e-6f,
-                std::min(diversity_threshold, knn_thr));
+                std::min(diversity_threshold, mst_threshold));
             min_rep_distance = std::min(static_cast<float>(nn.p5),
                                         diversity_threshold * 0.5f);
 
@@ -493,10 +487,10 @@ TaxonResult process_taxon(
             double thr_j   = std::cos(static_cast<double>(diversity_threshold) * M_PI);
             double thr_ani = GeodesicDerep::jaccard_to_ani(std::max(0.0, thr_j), kmer_size);
             spdlog::info("[{}] geodesic: k={} dim={} sketch={} | "
-                         "div_thr={:.4f} ({:.1f}% ANI, data={:.4f} MST={:.4f}) | "
+                         "div_thr={:.4f} ({:.1f}% ANI, MST={:.4f}) | "
                          "min_rep={:.4f} (NN P5={:.4f} P50={:.4f} P95={:.4f})",
                          taxon.taxonomy, kmer_size, embedding_dim, sketch_size,
-                         diversity_threshold, thr_ani, data_threshold, nn.mst_max_edge,
+                         diversity_threshold, thr_ani, nn.mst_max_edge,
                          min_rep_distance, nn.p5, nn.p50, nn.p95);
         }
 

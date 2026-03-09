@@ -73,6 +73,27 @@ body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font
 #algorithm .alg-legend-item{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text2)}
 #algorithm .alg-legend-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 
+@media (max-width: 767px) {
+  #algorithm{flex-direction:column}
+  #algorithm .alg-canvas-wrap{flex:none;height:45vh;min-height:200px;order:1}
+  #algorithm .alg-panel{
+    width:100%;min-width:0;border-right:none;border-top:1px solid var(--border);
+    order:2;flex:1;overflow:hidden;
+  }
+  #algorithm .alg-panel-hdr{padding:12px 16px 10px}
+  #algorithm .alg-steps{max-height:28vh}
+  #algorithm .alg-step{padding:10px 16px}
+  #algorithm .alg-controls{padding:10px 16px}
+  #algorithm .alg-info-grid{grid-template-columns:1fr 1fr}
+  #algorithm .alg-info-cell{padding:8px 10px}
+  #algorithm .alg-canvas-lbl{font-size:9px;top:8px;right:10px}
+  #algorithm .alg-legend{bottom:8px;right:10px;gap:3px}
+  #algorithm .alg-legend-item{font-size:9px}
+  #algorithm .alg-legend-dot{width:6px;height:6px}
+  .nav{padding:0 14px;gap:10px}
+  .nav-prefix{font-size:10px}
+}
+
 #algorithm .alg-insight{
   background:rgba(21,128,61,.05);border-left:2px solid var(--green);
   padding:6px 10px;margin:8px 0;font-size:11.5px;color:var(--text2);

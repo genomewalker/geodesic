@@ -20,13 +20,15 @@
 
 3. **Index** — build an [HNSW](https://arxiv.org/abs/1603.09320) nearest-neighbour index on the sphere for sub-linear candidate retrieval.
 
-4. **Score** — compute isolation scores (mean angular distance to $k=10$ nearest neighbours). Flag anomalous genomes when isolation score $> \mu + z\sigma$. Derive the diversity threshold from the NN distribution: $\theta = \min(\mathrm{NN}_{P95},\ \theta_{\mathrm{ANI}})$.
+4. **Score** — compute isolation scores (mean angular distance to $k=10$ nearest neighbours) and build the minimum spanning tree of the k-NN graph via Kruskal's algorithm. The longest MST edge sets the diversity threshold $\theta$: the minimum inter-strain scale at which the proximity graph becomes connected. This is inferred from the data, not a fixed parameter. Flag anomalous genomes (contamination candidates) when isolation score $> \mu + z\sigma$.
 
 5. **Select** — quality-weighted [Farthest Point Sampling (FPS)](https://en.wikipedia.org/wiki/Farthest-first_traversal) on the unit sphere. FPS is a greedy 2-approximation to the k-center problem: each step adds the genome farthest from its nearest representative, with fitness weighted by $q_i/100 \cdot \sqrt{L_i/L_m}$ (CheckM2 quality × genome size). Stops when every genome is within $\theta$ of some representative.
 
 6. **Merge** — coalesce representatives within $d_\text{min}$ via Union-Find.
 
 7. **Verify** — for non-representatives with embedding distance in $[\theta(1-\varepsilon),\,\theta)$, check the top-3 nearest representatives using exact dual-sketch OPH Jaccard. Promote only if no representative is within $\theta$ in sketch space.
+
+8. **Certify** — universal coverage pass: every non-representative is verified against its assigned representative by direct OPH Jaccard. Certification threshold $\tau = q/(2-q)$ where $q = \mathrm{ANI}^k$. Any genome failing this check is promoted to a representative, providing an explicit sketch-space coverage guarantee independent of Nyström approximation error.
 
 ANI thresholds are derived from Jaccard via the Mash formula: $\mathrm{ANI} = \left(\frac{2J}{1+J}\right)^{1/k} \times 100$.
 
@@ -106,13 +108,12 @@ Already-completed taxa are skipped automatically.
 
 ## Performance
 
-| Scale | Genomes | Representatives | Runtime | Threads |
-|-------|---------|-----------------|---------|---------|
-| *E. coli* | 233,166 | 12,500 | 14 min | 24 |
-| *S. enterica* | 367,440 | 4,252 | 23 min | 24 |
-| Full GTDB r226 | 5,195,094 | ~206,000 | ~6.8 h | 96 |
+| Species | Genomes | Representatives | Reduction | Runtime | Cov. mean ANI | Cov. min ANI | Threads |
+|---------|---------|-----------------|-----------|---------|---------------|--------------|---------|
+| *E. coli* | 233,166 | 1,359 | 99.4% | 15 min | 99.96% | 99.91% | 24 |
+| *S. enterica* | 367,440 | 982 | 99.7% | 18 min | 99.99% | 99.96% | 24 |
 
-Coverage validation on *E. coli* (233k genomes, exact skani ANI): **100% of genomes within 95% ANI of their nearest representative**. Minimum coverage ANI: 99.93%. Mean: 99.98%.
+Coverage: OPH certification (Phase 8) guarantees every genome in the collection is within the ANI threshold of its assigned representative in sketch space.
 
 ## License
 
