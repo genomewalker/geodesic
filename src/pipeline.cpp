@@ -1,6 +1,5 @@
 #include "pipeline.hpp"
 #include "parallel/taxon_processor.hpp"
-#include "core/genome_cache.hpp"
 #include "core/logging.hpp"
 #include "core/types.hpp"
 #include "db/db_manager.hpp"
@@ -252,8 +251,6 @@ int run_pipeline(Config& cfg) {
     spdlog::info("{} taxa, {} genomes total", taxa.size(), total_genomes);
 
     // 9. Parallel processing
-    GenomeCache cache;
-
     // Thread budget: total = workers * threads. Large taxa claim more slots
     // (reducing concurrency); small taxa claim 1 (maximizing parallelism).
     // A scheduler thread submits tasks as budget permits, while the main thread
@@ -394,10 +391,10 @@ int run_pipeline(Config& cfg) {
             int desired  = taxon_threads[i];
             int acquired = budget_acquire(desired);
             pool.detach_task(
-                [&taxa, i, &cfg, &db, &cache, emb_store_ptr, gunc_scores_ptr,
+                [&taxa, i, &cfg, &db, emb_store_ptr, gunc_scores_ptr,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release, acquired] {
-                    auto result = process_taxon(taxa[i], cfg, acquired, db, cache, emb_store_ptr, gunc_scores_ptr);
+                    auto result = process_taxon(taxa[i], cfg, acquired, db, emb_store_ptr, gunc_scores_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         done_queue.push(std::move(result));
@@ -414,10 +411,10 @@ int run_pipeline(Config& cfg) {
             for (size_t i : batch_indices)
                 batch_taxa.push_back(&taxa[i]);
             pool.detach_task(
-                [batch_taxa, &cfg, &db, &cache,
+                [batch_taxa, &cfg, &db,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release] {
-                    auto results = process_tiny_batch(batch_taxa, cfg, db, cache);
+                    auto results = process_tiny_batch(batch_taxa, cfg, db);
                     {
                         std::lock_guard lock(done_mutex);
                         for (auto& r : results)

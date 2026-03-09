@@ -430,8 +430,7 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     // Helper: embed a set of genome indices and return index→embedding map.
     // Uses OPH+CountSketch projection: E[dot(u,v)] = J(A,B).
     auto embed_sample = [&](const std::vector<size_t>& indices,
-                             int kmer_size, int sketch_size, int embedding_dim,
-                             std::unordered_map<size_t, uint64_t>* out_sizes = nullptr)
+                             int kmer_size, int sketch_size, int embedding_dim)
         -> std::unordered_map<size_t, std::vector<float>>
     {
         MinHasher hasher({ .kmer_size = kmer_size, .sketch_size = sketch_size,
@@ -481,7 +480,6 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
                     auto emb = cs_project(sig16);
                     std::lock_guard lock(mtx);
                     cache[idx] = std::move(emb);
-                    if (out_sizes) (*out_sizes)[idx] = oph.genome_length;
                 }
             }));
         }
@@ -508,12 +506,7 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
         return dists;
     };
 
-    // Default params returned on degenerate input
-    auto defaults = []() -> CalibratedParams {
-        return { 21, 256, 10000, 0.02f, 0.01f, 100.0, 100.0, 0.0, 21.0, 0.0 };
-    };
-
-    CalibratedParams params = defaults();
+    CalibratedParams params{ 21, 256, 10000 };
 
     if (genomes.size() < 2) return params;
 
@@ -537,25 +530,8 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     //         to measure spread and choose final tier
     // ----------------------------------------------------------------
     const int k0 = 21, s0 = 10000, d0 = 256;
-    std::unordered_map<size_t, uint64_t> size_map;
-    auto cache0 = embed_sample(idx_vec, k0, s0, d0, &size_map);
+    auto cache0 = embed_sample(idx_vec, k0, s0, d0);
     auto dists0  = compute_distances(pairs, cache0);
-
-    // Genome size coefficient of variation: proxy for open pangenome diversity
-    float size_cv = 0.0f;
-    if (size_map.size() >= 2) {
-        double sum = 0.0, sum2 = 0.0;
-        for (const auto& [idx, sz] : size_map) {
-            sum  += static_cast<double>(sz);
-            sum2 += static_cast<double>(sz) * static_cast<double>(sz);
-        }
-        double n   = static_cast<double>(size_map.size());
-        double mean = sum / n;
-        if (mean > 0.0) {
-            double var = sum2 / n - mean * mean;
-            size_cv = static_cast<float>(std::sqrt(std::max(0.0, var)) / mean);
-        }
-    }
 
     if (dists0.empty()) return params;
 
@@ -590,77 +566,13 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
         kmer = 16; sketch_size = 5000;  embedding_dim = 128;
     }
 
-    // ----------------------------------------------------------------
-    // Step 3: second pass only if tier changed
-    // ----------------------------------------------------------------
-    std::vector<double> final_dists;
-    if (kmer == k0 && sketch_size == s0 && embedding_dim == d0) {
-        final_dists = dists0;
-    } else {
-        auto cache1 = embed_sample(idx_vec, kmer, sketch_size, embedding_dim);
-        final_dists  = compute_distances(pairs, cache1);
-    }
-
-    if (final_dists.empty()) {
-        params.kmer_size = kmer; params.embedding_dim = embedding_dim;
-        params.sketch_size = sketch_size;
-        return params;
-    }
-
-    // ----------------------------------------------------------------
-    // Step 4: derive thresholds from final distance distribution
-    // ----------------------------------------------------------------
-    std::vector<double> sorted_f = final_dists;
-    size_t nf = sorted_f.size();
-    size_t i95_f = nf * 95 / 100;
-    size_t i50_f = nf * 50 / 100;
-    size_t i5_f  = nf * 5  / 100;
-    std::nth_element(sorted_f.begin(), sorted_f.begin() + i95_f, sorted_f.end());
-    double p95 = sorted_f[i95_f];
-    std::nth_element(sorted_f.begin(), sorted_f.begin() + i50_f, sorted_f.begin() + i95_f);
-    double p50 = sorted_f[i50_f];
-    std::nth_element(sorted_f.begin(), sorted_f.begin() + i5_f, sorted_f.begin() + i50_f);
-    double p5 = sorted_f[i5_f];
-
-    // Infer ANI range via OPH+CountSketch chain: ANI = (2J/(1+J))^(1/k), J ≈ cos(π*d)
-    auto dist_to_ani = [&](double d) -> double {
-        double c = std::cos(M_PI * d);
-        if (c <= 0.0) return 0.0;
-        double ratio = 2.0 * c / (1.0 + c);
-        return std::pow(ratio, 1.0 / kmer) * 100.0;
-    };
-    params.ani_max    = dist_to_ani(p5);
-    params.ani_min    = dist_to_ani(p95);
-    params.ani_spread = params.ani_max - params.ani_min;
-    // Auto-calibrated ANI range (used for logging / min_rep_distance only)
-    params.ani_threshold = std::max(0.90, std::min(0.9999,
-        (params.ani_min + 0.5 * params.ani_spread) / 100.0));
-
-    params.kmer_size        = kmer;
-    params.embedding_dim    = embedding_dim;
-    params.sketch_size      = sketch_size;
-
-    // diversity_threshold: stored in params but overridden at call site with user's ani_threshold.
-    {
-        double ak = std::pow(params.ani_threshold, static_cast<double>(kmer));
-        double j = std::clamp(ak / (2.0 - ak), 0.0, 1.0);
-        params.diversity_threshold = static_cast<float>(std::acos(j) / M_PI);
-    }
-    // min_rep_distance: don't merge reps that are genuinely distinct (p5 of observed distances)
-    params.min_rep_distance = static_cast<float>(p5);
-    if (params.min_rep_distance >= params.diversity_threshold)
-        params.min_rep_distance = params.diversity_threshold * 0.5f;
-    params.ani_slope     = static_cast<double>(kmer);
-    params.ani_intercept = 0.0;
-    params.size_cv       = size_cv;
+    params.kmer_size     = kmer;
+    params.embedding_dim = embedding_dim;
+    params.sketch_size   = sketch_size;
 
     if (is_verbose()) {
-        spdlog::info("GEODESIC: Calibration — {} pairs, spread={:.3f}, tier k={}/dim={}/sketch={}, size_cv={:.3f}",
-                     nf, spread, kmer, embedding_dim, sketch_size, size_cv);
-        spdlog::info("GEODESIC: Distances P5={:.4f}, P50={:.4f}, P95={:.4f}  "
-                     "→ ANI {:.1f}%–{:.1f}%  thresholds: diversity={:.4f}, min_rep={:.4f}",
-                     p5, p50, p95, params.ani_min, params.ani_max,
-                     params.diversity_threshold, params.min_rep_distance);
+        spdlog::info("GEODESIC: Calibration — {} pairs, spread={:.3f}, tier k={}/dim={}/sketch={}",
+                     pairs.size(), spread, kmer, embedding_dim, sketch_size);
     }
 
     return params;
@@ -1199,7 +1111,6 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
         stats.p5  = nn_dists[n * 5  / 100];
         stats.p50 = nn_dists[n * 50 / 100];
         stats.p95 = nn_dists[n * 95 / 100];
-        stats.sorted_nn_dists = std::move(nn_dists);
         return stats;
     }
     if (is_verbose()) spdlog::info("GEODESIC: computing isolation scores (k={})", cfg_.isolation_k);
@@ -1418,7 +1329,6 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     stats.p50 = nn_dists[n * 50 / 100];
     stats.p95 = nn_dists[n * 95 / 100];
     stats.mst_max_edge = mst_max_edge;
-    stats.sorted_nn_dists = std::move(nn_dists);
     stats.low_pair_count   = (mst_n_main < 20);
     stats.high_gap_ratio   = (mst_max_edge > 0.0 && stats.p50 > 1e-9
                               && mst_max_edge / stats.p50 > 5.0);
@@ -1901,111 +1811,6 @@ void GeodesicDerep::compute_isolation_scores_brute() {
         store_.paths[i]            = embeddings_[i].path;
         std::copy(embeddings_[i].vector.begin(), embeddings_[i].vector.end(), store_.row(i));
     }
-}
-
-void GeodesicDerep::calibrate(const std::vector<std::filesystem::path>& sample_genomes) {
-    if (sample_genomes.size() < 20) {
-        spdlog::warn("GEODESIC: insufficient genomes for calibration ({})", sample_genomes.size());
-        return;
-    }
-
-    if (is_verbose()) spdlog::info("GEODESIC: calibrating ANI bounds on {} sample pairs", cfg_.calibration_samples);
-
-    // Select random pairs
-    std::mt19937_64 rng(42);
-    std::uniform_int_distribution<size_t> dist(0, sample_genomes.size() - 1);
-
-    std::vector<std::pair<double, double>> samples;
-    samples.reserve(cfg_.calibration_samples);
-
-    for (int i = 0; i < cfg_.calibration_samples; ++i) {
-        size_t a = dist(rng);
-        size_t b = dist(rng);
-        if (a == b) continue;
-
-        // Compute embedding distance
-        auto emb_a = embed_genome(sample_genomes[a], a);
-        auto emb_b = embed_genome(sample_genomes[b], b);
-        double emb_dist = angular_distance(emb_a.vector, emb_b.vector);
-
-        // Compute exact ANI
-        double ani = compute_exact_ani(sample_genomes[a], sample_genomes[b]);
-
-        samples.emplace_back(emb_dist, ani);
-
-        if ((i + 1) % 100 == 0) {
-            if (is_verbose()) spdlog::info("GEODESIC: calibration progress {}/{}", i + 1, cfg_.calibration_samples);
-        }
-    }
-
-    calibrator_.fit(samples);
-}
-
-double GeodesicDerep::compute_exact_ani(const std::filesystem::path& a,
-                                        const std::filesystem::path& b) {
-    ++skani_calls_;
-
-    // Use skani for exact ANI
-    // Parse field 3 (ANI) from skani dist output
-    std::string cmd = "skani dist -q \"" + a.string() + "\" -r \"" + b.string() +
-                      "\" 2>/dev/null | tail -1 | cut -f3";
-
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return 0.0;
-
-    char buffer[128];
-    std::string result;
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        result += buffer;
-    }
-    pclose(pipe);
-
-    try {
-        return std::stod(result) / 100.0;  // Convert percentage to fraction
-    } catch (...) {
-        return 0.0;
-    }
-}
-
-std::vector<uint64_t> GeodesicDerep::find_candidate_covers(
-    uint64_t query_id,
-    const std::vector<uint64_t>& current_reps) {
-
-    if (current_reps.empty()) return {};
-
-    auto qit = gid_to_row_.find(query_id);
-    if (qit == gid_to_row_.end()) return {};
-    const auto& query = embeddings_[qit->second];
-
-    // Create filter set for reps only
-    std::unordered_set<uint64_t> rep_set(current_reps.begin(), current_reps.end());
-
-    // Find safe radius where ANI_upper < threshold
-    float safe_radius = static_cast<float>(calibrator_.inverse_upper(cfg_.ani_threshold));
-
-    // Search within safe radius
-    auto neighbors = index_->search_radius(query.vector, safe_radius * 1.2f, &rep_set);
-
-    std::vector<uint64_t> candidates;
-    for (const auto& [rep_id, dist] : neighbors) {
-        auto bounds = calibrator_.predict(dist);
-
-        if (bounds.lower >= cfg_.ani_threshold) {
-            // Certified redundant! Return immediately
-            ++certified_redundant_;
-            return {rep_id};
-        }
-
-        if (bounds.upper >= cfg_.ani_threshold) {
-            // Uncertain: need verification
-            candidates.push_back(rep_id);
-        } else {
-            // Certified non-redundant (upper < threshold)
-            ++certified_unique_;
-        }
-    }
-
-    return candidates;
 }
 
 void GeodesicDerep::exclude_from_reps(const std::unordered_set<std::string>& paths) {
@@ -3374,46 +3179,6 @@ void GeodesicDerep::save_embeddings_async(db::EmbeddingStore& store, const std::
     }
     flush();
     if (is_verbose()) spdlog::info("GEODESIC: Saved {} embeddings to store (async)", n);
-}
-
-void GeodesicDerep::save_embeddings_to_store(db::EmbeddingStore& store, const std::string& taxonomy) {
-    if (embeddings_.empty()) return;
-
-    std::vector<db::GenomeEmbedding> store_embeddings;
-    store_embeddings.reserve(embeddings_.size());
-
-    for (const auto& emb : embeddings_) {
-        db::GenomeEmbedding se;
-
-        // Get accession from path
-        auto it = path_to_accession_.find(emb.path.string());
-        if (it != path_to_accession_.end()) {
-            se.accession = it->second;
-        } else {
-            // Extract from filename
-            se.accession = emb.path.stem().string();
-            if (se.accession.size() > 8 && se.accession.substr(se.accession.size() - 8) == "_genomic") {
-                se.accession = se.accession.substr(0, se.accession.size() - 8);
-            }
-        }
-
-        se.taxonomy = taxonomy;
-        se.file_path = emb.path;
-        se.embedding = emb.vector;          // placeholder zeros (Nyström vectors vary in dim)
-        se.oph_sig = emb.oph_sig;           // raw OPH hashes — key for warm-run Nyström
-        // oph_sig2 not persisted (lazy; re-materialized for anchors/borderline on each run)
-        se.real_bins_mask = emb.real_bins_mask;
-        se.n_real_bins = emb.n_real_bins;
-        se.isolation_score = emb.isolation_score;
-        se.quality_score = emb.quality_score;
-        se.genome_size = emb.genome_size;
-        store_embeddings.push_back(std::move(se));
-    }
-
-    if (!store.insert_embeddings(store_embeddings))
-        spdlog::error("GEODESIC: Failed to save {} embeddings to store", store_embeddings.size());
-    else if (is_verbose())
-        spdlog::info("GEODESIC: Saved {} embeddings to store", store_embeddings.size());
 }
 
 } // namespace derep

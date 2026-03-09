@@ -1,6 +1,5 @@
 #pragma once
 #include "config.hpp"
-#include "core/genome_cache.hpp"
 #include "core/types.hpp"
 #include "db/db_manager.hpp"
 #include "io/tsv_reader.hpp"
@@ -19,7 +18,6 @@ TaxonResult process_taxon(
     const Config& cfg,
     int thread_budget,
     db::DBManager& db,
-    GenomeCache& cache,
     db::EmbeddingStore* emb_store = nullptr,
     const std::unordered_map<std::string, GuncQuality>* gunc_scores = nullptr,
     bool in_batch_txn = false);
@@ -29,7 +27,6 @@ TaxonResult process_taxon(
 std::vector<TaxonResult> process_tiny_batch(
     const std::vector<const Taxon*>& taxa,
     const Config& cfg,
-    db::DBManager& db,
-    GenomeCache& cache);
+    db::DBManager& db);
 
 } // namespace derep

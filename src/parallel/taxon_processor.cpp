@@ -126,7 +126,6 @@ TaxonResult process_taxon(
     const Config& cfg,
     int thread_budget,
     db::DBManager& db,
-    GenomeCache& cache,
     db::EmbeddingStore* emb_store,
     const std::unordered_map<std::string, GuncQuality>* gunc_scores,
     bool in_batch_txn) {
@@ -261,28 +260,20 @@ TaxonResult process_taxon(
             for (size_t ri : rep_indices)
                 representatives.push_back(all_accessions[ri]);
 
-            // Build ani_to_rep_map for non-reps: best Jaccard to any rep
+            // Build ani_to_rep_map (non-reps) and coverage stats in a single pass
             std::unordered_map<std::string, double> ani_to_rep_map;
-            for (size_t i = 0; i < n; ++i) {
-                if (is_rep[i]) continue;
-                double best_j = 0.0;
-                for (size_t ri : rep_indices)
-                    best_j = std::max(best_j, jac[i][ri]);
-                ani_to_rep_map[all_accessions[i]] =
-                    GeodesicDerep::jaccard_to_ani(best_j, cfg.kmer_size);
-            }
-
-            // Coverage stats: per-genome best ANI to nearest rep
             std::vector<double> genome_to_rep_ani(n);
             for (size_t i = 0; i < n; ++i) {
                 if (is_rep[i]) {
                     genome_to_rep_ani[i] = 100.0;
-                } else {
-                    double best_j = 0.0;
-                    for (size_t ri : rep_indices)
-                        best_j = std::max(best_j, jac[i][ri]);
-                    genome_to_rep_ani[i] = GeodesicDerep::jaccard_to_ani(best_j, cfg.kmer_size);
+                    continue;
                 }
+                double best_j = 0.0;
+                for (size_t ri : rep_indices)
+                    best_j = std::max(best_j, jac[i][ri]);
+                double ani = GeodesicDerep::jaccard_to_ani(best_j, cfg.kmer_size);
+                ani_to_rep_map[all_accessions[i]] = ani;
+                genome_to_rep_ani[i] = ani;
             }
             double cov_sum = 0.0, cov_min = 100.0, cov_max = 0.0;
             for (double v : genome_to_rep_ani) {
@@ -428,13 +419,11 @@ TaxonResult process_taxon(
         for (const auto& [file_path, reason] : geodesic.failed_reads()) {
             auto it = path_to_accession.find(file_path);
             const std::string accession = (it != path_to_accession.end()) ? it->second : file_path;
-            // Escape single quotes in reason to prevent SQL injection.
-            std::string safe_reason = reason;
-            for (size_t pos = 0; (pos = safe_reason.find('\'', pos)) != std::string::npos; pos += 2)
-                safe_reason.replace(pos, 1, "''");
-            db.execute("INSERT OR IGNORE INTO jobs_failed (accession, taxonomy, file, reason) "
-                       "VALUES ('" + accession + "', '" + taxon.taxonomy + "', '" +
-                       file_path + "', '" + safe_reason + "')");
+            auto& conn = db.thread_connection();
+            auto stmt = conn.Prepare(
+                "INSERT OR IGNORE INTO jobs_failed (accession, taxonomy, file, reason) "
+                "VALUES ($1, $2, $3, $4)");
+            stmt->Execute(accession, taxon.taxonomy, file_path, reason);
         }
 
         // Persist genome_length + n_contigs from OPH sketch (input TSV doesn't have them).
@@ -545,7 +534,7 @@ TaxonResult process_taxon(
 
         // Pre-seed fixed representatives (--fixed-reps) before FPS
         if (cfg.fixed_reps_file) {
-            static const std::unordered_set<std::string> fixed_accessions = [&]() {
+            const auto fixed_accessions = [&]() {
                 std::unordered_set<std::string> s;
                 std::ifstream f(*cfg.fixed_reps_file);
                 std::string line;
@@ -754,15 +743,14 @@ TaxonResult process_taxon(
 std::vector<TaxonResult> process_tiny_batch(
     const std::vector<const Taxon*>& taxa,
     const Config& cfg,
-    db::DBManager& db,
-    GenomeCache& cache) {
+    db::DBManager& db) {
     std::vector<TaxonResult> results;
     results.reserve(taxa.size());
     auto& conn = db.thread_connection();
     conn.Query("BEGIN TRANSACTION");
     try {
         for (const Taxon* t : taxa)
-            results.push_back(process_taxon(*t, cfg, 1, db, cache, nullptr, nullptr, /*in_batch_txn=*/true));
+            results.push_back(process_taxon(*t, cfg, 1, db, nullptr, nullptr, /*in_batch_txn=*/true));
         conn.Query("COMMIT");
     } catch (...) {
         conn.Query("ROLLBACK");

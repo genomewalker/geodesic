@@ -37,7 +37,7 @@ struct AlignedAllocator {
 };
 
 // Structure-of-Arrays (SoA) embedding storage for cache-friendly SIMD access
-struct EmbeddingStore {
+struct SoAStore {
     size_t n = 0;
     size_t dim = 512;
     std::vector<float, AlignedAllocator<float, 64>> data;  // size n*dim, row-major
@@ -185,24 +185,11 @@ public:
     explicit GeodesicDerep(Config cfg);
     ~GeodesicDerep();
 
-    // Auto-calibrate parameters based on ANI span from random sample
-    // Returns recommended params + learned embedding↔ANI relationship
+    // Auto-calibrate embedding parameters from random genome sample
     struct CalibratedParams {
         int kmer_size;
         int embedding_dim;
         int sketch_size;
-        float diversity_threshold;
-        float min_rep_distance;     // Derived from target min ANI divergence
-        double ani_min;
-        double ani_max;
-        double ani_spread;
-        double ani_threshold;   // Derived FPS threshold: ani_min + 0.5 * ani_spread (as fraction 0-1)
-        // Linear model: ANI ≈ slope * embedding_dist + intercept
-        double ani_slope;
-        double ani_intercept;
-        // Genome size heterogeneity: std(sizes)/mean(sizes) across sampled genomes.
-        // High CV indicates open pangenome → benefit from more representatives.
-        float size_cv = 0.0f;
     };
     static CalibratedParams auto_calibrate(
         const std::vector<std::filesystem::path>& genomes,
@@ -226,9 +213,6 @@ public:
         const std::string& taxonomy,
         const std::unordered_map<std::string, double>& quality_scores = {});
 
-    // Save embeddings to store (call after build_index or compute_isolation_scores)
-    void save_embeddings_to_store(db::EmbeddingStore& store, const std::string& taxonomy);
-
     // Async variant: uses pre-Nyström float snapshot, streams in batches to cap RAM overhead.
     void save_embeddings_async(db::EmbeddingStore& store, const std::string& taxonomy,
                                std::vector<std::vector<float>>&& vec_snap);
@@ -247,16 +231,8 @@ public:
     // Phase 4: Select representatives with lazy certified ANI
     std::vector<SimilarityEdge> select_representatives();
 
-    // Calibration: fit ANI bounds from embedding distances
-    void calibrate(const std::vector<std::filesystem::path>& sample_genomes);
-
     // Get all embeddings
     const std::vector<GenomeEmbedding>& embeddings() const { return embeddings_; }
-
-    // Statistics
-    size_t total_skani_calls() const { return skani_calls_; }
-    size_t total_certified_redundant() const { return certified_redundant_; }
-    size_t total_certified_unique() const { return certified_unique_; }
 
     // Exact Jaccard from OPH signatures with b-bit bias correction.
     // Works for both uint16_t (stored) and uint32_t (in-memory OPH path).
@@ -306,8 +282,6 @@ public:
         // binary_search_filter analog from the original graph-based pipeline.
         // Zero if unavailable (small-n brute-force path).
         double mst_max_edge = 0.0;
-        std::vector<float> sorted_nn_dists;  // full sorted NN distances for threshold calibration
-
         // Instability flags: when set, mst_max_edge may not reflect intra-species scale.
         bool low_pair_count   = false;  // < 20 non-outlier genomes in MST
         bool high_gap_ratio   = false;  // mst_max_edge / p50 > 5 (bimodal gap)
@@ -331,12 +305,6 @@ public:
     const std::vector<std::pair<std::string, std::string>>& failed_reads() const {
         return failed_reads_;
     }
-
-    // Infer diversity threshold from the bimodal structure of sorted NN distances.
-    // ani_cap_angular: upper bound (user ANI threshold as angular distance).
-    // Falls back to robust median+MAD estimator for unimodal distributions.
-    static float find_diversity_threshold(const std::vector<float>& sorted_nn_dists,
-                                           float ani_cap_angular);
 
     // Diversity statistics computed from embeddings (no skani needed)
     struct DiversityMetrics {
@@ -364,7 +332,7 @@ private:
     Config cfg_;
     int runtime_dim_ = 0;  // Actual embedding dim after Nystrom (may differ from cfg_.embedding_dim)
     std::vector<GenomeEmbedding> embeddings_;
-    EmbeddingStore store_;  // SoA layout for SIMD-friendly access
+    SoAStore store_;  // SoA layout for SIMD-friendly access
     ANICalibrator calibrator_;
 
     // (Projection matrix removed: now uses OPH + CountSketch)
@@ -372,11 +340,6 @@ private:
     // HNSW index (forward declaration to avoid header dependency)
     struct HNSWIndex;
     std::unique_ptr<HNSWIndex> index_;
-
-    // Statistics
-    mutable std::atomic<size_t> skani_calls_{0};
-    mutable std::atomic<size_t> certified_redundant_{0};
-    mutable std::atomic<size_t> certified_unique_{0};
 
     // Last selected representatives (for incremental workflows)
     std::vector<uint64_t> last_representative_ids_;
@@ -428,16 +391,6 @@ private:
 
     // Brute-force O(n²) isolation scores for small n (no HNSW needed)
     void compute_isolation_scores_brute();
-
-    // Find covering representatives for a query genome
-    // Returns rep IDs that may cover query (need skani verification)
-    std::vector<uint64_t> find_candidate_covers(
-        uint64_t query_id,
-        const std::vector<uint64_t>& current_reps);
-
-    // Compute exact ANI between two genomes
-    double compute_exact_ani(const std::filesystem::path& a,
-                            const std::filesystem::path& b);
 
     // Angular distance between two embeddings (works with any dimension)
     static float angular_distance(const std::vector<float>& a,
