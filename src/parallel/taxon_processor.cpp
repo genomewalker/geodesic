@@ -447,24 +447,12 @@ TaxonResult process_taxon(
         // Phase 3: single HNSW pass — isolation scores + 1-NN distribution fused.
         auto nn = geodesic.compute_isolation_scores();
 
-        // Derive both thresholds from the real NN distance distribution.
-        // diversity_threshold = P95 of NN distances: FPS stops when every genome is
-        //   covered at the natural scale of THIS species' diversity.
-        //   Capped at user's --ani-threshold so we never exceed the species boundary.
+        // diversity_threshold = angular distance from user's --ani-threshold (auto-calibrated).
+        //   FPS stops when every genome is within this radius of a representative.
+        //   NN distribution is used only for diagnostics and min_rep_distance.
         // min_rep_distance = P5 of NN distances: electrostatic merge only collapses
         //   genuine near-duplicates (bottom 5% of inter-genome spacings).
         {
-
-            // Data-driven diversity threshold inferred from the bimodal structure of
-            // the NN distance distribution. For clonal species (S. enterica), NN P95
-            // sits in the intra-strain peak and underestimates the true diversity scale.
-            // find_diversity_threshold detects the valley between intra- and inter-strain
-            // peaks and places the threshold there; falls back to median+MAD for unimodal.
-            // ani_cap_angular (= diversity_threshold before this block) is the upper bound
-            // derived from the user's --ani-threshold, ensuring we never exceed the species
-            // boundary.
-            diversity_threshold = GeodesicDerep::find_diversity_threshold(
-                nn.sorted_nn_dists, diversity_threshold);
             min_rep_distance = std::min(static_cast<float>(nn.p5),
                                         diversity_threshold * 0.5f);
 
@@ -474,7 +462,7 @@ TaxonResult process_taxon(
             double thr_j   = std::cos(static_cast<double>(diversity_threshold) * M_PI);
             double thr_ani = GeodesicDerep::jaccard_to_ani(std::max(0.0, thr_j), kmer_size);
             spdlog::info("[{}] geodesic: k={} dim={} sketch={} | "
-                         "div_thr={:.4f} ({:.1f}% ANI, bimodal-inferred) | "
+                         "div_thr={:.4f} ({:.1f}% ANI) | "
                          "min_rep={:.4f} (NN P5={:.4f} P50={:.4f} P95={:.4f})",
                          taxon.taxonomy, kmer_size, embedding_dim, sketch_size,
                          diversity_threshold, thr_ani,
