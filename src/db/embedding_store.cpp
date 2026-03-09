@@ -47,8 +47,8 @@ bool EmbeddingStore::open(const std::filesystem::path& db_path) {
             else
                 rebuild_index();
         }
-        spdlog::info("[EmbeddingStore] Opened at {} (dim={}, vss={})",
-                     db_path.string(), embedding_dim_, vss_loaded_);
+        if (is_verbose()) spdlog::info("[EmbeddingStore] Opened at {} (dim={}, vss={})",
+                                       db_path.string(), embedding_dim_, vss_loaded_);
     };
 
     try {
@@ -91,7 +91,7 @@ bool EmbeddingStore::load_vss_extension() {
     try {
         conn_->Query("INSTALL vss; LOAD vss;");
         vss_loaded_ = true;
-        spdlog::info("[EmbeddingStore] VSS extension loaded");
+        if (is_verbose()) spdlog::info("[EmbeddingStore] VSS extension loaded");
         return true;
     } catch (...) {
         vss_loaded_ = false;
@@ -109,8 +109,8 @@ bool EmbeddingStore::create_schema() {
             if (chunk && chunk->size() > 0) {
                 int existing_dim = chunk->GetValue(0, 0).GetValue<int>();
                 if (existing_dim > 0 && existing_dim != embedding_dim_) {
-                    spdlog::info("[EmbeddingStore] Adapting to existing dimension: {} -> {}",
-                                 embedding_dim_, existing_dim);
+                    if (is_verbose()) spdlog::info("[EmbeddingStore] Adapting to existing dimension: {} -> {}",
+                                                   embedding_dim_, existing_dim);
                     embedding_dim_ = existing_dim;
                 }
                 // Table exists with data, skip creation
@@ -213,7 +213,7 @@ bool EmbeddingStore::rebuild_index() {
         conn_->Query("PRAGMA hnsw_compact_index('idx_emb_hnsw')");
 
         index_exists_ = true;
-        spdlog::info("[EmbeddingStore] HNSW index rebuilt");
+        if (is_verbose()) spdlog::info("[EmbeddingStore] HNSW index rebuilt");
         return true;
 
     } catch (const std::exception& e) {
@@ -687,7 +687,7 @@ std::vector<GenomeEmbedding> EmbeddingStore::load_embeddings(const std::string& 
             }
         }
 
-        spdlog::info("[EmbeddingStore] Loaded {} embeddings", embeddings.size());
+        if (is_verbose()) spdlog::info("[EmbeddingStore] Loaded {} embeddings", embeddings.size());
 
     } catch (const std::exception& e) {
         spdlog::error("[EmbeddingStore] Load error: {}", e.what());

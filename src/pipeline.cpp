@@ -431,8 +431,27 @@ int run_pipeline(Config& cfg) {
 
     // 10. Collect results in completion order
     std::size_t success = 0, failed = 0, skipped = 0, singleton = 0, fixed = 0;
+    std::size_t genomes_done = 0, reps_done = 0;
     const std::size_t total = taxa.size();
+    const bool tty = isatty(STDERR_FILENO);
     auto t_start = std::chrono::steady_clock::now();
+    auto t_last_tty = t_start;
+
+    auto fmt_duration = [](double s) -> std::string {
+        int h = static_cast<int>(s) / 3600;
+        int m = (static_cast<int>(s) % 3600) / 60;
+        int sec = static_cast<int>(s) % 60;
+        char buf[32];
+        if (h > 0) std::snprintf(buf, sizeof(buf), "%d:%02d:%02d", h, m, sec);
+        else       std::snprintf(buf, sizeof(buf), "%d:%02d", m, sec);
+        return buf;
+    };
+    auto fmt_count = [](std::size_t n) -> std::string {
+        if (n >= 1000000) { char b[32]; std::snprintf(b, sizeof(b), "%.1fM", n / 1e6); return b; }
+        if (n >= 1000)    { char b[32]; std::snprintf(b, sizeof(b), "%.1fk", n / 1e3); return b; }
+        return std::to_string(n);
+    };
+
     for (std::size_t collected = 0; collected < total; ++collected) {
         TaxonResult result;
         {
@@ -448,24 +467,49 @@ int run_pipeline(Config& cfg) {
             case TaxonStatus::SINGLETON: ++singleton; break;
             case TaxonStatus::FIXED:     ++fixed;     break;
         }
+        genomes_done += result.n_genomes;
+        reps_done    += result.n_representatives;
+
         if (result.status == TaxonStatus::FAILED) {
+            if (tty) std::fprintf(stderr, "\r\033[K");  // clear progress line before warning
             spdlog::warn("Taxon '{}' failed: {}", result.taxonomy, result.error_message);
         }
-        const bool do_progress = is_quiet() && isatty(STDERR_FILENO);
-        const bool do_log = (collected + 1) % 100 == 0 || collected + 1 == total;
-        if (do_log || do_progress) {
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration<double>(now - t_start).count();
-            if (do_progress) {
-                std::fprintf(stderr, "\r  %zu/%zu (%.1f%%) | elapsed %.0fs    ",
-                             collected + 1, total, 100.0 * (collected + 1) / total, elapsed);
+
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - t_start).count();
+        const bool last = (collected + 1 == total);
+
+        // TTY progress bar: update at most ~4x/s to avoid I/O overhead
+        if (tty) {
+            double since_last = std::chrono::duration<double>(now - t_last_tty).count();
+            if (since_last >= 0.25 || last) {
+                t_last_tty = now;
+                double pct = 100.0 * (collected + 1) / total;
+                std::string eta_str = "?";
+                if (collected > 0) {
+                    double eta = elapsed / (collected + 1) * (total - collected - 1);
+                    eta_str = fmt_duration(eta);
+                }
+                std::fprintf(stderr,
+                    "\r  %zu/%zu taxa (%.1f%%)  |  %s genomes  |  %s reps  |  %s elapsed  |  ETA %s    ",
+                    collected + 1, total, pct,
+                    fmt_count(genomes_done).c_str(),
+                    fmt_count(reps_done).c_str(),
+                    fmt_duration(elapsed).c_str(),
+                    eta_str.c_str());
                 std::fflush(stderr);
-                if (collected + 1 == total) std::fprintf(stderr, "\n");
+                if (last) std::fprintf(stderr, "\n");
             }
-            if (do_log) {
-                spdlog::info("Progress: {}/{} ({:.1f}%) elapsed {:.0f}s",
-                             collected + 1, total, 100.0 * (collected + 1) / total, elapsed);
-            }
+        }
+
+        // Log file progress every 100 taxa
+        if ((collected + 1) % 100 == 0 || last) {
+            spdlog::info("Progress: {}/{} ({:.1f}%) | {} genomes | {} reps | elapsed {}",
+                         collected + 1, total,
+                         100.0 * (collected + 1) / total,
+                         fmt_count(genomes_done),
+                         fmt_count(reps_done),
+                         fmt_duration(elapsed));
         }
     }
 

@@ -176,7 +176,7 @@ TaxonResult process_taxon(
         // 3. SINGLETON
         // -----------------------------------------------------------
         if (taxon.is_singleton()) {
-            spdlog::info("[{}] singleton", taxon.taxonomy);
+            if (is_verbose()) spdlog::info("[{}] singleton", taxon.taxonomy);
 
             TaxonResult r;
             r.taxonomy = taxon.taxonomy;
@@ -311,7 +311,7 @@ TaxonResult process_taxon(
             double runtime = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - t0).count();
 
-            if (!is_quiet())
+            if (is_verbose() || (!is_quiet() && n >= 10))
                 spdlog::info("[{}] {} → {} reps ({:.2f}s) [tiny]", taxon.taxonomy,
                              n, representatives.size(), runtime);
 
@@ -417,9 +417,9 @@ TaxonResult process_taxon(
         if (emb_store && cfg.incremental) {
             newly_embedded = geodesic.build_index_incremental(
                 file_paths, *emb_store, taxon.taxonomy, quality_scores);
-            spdlog::info("[{}] Incremental: {} new embeddings (reused {})",
-                         taxon.taxonomy, newly_embedded,
-                         file_paths.size() - newly_embedded);
+            if (is_verbose()) spdlog::info("[{}] Incremental: {} new embeddings (reused {})",
+                                           taxon.taxonomy, newly_embedded,
+                                           file_paths.size() - newly_embedded);
         } else {
             geodesic.build_index(file_paths, quality_scores, emb_store, taxon.taxonomy);
             newly_embedded = file_paths.size();
@@ -652,7 +652,7 @@ TaxonResult process_taxon(
         auto geodesic_end = std::chrono::steady_clock::now();
         double runtime_secs = std::chrono::duration<double>(geodesic_end - geodesic_start).count();
 
-        if (!is_quiet()) {
+        if (is_verbose() || (!is_quiet() && taxon.size() >= 10)) {
             if (contamination.empty()) {
                 spdlog::info("[{}] {} → {} reps ({:.1f}s)",
                              taxon.taxonomy, taxon.size(),

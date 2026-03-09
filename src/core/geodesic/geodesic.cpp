@@ -325,7 +325,7 @@ void ANICalibrator::fit(const std::vector<std::pair<double, double>>& samples) {
     }
 
     fitted_ = true;
-    spdlog::info("ANICalibrator: fitted on {} samples, grid_size={}", samples.size(), grid_size);
+    if (is_verbose()) spdlog::info("ANICalibrator: fitted on {} samples, grid_size={}", samples.size(), grid_size);
 }
 
 ANICalibrator::Bounds ANICalibrator::predict(double embedding_distance) const {
@@ -940,8 +940,8 @@ void GeodesicDerep::materialize_sig2_for_indices(const std::vector<size_t>& indi
         for (size_t i : need)
             if (i < buf_cache_.size() && !buf_cache_[i].empty()) ++cache_hits;
     }
-    spdlog::info("GEODESIC: materializing sig2 for {} genomes ({} from cache, {} NFS re-reads)",
-                 need.size(), cache_hits, need.size() - cache_hits);
+    if (is_verbose()) spdlog::info("GEODESIC: loading dense k-mer signatures for {} genomes ({} cached, {} re-read)",
+                                   need.size(), cache_hits, need.size() - cache_hits);
 
     const MinHasher::Config cfg2{
         .kmer_size  = cfg_.kmer_size,
@@ -1010,10 +1010,11 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
                                  const std::unordered_map<std::string, double>& quality_scores,
                                  db::EmbeddingStore* emb_store,
                                  const std::string& taxonomy) {
-    spdlog::info("GEODESIC: embedding {} genomes (dim={}, k={}, threads={})",
-                 genomes.size(), cfg_.embedding_dim, cfg_.kmer_size, cfg_.threads);
+    if (is_verbose()) spdlog::info("GEODESIC: embedding {} genomes (dim={}, k={}, threads={})",
+                                   genomes.size(), cfg_.embedding_dim, cfg_.kmer_size, cfg_.threads);
     auto t_build_start = std::chrono::steady_clock::now();
     auto t_phase = [&t_build_start](const char* name) {
+        if (!is_verbose()) return;
         auto now = std::chrono::steady_clock::now();
         double s = std::chrono::duration<double>(now - t_build_start).count();
         spdlog::info("  [profile] {:30s} {:7.1f}s (cumulative)", name, s);
@@ -1119,8 +1120,8 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
         uint64_t total_bases = 0;
         for (size_t i = 0; i < n; ++i) total_bases += embeddings_[i].genome_size;
         double gbp = static_cast<double>(total_bases) / 1e9;
-        spdlog::info("  [profile] OPH throughput: {:.0f} MB/s ({:.1f} Gbp, {:.1f}s)",
-                     gbp * 1e3 / oph_s, gbp, oph_s);
+        if (is_verbose()) spdlog::info("  [profile] OPH throughput: {:.0f} MB/s ({:.1f} Gbp, {:.1f}s)",
+                                       gbp * 1e3 / oph_s, gbp, oph_s);
     }
     t_phase("OPH sketch (embed_genome)");
 
@@ -1431,6 +1432,7 @@ void GeodesicDerep::apply_nystrom_embeddings() {
 
     auto t_nys_start = std::chrono::steady_clock::now();
     auto t_nys = [&t_nys_start](const char* name) {
+        if (!is_verbose()) return;
         auto now = std::chrono::steady_clock::now();
         double s = std::chrono::duration<double>(now - t_nys_start).count();
         spdlog::info("  [nystrom] {:30s} {:7.1f}s", name, s);
@@ -2316,7 +2318,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             }
         }
         if (!newly_added.empty()) {
-            spdlog::info("GEODESIC: Borderline refinement added {} representatives "
+            if (is_verbose()) spdlog::info("GEODESIC: Borderline refinement added {} representatives "
                          "(Nyström eps={:.3f}, K={})", newly_added.size(), eps_nystrom, kBorderlineCheckK);
             // Batched similarity update: one parallel pass over all n, inner loop over newly added.
             std::vector<const float*> new_vecs;
@@ -3371,7 +3373,7 @@ void GeodesicDerep::save_embeddings_async(db::EmbeddingStore& store, const std::
         if (batch.size() == BATCH) flush();
     }
     flush();
-    spdlog::info("GEODESIC: Saved {} embeddings to store (async)", n);
+    if (is_verbose()) spdlog::info("GEODESIC: Saved {} embeddings to store (async)", n);
 }
 
 void GeodesicDerep::save_embeddings_to_store(db::EmbeddingStore& store, const std::string& taxonomy) {
@@ -3410,7 +3412,7 @@ void GeodesicDerep::save_embeddings_to_store(db::EmbeddingStore& store, const st
 
     if (!store.insert_embeddings(store_embeddings))
         spdlog::error("GEODESIC: Failed to save {} embeddings to store", store_embeddings.size());
-    else
+    else if (is_verbose())
         spdlog::info("GEODESIC: Saved {} embeddings to store", store_embeddings.size());
 }
 
