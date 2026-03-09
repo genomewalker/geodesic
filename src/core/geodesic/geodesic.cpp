@@ -1194,11 +1194,12 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             nn_dists[i] = min_d;
         }
         std::sort(nn_dists.begin(), nn_dists.end());
-        return {
-            .p5  = nn_dists[n * 5  / 100],
-            .p50 = nn_dists[n * 50 / 100],
-            .p95 = nn_dists[n * 95 / 100],
-        };
+        NNDistStats stats;
+        stats.p5  = nn_dists[n * 5  / 100];
+        stats.p50 = nn_dists[n * 50 / 100];
+        stats.p95 = nn_dists[n * 95 / 100];
+        stats.sorted_nn_dists = std::move(nn_dists);
+        return stats;
     }
     if (is_verbose()) spdlog::info("GEODESIC: computing isolation scores (k={})", cfg_.isolation_k);
 
@@ -1299,11 +1300,12 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     }
 
     std::sort(nn_dists.begin(), nn_dists.end());
-    return {
-        .p5  = nn_dists[n * 5  / 100],
-        .p50 = nn_dists[n * 50 / 100],
-        .p95 = nn_dists[n * 95 / 100],
-    };
+    NNDistStats stats;
+    stats.p5  = nn_dists[n * 5  / 100];
+    stats.p50 = nn_dists[n * 50 / 100];
+    stats.p95 = nn_dists[n * 95 / 100];
+    stats.sorted_nn_dists = std::move(nn_dists);
+    return stats;
 }
 
 void GeodesicDerep::apply_nystrom_embeddings() {

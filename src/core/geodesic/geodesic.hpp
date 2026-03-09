@@ -301,6 +301,7 @@ public:
         double p5;
         double p50;
         double p95;
+        std::vector<float> sorted_nn_dists;  // full sorted NN distances for threshold calibration
     };
 
     // Phase 3: Compute isolation scores AND return NN distance stats in one HNSW pass.
@@ -320,6 +321,12 @@ public:
     const std::vector<std::pair<std::string, std::string>>& failed_reads() const {
         return failed_reads_;
     }
+
+    // Infer diversity threshold from the bimodal structure of sorted NN distances.
+    // ani_cap_angular: upper bound (user ANI threshold as angular distance).
+    // Falls back to robust median+MAD estimator for unimodal distributions.
+    static float find_diversity_threshold(const std::vector<float>& sorted_nn_dists,
+                                           float ani_cap_angular);
 
     // Diversity statistics computed from embeddings (no skani needed)
     struct DiversityMetrics {

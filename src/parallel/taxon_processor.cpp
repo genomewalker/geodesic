@@ -455,18 +455,16 @@ TaxonResult process_taxon(
         //   genuine near-duplicates (bottom 5% of inter-genome spacings).
         {
 
-            // Data-driven diversity threshold, capped at user's ANI boundary.
-            // Floor at 1/√M (1σ sketch noise): Nyström PCA smooths embedding distances
-            // significantly, so raw 3σ is too conservative and over-merges clonal species
-            // (e.g. S. enterica NN P95 = 0.010 < 3σ=0.030 → only 283 reps instead of ~4000).
-            // No sketch noise floor: Nyström PCA aggregates many anchor pairs, so
-            // embedding distances are far more reliable than single-pair sketch noise (1/√M).
-            // Use nn.p95 directly. Tiny epsilon guards against exact-zero (all genomes
-            // numerically identical) which would cause FPS to never terminate early.
-            constexpr float kMinDivThresh = 1e-6f;
-            diversity_threshold = std::max(kMinDivThresh,
-                                  std::min(diversity_threshold,
-                                           static_cast<float>(nn.p95)));
+            // Data-driven diversity threshold inferred from the bimodal structure of
+            // the NN distance distribution. For clonal species (S. enterica), NN P95
+            // sits in the intra-strain peak and underestimates the true diversity scale.
+            // find_diversity_threshold detects the valley between intra- and inter-strain
+            // peaks and places the threshold there; falls back to median+MAD for unimodal.
+            // ani_cap_angular (= diversity_threshold before this block) is the upper bound
+            // derived from the user's --ani-threshold, ensuring we never exceed the species
+            // boundary.
+            diversity_threshold = GeodesicDerep::find_diversity_threshold(
+                nn.sorted_nn_dists, diversity_threshold);
             min_rep_distance = std::min(static_cast<float>(nn.p5),
                                         diversity_threshold * 0.5f);
 
@@ -476,11 +474,11 @@ TaxonResult process_taxon(
             double thr_j   = std::cos(static_cast<double>(diversity_threshold) * M_PI);
             double thr_ani = GeodesicDerep::jaccard_to_ani(std::max(0.0, thr_j), kmer_size);
             spdlog::info("[{}] geodesic: k={} dim={} sketch={} | "
-                         "div_thr={:.4f} ({:.1f}% ANI, from NN P95={:.4f}) | "
-                         "min_rep={:.4f} (NN P5={:.4f} P50={:.4f})",
+                         "div_thr={:.4f} ({:.1f}% ANI, bimodal-inferred) | "
+                         "min_rep={:.4f} (NN P5={:.4f} P50={:.4f} P95={:.4f})",
                          taxon.taxonomy, kmer_size, embedding_dim, sketch_size,
-                         diversity_threshold, thr_ani, nn.p95,
-                         min_rep_distance, nn.p5, nn.p50);
+                         diversity_threshold, thr_ani,
+                         min_rep_distance, nn.p5, nn.p50, nn.p95);
         }
 
         // Detect potential contamination before selection
