@@ -123,7 +123,8 @@ enum class PipelineStage : int {
     GRAPH_DONE = 3,
     PARTITION_DONE = 4,
     REPRESENTATIVES_DONE = 5,
-    COMPLETE = 6
+    EMBEDDING_DONE = 6,       // OPH sigs written to EmbeddingStore; FPS not yet run
+    COMPLETE = 7
 };
 
 } // namespace derep

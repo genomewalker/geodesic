@@ -1264,6 +1264,8 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     // has no edges for outlier genomes (too distant from the species cluster), so
     // they never inflate the connectivity threshold.
     double mst_max_edge = 0.0;
+    size_t mst_n_main = 0;
+    bool disconnected = false;
     {
         // Compute mean + 2σ of isolation scores to identify outliers.
         // Same formula used by detect_contamination_candidates() — ensures consistent exclusion.
@@ -1300,6 +1302,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             if (embeddings_[i].isolation_score < iso_thr)
                 main_remap[i] = static_cast<uint32_t>(n_main++);
         }
+        mst_n_main = n_main;
 
         if (n_main >= 2) {
             // Remap edge endpoints to contiguous [0, n_main)
@@ -1335,6 +1338,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
                     if (--components == 1) break;
                 }
             }
+            disconnected = (components > 1);
             if (is_verbose()) {
                 spdlog::info("GEODESIC: MST over {} non-outlier genomes "
                              "(components={}, max_edge={:.5f})",
@@ -1414,6 +1418,10 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     stats.p95 = nn_dists[n * 95 / 100];
     stats.mst_max_edge = mst_max_edge;
     stats.sorted_nn_dists = std::move(nn_dists);
+    stats.low_pair_count   = (mst_n_main < 20);
+    stats.high_gap_ratio   = (mst_max_edge > 0.0 && stats.p50 > 1e-9
+                              && mst_max_edge / stats.p50 > 5.0);
+    stats.disconnected_mst = disconnected;
     return stats;
 }
 
@@ -2024,6 +2032,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     // Using similarity instead of distance avoids acos in the hot loop
     std::vector<float> max_sim_to_rep(n, -1.0f);
     std::vector<uint64_t> nearest_rep(n, UINT64_MAX);
+    std::vector<bool> is_rep_row(n, false);
 
     // Similarity function: exact Jaccard for small n (no Nyström), dot product otherwise.
     auto sim_fn = [&](size_t i, size_t j) -> float {
@@ -2055,6 +2064,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             if (!pinned_rep_paths_.count(store_.paths[i].string())) continue;
             uint64_t rep_id = store_.genome_ids[i];
             representatives.push_back(rep_id);
+            is_rep_row[i] = true;
             const size_t rep_store_i = i;
 #if GEODESIC_USE_OMP
             #pragma omp parallel for
@@ -2092,6 +2102,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         if (first_idx == n) first_idx = 0;  // fallback: all excluded (shouldn't happen)
         uint64_t first_rep = store_.genome_ids[first_idx];
         representatives.push_back(first_rep);
+        is_rep_row[first_idx] = true;
         if (is_verbose()) {
             spdlog::info("GEODESIC: First representative (most isolated): genome_{} (isolation={:.4f})",
                          first_rep, store_.isolation_scores[first_idx]);
@@ -2192,6 +2203,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             batch_gids.push_back(store_.genome_ids[i]);
             batch_vecs.push_back(store_.row(i));
             representatives.push_back(store_.genome_ids[i]);
+            is_rep_row[i] = true;
         }
 
         // Update only active (uncovered) genomes + compact.
@@ -2227,13 +2239,11 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         const float lo_thresh = cfg_.diversity_threshold * (1.0f - eps_nystrom);
         const float cos_lo = std::cos(lo_thresh * static_cast<float>(M_PI));
 
-        std::unordered_set<uint64_t> rep_set_ids(representatives.begin(), representatives.end());
-
         // Build list of rep store indices for top-K embedding scan.
         std::vector<size_t> rep_store_idx;
         rep_store_idx.reserve(representatives.size());
         for (size_t i = 0; i < n; ++i)
-            if (rep_set_ids.count(store_.genome_ids[i]))
+            if (is_rep_row[i])
                 rep_store_idx.push_back(i);
 
         // Number of nearby reps to verify with exact OPH (3 balances precision vs cost).
@@ -2246,7 +2256,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             std::vector<size_t> to_materialize;
             to_materialize.insert(to_materialize.end(), rep_store_idx.begin(), rep_store_idx.end());
             for (size_t i = 0; i < n; ++i) {
-                if (rep_set_ids.count(store_.genome_ids[i])) continue;
+                if (is_rep_row[i]) continue;
                 if (store_.quality_scores[i] == 0.0f) continue;
                 float sim  = max_sim_to_rep[i];
                 // dist in [lo_thresh, diversity_threshold) ↔ sim in (cos_diversity, cos_lo]
@@ -2262,7 +2272,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
         std::vector<size_t> newly_added;
         for (size_t i = 0; i < n; ++i) {
-            if (rep_set_ids.count(store_.genome_ids[i])) continue;
+            if (is_rep_row[i]) continue;
             if (store_.quality_scores[i] == 0.0f) continue;
 
             float sim  = max_sim_to_rep[i];
@@ -2299,7 +2309,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             if (!covered) {
                 // No top-K rep truly covers this genome → add as representative.
                 representatives.push_back(store_.genome_ids[i]);
-                rep_set_ids.insert(store_.genome_ids[i]);
+                is_rep_row[i] = true;
                 rep_store_idx.push_back(i);
                 newly_added.push_back(i);
                 max_sim_to_rep[i] = 1.0f;
@@ -2461,13 +2471,19 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         rep_set.clear();
         rep_set.insert(representatives.begin(), representatives.end());
 
+        std::fill(is_rep_row.begin(), is_rep_row.end(), false);
+        for (uint64_t gid : representatives) {
+            auto it = gid_to_row_.find(gid);
+            if (it != gid_to_row_.end()) is_rep_row[it->second] = true;
+        }
+
         // Selective recompute: only genomes whose nearest_rep was merged away.
         // Genomes assigned to surviving reps keep their current assignment.
 #if GEODESIC_USE_OMP
         #pragma omp parallel for
 #endif
         for (size_t i = 0; i < n; ++i) {
-            if (rep_set.count(store_.genome_ids[i])) {
+            if (is_rep_row[i]) {
                 max_sim_to_rep[i] = 1.0f;
                 nearest_rep[i] = store_.genome_ids[i];
             } else if (merged_away.count(nearest_rep[i])) {
@@ -2491,6 +2507,147 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         representatives = std::move(refined_reps);
     }
 
+    // Phase 7c: Universal OPH certification.
+    // The Nyström embedding is a candidate-generation layer, not a coverage guarantee:
+    // densified OPH bins inflate the kernel for sparse genomes (MAGs), causing embedding
+    // dot-products to overestimate similarity.  Verify every non-rep, non-excluded genome
+    // against its assigned representative using exact OPH Jaccard (sig1, SIMD).
+    // For failures, scan all current representatives exhaustively before promoting.
+    if (nystrom_applied_ && !embeddings_.empty() && !embeddings_[0].oph_sig.empty()) {
+        // Build rep-row index.
+        std::vector<size_t> cert_rep_idx;
+        cert_rep_idx.reserve(representatives.size());
+        for (size_t i = 0; i < n; ++i)
+            if (is_rep_row[i]) cert_rep_idx.push_back(i);
+
+        const size_t m_oph = embeddings_[0].oph_sig.size();
+
+        // OPH Jaccard equivalent of the user ANI threshold (e.g. 95% → J≈0.212 at k=21).
+        // This is the coverage criterion: every non-rep genome must have at least one rep
+        // within mapping distance. Using cos_diversity (diversity_threshold ≈ 99.9% ANI)
+        // would wrongly flag all 95-99% genomes as uncovered, triggering a catastrophic
+        // exhaustive scan for the whole collection.
+        const double q_cert = std::exp(-static_cast<double>(cfg_.kmer_size)
+                                       * (1.0 - cfg_.ani_threshold));
+        const float J_cert  = static_cast<float>(q_cert / (2.0 - q_cert));
+
+        std::vector<size_t> repair_queue;
+#if GEODESIC_USE_OMP
+        {
+            std::vector<std::vector<size_t>> tl_repair(static_cast<size_t>(omp_get_max_threads()));
+            #pragma omp parallel
+            {
+                auto& local_repair = tl_repair[static_cast<size_t>(omp_get_thread_num())];
+                #pragma omp for schedule(dynamic, 256)
+                for (size_t i = 0; i < n; ++i) {
+                    if (is_rep_row[i]) continue;
+                    if (store_.quality_scores[i] == 0.0f) continue;
+                    const auto& sig_i = embeddings_[i].oph_sig;
+                    if (sig_i.size() != m_oph) continue;
+
+                    // Fast path: check assigned rep first.
+                    auto rep_it = gid_to_row_.find(nearest_rep[i]);
+                    if (rep_it != gid_to_row_.end()) {
+                        const auto& sig_r = embeddings_[rep_it->second].oph_sig;
+                        if (sig_r.size() == m_oph) {
+                            double jac = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
+                            if (static_cast<float>(jac) >= J_cert) continue;
+                        }
+                    }
+
+                    // Exhaustive scan over all reps.
+                    double best_jac = -1.0;
+                    size_t best_rep_row = SIZE_MAX;
+                    for (size_t ri : cert_rep_idx) {
+                        const auto& sig_r = embeddings_[ri].oph_sig;
+                        if (sig_r.size() != m_oph) continue;
+                        double j = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
+                        if (j > best_jac) { best_jac = j; best_rep_row = ri; }
+                    }
+
+                    if (best_rep_row != SIZE_MAX && static_cast<float>(best_jac) >= J_cert) {
+                        nearest_rep[i]    = store_.genome_ids[best_rep_row];
+                        max_sim_to_rep[i] = static_cast<float>(best_jac);
+                    } else {
+                        local_repair.push_back(i);
+                    }
+                }
+            }
+            for (auto& local : tl_repair)
+                repair_queue.insert(repair_queue.end(), local.begin(), local.end());
+            std::sort(repair_queue.begin(), repair_queue.end());
+        }
+#else
+        for (size_t i = 0; i < n; ++i) {
+            if (is_rep_row[i]) continue;
+            if (store_.quality_scores[i] == 0.0f) continue;
+            const auto& sig_i = embeddings_[i].oph_sig;
+            if (sig_i.size() != m_oph) continue;
+
+            // Fast path: check assigned rep first.
+            auto rep_it = gid_to_row_.find(nearest_rep[i]);
+            if (rep_it != gid_to_row_.end()) {
+                const auto& sig_r = embeddings_[rep_it->second].oph_sig;
+                if (sig_r.size() == m_oph) {
+                    double jac = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
+                    if (static_cast<float>(jac) >= J_cert) continue;
+                }
+            }
+
+            // Assigned rep failed: exhaustive scan over all reps.
+            double best_jac = -1.0;
+            size_t best_rep_row = SIZE_MAX;
+            for (size_t ri : cert_rep_idx) {
+                const auto& sig_r = embeddings_[ri].oph_sig;
+                if (sig_r.size() != m_oph) continue;
+                double j = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
+                if (j > best_jac) { best_jac = j; best_rep_row = ri; }
+            }
+
+            if (best_rep_row != SIZE_MAX && static_cast<float>(best_jac) >= J_cert) {
+                nearest_rep[i]    = store_.genome_ids[best_rep_row];
+                max_sim_to_rep[i] = static_cast<float>(best_jac);
+            } else {
+                repair_queue.push_back(i);
+            }
+        }
+#endif
+
+        if (!repair_queue.empty()) {
+            spdlog::info("GEODESIC: Phase 7c repair: {} genomes uncovered by OPH, promoting as reps",
+                         repair_queue.size());
+            std::vector<const float*> repair_vecs;
+            std::vector<uint64_t>     repair_gids;
+            repair_vecs.reserve(repair_queue.size());
+            repair_gids.reserve(repair_queue.size());
+            for (size_t i : repair_queue) {
+                representatives.push_back(store_.genome_ids[i]);
+                is_rep_row[i]    = true;
+                max_sim_to_rep[i] = 1.0f;
+                nearest_rep[i]   = store_.genome_ids[i];
+                repair_vecs.push_back(store_.row(i));
+                repair_gids.push_back(store_.genome_ids[i]);
+            }
+            const size_t n_repair = repair_queue.size();
+#if GEODESIC_USE_OMP
+            #pragma omp parallel for schedule(static)
+#endif
+            for (size_t j = 0; j < n; ++j) {
+                if (is_rep_row[j]) continue;
+                const float* vj = store_.row(j);
+                for (size_t k = 0; k < n_repair; ++k) {
+                    float s = dot_product_simd(repair_vecs[k], vj, dim);
+                    if (s > max_sim_to_rep[j]) {
+                        max_sim_to_rep[j] = s;
+                        nearest_rep[j]    = repair_gids[k];
+                    }
+                }
+            }
+        } else if (is_verbose()) {
+            spdlog::info("GEODESIC: Phase 7c: all non-rep genomes OPH-certified");
+        }
+    }
+
     // Phase 4: Build edges (genome → nearest representative)
     // weight_raw = ANI fraction derived from Jaccard via Mash formula.
     auto jaccard_to_ani_frac = [&](double J) -> float {
@@ -2498,8 +2655,6 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         double ratio = 2.0 * J / (1.0 + J);
         return static_cast<float>(std::pow(ratio, 1.0 / cfg_.kmer_size));
     };
-    std::unordered_set<uint64_t> final_rep_set(representatives.begin(), representatives.end());
-
     // Build O(1) lookup: genome_id → index (same index into embeddings_)
     std::unordered_map<uint64_t, size_t> id_to_idx;
     id_to_idx.reserve(n);
@@ -2520,7 +2675,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     const double J_margin = 3.0 / std::sqrt(static_cast<double>(runtime_dim_));
 
     for (size_t i = 0; i < n; ++i) {
-        if (final_rep_set.count(store_.genome_ids[i])) continue;
+        if (is_rep_row[i]) continue;
 
         auto it = id_to_idx.find(nearest_rep[i]);
         if (it == id_to_idx.end()) {

@@ -135,7 +135,8 @@ TaxonResult process_taxon(
         // -----------------------------------------------------------
         // 1. RESUME CHECK
         // -----------------------------------------------------------
-        if (db::ops::is_taxon_complete(db, taxon.taxonomy)) {
+        auto current_stage = db::ops::get_pipeline_stage(db, taxon.taxonomy);
+        if (current_stage == PipelineStage::COMPLETE) {
             if (is_verbose()) spdlog::info("[{}] already complete, skipping", taxon.taxonomy);
             TaxonResult r;
             r.taxonomy = taxon.taxonomy;
@@ -143,6 +144,10 @@ TaxonResult process_taxon(
             r.n_genomes = taxon.size();
             return r;
         }
+        const bool embedding_cached = (current_stage >= PipelineStage::EMBEDDING_DONE)
+                                       && emb_store && cfg.incremental;
+        if (embedding_cached)
+            spdlog::info("[{}] resuming from EMBEDDING_DONE (loading cached OPH sigs)", taxon.taxonomy);
 
         auto all_accessions = collect_accessions(taxon);
 
@@ -444,21 +449,31 @@ TaxonResult process_taxon(
             db::ops::update_genome_sizes(db, sizes);
         }
 
+        // Checkpoint: embedding complete — NFS I/O for OPH sketching is done.
+        // On restart, build_index_incremental will load cached sigs without re-reading NFS.
+        db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::EMBEDDING_DONE);
+
         // Phase 3: single HNSW pass — isolation scores + 1-NN distribution fused.
         auto nn = geodesic.compute_isolation_scores();
 
-        // diversity_threshold = min(θ_ANI, MST_max_edge):
+        // diversity_threshold = min(θ_ANI, data_threshold, MST_max_edge):
+        //   data_threshold: bimodal-aware valley detector on NN distance histogram.
         //   MST_max_edge: maximum edge in the minimum spanning tree of the k-NN graph.
-        //   This is the binary_search_filter analog from the original graph-based pipeline:
-        //   the minimum θ at which the population k-NN graph becomes connected — the natural
-        //   scale at which distinct sub-populations are linked.
         //   θ_ANI is the hard upper cap from --ani-threshold (never merge across species).
         //   Falls back to NN_P95 if MST is unavailable (brute-force small-n path).
         // min_rep_distance = P5 of NN distances: electrostatic merge collapses near-duplicates.
         {
-            const float knn_thr = (nn.mst_max_edge > 0.0)
+            // Primary: bimodal-aware valley detector
+            float data_threshold = GeodesicDerep::find_diversity_threshold(
+                nn.sorted_nn_dists, diversity_threshold);
+
+            // Secondary: MST connectivity scale
+            float mst_threshold = (nn.mst_max_edge > 0.0)
                 ? static_cast<float>(nn.mst_max_edge)
                 : static_cast<float>(nn.p95);
+
+            // Take the more conservative (smaller) of the two
+            float knn_thr = std::min(data_threshold, mst_threshold);
             diversity_threshold = std::max(1e-6f,
                 std::min(diversity_threshold, knn_thr));
             min_rep_distance = std::min(static_cast<float>(nn.p5),
@@ -467,13 +482,21 @@ TaxonResult process_taxon(
             geodesic.set_diversity_threshold(diversity_threshold);
             geodesic.set_min_rep_distance(min_rep_distance);
 
+            if (nn.low_pair_count || nn.high_gap_ratio || nn.disconnected_mst) {
+                spdlog::warn("[{}] Threshold instability detected: low_pairs={} gap_ratio={} disconnected={}. "
+                             "diversity_threshold={:.4f} (use --geodesic-diversity-threshold to override)",
+                             taxon.taxonomy,
+                             nn.low_pair_count, nn.high_gap_ratio, nn.disconnected_mst,
+                             diversity_threshold);
+            }
+
             double thr_j   = std::cos(static_cast<double>(diversity_threshold) * M_PI);
             double thr_ani = GeodesicDerep::jaccard_to_ani(std::max(0.0, thr_j), kmer_size);
             spdlog::info("[{}] geodesic: k={} dim={} sketch={} | "
-                         "div_thr={:.4f} ({:.1f}% ANI, from MST={:.4f}) | "
+                         "div_thr={:.4f} ({:.1f}% ANI, data={:.4f} MST={:.4f}) | "
                          "min_rep={:.4f} (NN P5={:.4f} P50={:.4f} P95={:.4f})",
                          taxon.taxonomy, kmer_size, embedding_dim, sketch_size,
-                         diversity_threshold, thr_ani, nn.mst_max_edge,
+                         diversity_threshold, thr_ani, data_threshold, nn.mst_max_edge,
                          min_rep_distance, nn.p5, nn.p50, nn.p95);
         }
 

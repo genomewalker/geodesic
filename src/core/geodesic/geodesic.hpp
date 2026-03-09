@@ -307,6 +307,11 @@ public:
         // Zero if unavailable (small-n brute-force path).
         double mst_max_edge = 0.0;
         std::vector<float> sorted_nn_dists;  // full sorted NN distances for threshold calibration
+
+        // Instability flags: when set, mst_max_edge may not reflect intra-species scale.
+        bool low_pair_count   = false;  // < 20 non-outlier genomes in MST
+        bool high_gap_ratio   = false;  // mst_max_edge / p50 > 5 (bimodal gap)
+        bool disconnected_mst = false;  // MST has > 1 component (truly disconnected)
     };
 
     // Phase 3: Compute isolation scores AND return NN distance stats in one HNSW pass.
