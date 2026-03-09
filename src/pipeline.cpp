@@ -186,6 +186,7 @@ int run_pipeline(Config& cfg) {
     db::DBManager db({.db_path = cfg.db_path});
     db::schema::create_all(db.thread_connection());
     db::schema::migrate(db.thread_connection());
+    db::ops::migrate_pipeline_stages_v7(db);
 
     // 4. Load input
     auto genome_rows = read_genomes_tsv(cfg.tax_file);

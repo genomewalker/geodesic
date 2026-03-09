@@ -356,6 +356,43 @@ bool is_taxon_complete(DBManager& db, const std::string& taxonomy) {
     return get_pipeline_stage(db, taxonomy) == PipelineStage::COMPLETE;
 }
 
+void migrate_pipeline_stages_v7(DBManager& db) {
+    auto& conn = db.thread_connection();
+
+    // Check if any stage=6 rows exist before doing anything
+    auto check = conn.Query("SELECT COUNT(*) FROM pipeline_stages WHERE stage = 6");
+    if (check->HasError()) return;
+    auto chunk = check->Fetch();
+    if (!chunk || chunk->size() == 0) return;
+    if (chunk->GetValue(0, 0).GetValue<int64_t>() == 0) return;
+
+    // Count how many stage=6 rows have results (will be promoted) vs. none (will re-run).
+    int64_t promotable = 0;
+    auto pcq = conn.Query(
+        "SELECT COUNT(*) FROM pipeline_stages "
+        "WHERE stage = 6 AND taxonomy IN (SELECT DISTINCT taxonomy FROM results)");
+    if (!pcq->HasError()) {
+        auto pc = pcq->Fetch();
+        if (pc && pc->size() > 0) promotable = pc->GetValue(0, 0).GetValue<int64_t>();
+    }
+    int64_t rerun_count = chunk->GetValue(0, 0).GetValue<int64_t>() - promotable;
+
+    // Promote stage=6 rows that have a completed result (in `results` table) to COMPLETE=7.
+    // These taxa truly finished in an older build where COMPLETE was encoded as 6.
+    if (promotable > 0) {
+        auto promote = conn.Query(
+            "UPDATE pipeline_stages SET stage = 7 "
+            "WHERE stage = 6 AND taxonomy IN (SELECT DISTINCT taxonomy FROM results)");
+        if (promote->HasError())
+            spdlog::warn("migrate_pipeline_stages_v7: promote failed: {}", promote->GetError());
+    }
+
+    spdlog::warn("DB schema migration (COMPLETE 6→7): {} taxa promoted to COMPLETE=7; "
+                 "{} taxa have stage=6 with no results and will re-run from EMBEDDING_DONE "
+                 "(embeddings cached; only FPS + representative selection will repeat)",
+                 promotable, rerun_count);
+}
+
 void update_genome_sizes(DBManager& db,
                           const std::unordered_map<std::string,
                               std::pair<uint64_t, uint32_t>>& accession_sizes) {

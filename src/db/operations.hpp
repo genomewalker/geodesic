@@ -75,4 +75,9 @@ void mark_jobs_done(DBManager& db, const std::vector<Genome>& genomes);
 
 bool is_taxon_complete(DBManager& db, const std::string& taxonomy);
 
+// One-time startup migration: stage=6 was COMPLETE in older builds; it now means
+// EMBEDDING_DONE. Promote stage=6 rows that have results to COMPLETE=7, and warn
+// about any that will re-run from the embedding checkpoint.
+void migrate_pipeline_stages_v7(DBManager& db);
+
 } // namespace derep::db::ops
