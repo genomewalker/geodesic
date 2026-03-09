@@ -301,6 +301,11 @@ public:
         double p5;
         double p50;
         double p95;
+        // Maximum edge in the minimum spanning tree of the k-NN graph.
+        // The minimum θ at which the k-NN graph becomes connected — the
+        // binary_search_filter analog from the original graph-based pipeline.
+        // Zero if unavailable (small-n brute-force path).
+        double mst_max_edge = 0.0;
         std::vector<float> sorted_nn_dists;  // full sorted NN distances for threshold calibration
     };
 

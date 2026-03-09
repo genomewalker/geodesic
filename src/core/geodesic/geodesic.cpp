@@ -1214,6 +1214,13 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     index_->ef_search = std::max(50, std::min(200, static_cast<int>(n_emb / 100)));
     std::vector<float> nn_dists(n_emb, 1.0f);
 
+    // k-NN edge collection for MST (binary_search_filter analog).
+    // Pre-allocated: genome ei's j-th neighbor at position ei * knn_k + j.
+    // Sentinel: dist = 1.0f (impossible for real genomic data).
+    const int knn_k = cfg_.isolation_k;
+    struct KNNEdge { uint32_t u, v; float dist; };
+    std::vector<KNNEdge> knn_edges(n_emb * knn_k, {0, 0, 1.0f});
+
 #if GEODESIC_USE_OMP
     #pragma omp parallel for schedule(dynamic, 100) num_threads(cfg_.threads)
 #endif
@@ -1223,17 +1230,82 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
 
         float total_dist = 0.0f;
         int count = 0;
+        int edge_count = 0;
         for (const auto& [id, dist] : neighbors) {
             if (id != emb.genome_id) {
                 if (count == 0) nn_dists[ei] = dist;  // first non-self = 1-NN
                 total_dist += dist;
                 ++count;
+                // Collect k-NN edges for MST; gid_to_row_ is read-only here (thread-safe)
+                if (edge_count < knn_k) {
+                    auto it = gid_to_row_.find(id);
+                    if (it != gid_to_row_.end()) {
+                        knn_edges[ei * knn_k + edge_count] = {
+                            static_cast<uint32_t>(ei),
+                            static_cast<uint32_t>(it->second),
+                            dist};
+                        ++edge_count;
+                    }
+                }
             }
         }
 
         emb.isolation_score = (count > 0) ? total_dist / count : 1.0f;
     }
     index_->ef_search = saved_ef;
+
+    // Kruskal's MST to find the maximum spanning-tree edge (binary_search_filter analog).
+    // This is the minimum θ at which the k-NN graph becomes connected — the natural
+    // population-structure scale, analogous to the Python binary_search_filter which
+    // finds the maximum similarity threshold where the graph stays connected.
+    double mst_max_edge = 0.0;
+    {
+        // Filter sentinel edges (dist = 1.0f) and deduplicate (u < v only).
+        // Deduplication avoids double-counting symmetric edges; doesn't affect MST correctness.
+        std::vector<KNNEdge> edges;
+        edges.reserve(knn_edges.size());
+        for (const auto& e : knn_edges) {
+            if (e.dist >= 1.0f) continue;
+            if (e.u < e.v) edges.push_back(e);
+            else if (e.u > e.v) edges.push_back({e.v, e.u, e.dist});
+            // u == v: self-loop, skip
+        }
+        // Sort by distance (Kruskal's processes cheapest edges first)
+        std::sort(edges.begin(), edges.end(),
+                  [](const KNNEdge& a, const KNNEdge& b) { return a.dist < b.dist; });
+
+        // Union-Find (path-compressed, union-by-rank) over genome indices
+        std::vector<uint32_t> parent(n_emb);
+        std::vector<uint8_t>  rank(n_emb, 0);
+        std::iota(parent.begin(), parent.end(), 0);
+        auto find = [&](uint32_t x) -> uint32_t {
+            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+            return x;
+        };
+        auto unite = [&](uint32_t a, uint32_t b) -> bool {
+            a = find(a); b = find(b);
+            if (a == b) return false;
+            if (rank[a] < rank[b]) std::swap(a, b);
+            parent[b] = a;
+            if (rank[a] == rank[b]) ++rank[a];
+            return true;
+        };
+
+        size_t components = n_emb;
+        for (const auto& e : edges) {
+            if (unite(e.u, e.v)) {
+                mst_max_edge = e.dist;
+                if (--components == 1) break;
+            }
+        }
+        // If components > 1 (k-NN graph disconnected), mst_max_edge is the largest
+        // edge in the partial MST — still a valid data-driven threshold; outlier/
+        // contamination genomes that remain isolated are handled by θ_ANI cap in caller.
+        if (is_verbose()) {
+            spdlog::info("GEODESIC: MST connectivity (components={}, max_edge={:.5f})",
+                         components, mst_max_edge);
+        }
+    }
 
     // Compute median genome size for length normalization
     std::vector<uint64_t> sizes;
@@ -1304,6 +1376,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     stats.p5  = nn_dists[n * 5  / 100];
     stats.p50 = nn_dists[n * 50 / 100];
     stats.p95 = nn_dists[n * 95 / 100];
+    stats.mst_max_edge = mst_max_edge;
     stats.sorted_nn_dists = std::move(nn_dists);
     return stats;
 }
@@ -2035,7 +2108,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     // OpenMP launch overhead and improve cache reuse on the update pass.
     static constexpr size_t FPS_BATCH = 16;
 
-    while (!active.empty()) {
+    const size_t max_reps = static_cast<size_t>(n * cfg_.max_rep_fraction);
+
+    while (!active.empty() && representatives.size() < max_reps) {
         // Compute fitness for all active members in parallel
         std::vector<std::pair<float, size_t>> fit_active(active.size());
 #if GEODESIC_USE_OMP

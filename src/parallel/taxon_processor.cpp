@@ -447,12 +447,20 @@ TaxonResult process_taxon(
         // Phase 3: single HNSW pass — isolation scores + 1-NN distribution fused.
         auto nn = geodesic.compute_isolation_scores();
 
-        // diversity_threshold = angular distance from user's --ani-threshold (auto-calibrated).
-        //   FPS stops when every genome is within this radius of a representative.
-        //   NN distribution is used only for diagnostics and min_rep_distance.
-        // min_rep_distance = P5 of NN distances: electrostatic merge only collapses
-        //   genuine near-duplicates (bottom 5% of inter-genome spacings).
+        // diversity_threshold = min(θ_ANI, MST_max_edge):
+        //   MST_max_edge: maximum edge in the minimum spanning tree of the k-NN graph.
+        //   This is the binary_search_filter analog from the original graph-based pipeline:
+        //   the minimum θ at which the population k-NN graph becomes connected — the natural
+        //   scale at which distinct sub-populations are linked.
+        //   θ_ANI is the hard upper cap from --ani-threshold (never merge across species).
+        //   Falls back to NN_P95 if MST is unavailable (brute-force small-n path).
+        // min_rep_distance = P5 of NN distances: electrostatic merge collapses near-duplicates.
         {
+            const float knn_thr = (nn.mst_max_edge > 0.0)
+                ? static_cast<float>(nn.mst_max_edge)
+                : static_cast<float>(nn.p95);
+            diversity_threshold = std::max(1e-6f,
+                std::min(diversity_threshold, knn_thr));
             min_rep_distance = std::min(static_cast<float>(nn.p5),
                                         diversity_threshold * 0.5f);
 
@@ -462,10 +470,10 @@ TaxonResult process_taxon(
             double thr_j   = std::cos(static_cast<double>(diversity_threshold) * M_PI);
             double thr_ani = GeodesicDerep::jaccard_to_ani(std::max(0.0, thr_j), kmer_size);
             spdlog::info("[{}] geodesic: k={} dim={} sketch={} | "
-                         "div_thr={:.4f} ({:.1f}% ANI) | "
+                         "div_thr={:.4f} ({:.1f}% ANI, from MST={:.4f}) | "
                          "min_rep={:.4f} (NN P5={:.4f} P50={:.4f} P95={:.4f})",
                          taxon.taxonomy, kmer_size, embedding_dim, sketch_size,
-                         diversity_threshold, thr_ani,
+                         diversity_threshold, thr_ani, nn.mst_max_edge,
                          min_rep_distance, nn.p5, nn.p50, nn.p95);
         }
 
