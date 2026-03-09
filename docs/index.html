@@ -149,12 +149,12 @@ body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font
       </div>
     </div>
     <div class="alg-step" data-step="2">
-      <div class="alg-step-num">03 · Indexing</div>
-      <div class="alg-step-title">Finding every genome's closest relatives</div>
+      <div class="alg-step-num">03 · Threshold</div>
+      <div class="alg-step-title">Learning the strain scale from the data</div>
       <div class="alg-step-body">
-        A spatial index (HNSW graph) finds each genome's 10 nearest neighbors in milliseconds, even across millions of genomes. The average distance to those neighbors gives an <em>isolation score</em>.
-        <div class="alg-insight">A high isolation score means a genome has no close relatives — it represents a rare lineage that must be preserved as a reference.</div>
-        The most isolated genome always becomes the very first representative.
+        A spatial index (HNSW) finds each genome's 10 nearest neighbours. The average distance to those neighbours gives an <em>isolation score</em> — high values flag rare lineages and contamination candidates. The k-NN graph's minimum spanning tree (Kruskal's algorithm) is then computed: its longest edge is the natural inter-strain scale at which the population becomes connected, and sets the diversity threshold automatically.
+        <div class="alg-insight">No fixed ANI threshold to tune — the threshold is inferred from the shape of the population itself.</div>
+        Lines show nearest-neighbour connections; the most isolated genome becomes the first representative.
       </div>
     </div>
     <div class="alg-step" data-step="3">
@@ -167,12 +167,12 @@ body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font
       </div>
     </div>
     <div class="alg-step" data-step="4">
-      <div class="alg-step-num">05 · Refinement</div>
-      <div class="alg-step-title">Spreading representatives evenly</div>
+      <div class="alg-step-num">05 · Certification</div>
+      <div class="alg-step-title">Verifying every genome is covered</div>
       <div class="alg-step-body">
-        Representatives too close together (above the similarity threshold) are merged. The survivors then repel each other like electric charges on a sphere — spreading until coverage is as uniform as possible.
-        <div class="alg-insight">The <a href="https://en.wikipedia.org/wiki/Thomson_problem" style="color:inherit;text-decoration:underline">Thomson problem</a> (N charges on a sphere arranged to minimise total electrostatic energy) offers a useful intuition: each new representative should be placed as far as possible from all existing ones. Note: Thomson minimises ∑1/r<sub>ij</sub>, not the k-center objective — the analogy is geometric intuition, not a mathematical equivalence.</div>
-        Press Run Thomson to simulate convergence to the equilibrium.
+        Representatives within the merge threshold are collapsed via Union-Find. Then every non-representative is checked directly against its assigned representative by exact OPH Jaccard — any genome not covered in sketch space is promoted to a representative.
+        <div class="alg-insight">The simulation below is schematic — it shows what the final representative distribution looks like on the sphere, not the certification procedure itself.</div>
+        Press Simulate to visualise the final representative distribution.
       </div>
     </div>
   </div>
@@ -188,7 +188,7 @@ body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font
     <div class="alg-ctrl-row">
       <button class="alg-btn primary" id="alg-btn-action" style="flex:1;display:none">▶ Run</button>
       <button class="alg-btn" id="alg-btn-autoplay" style="display:none">Step</button>
-      <button class="alg-btn" id="alg-btn-thomson" style="flex:1;display:none">▶ Run Thomson</button>
+      <button class="alg-btn" id="alg-btn-thomson" style="flex:1;display:none">▶ Simulate</button>
       <button class="alg-btn" id="alg-btn-reset">↺</button>
     </div>
     <div class="alg-progress" id="alg-progress" style="display:none">
@@ -546,7 +546,7 @@ function reset() {
   if(autoplayTimer){clearInterval(autoplayTimer);autoplayTimer=null;}
   document.getElementById('alg-btn-action').textContent='▶ Run';
   document.getElementById('alg-btn-action').disabled=false;
-  document.getElementById('alg-btn-thomson').textContent='▶ Run Thomson';
+  document.getElementById('alg-btn-thomson').textContent='▶ Simulate';
   document.getElementById('alg-info-energy').textContent='—';
   while(repGroup.children.length)   repGroup.remove(repGroup.children[0]);
   while(lineGroup.children.length)  lineGroup.remove(lineGroup.children[0]);
@@ -606,11 +606,11 @@ function startTour() {
       tourAt(1200,()=>{
         setStep(4);
         thomsonActive=true;
-        document.getElementById('alg-btn-thomson').textContent='⏸ Pause Thomson';
+        document.getElementById('alg-btn-thomson').textContent='⏸ Pause';
         document.getElementById('alg-info-energy').textContent='running…';
         tourAt(8000,()=>{
           thomsonActive=false;updateScene();
-          document.getElementById('alg-btn-thomson').textContent='▶ Run Thomson';
+          document.getElementById('alg-btn-thomson').textContent='▶ Simulate';
           stopTour();
         });
       });
@@ -647,7 +647,7 @@ document.getElementById('alg-btn-autoplay').onclick=function(){if(!coverageDone)
 
 document.getElementById('alg-btn-thomson').onclick=function(){
   thomsonActive=!thomsonActive;
-  this.textContent=thomsonActive?'⏸ Pause Thomson':'▶ Run Thomson';
+  this.textContent=thomsonActive?'⏸ Pause':'▶ Simulate';
   if(!thomsonActive)updateScene();
 };
 
