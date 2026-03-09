@@ -2274,9 +2274,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             }
         }
     } else {
-        // Nyström mode (large n): parallel HNSW searches then serial union-find.
-        // index_->search() with a read-only filter set is thread-safe.
-        const size_t k_neighbors = std::min(representatives.size(), size_t{64});
+        // Nyström mode (large n): parallel radius searches then serial union-find.
+        // search_radius() is thread-safe (read-only brute-force scan).
         std::vector<std::pair<size_t, size_t>> merge_pairs;
 
 #if GEODESIC_USE_OMP
@@ -2289,9 +2288,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                 uint64_t rep_i = representatives[i];
                 auto row_it = gid_to_row_.find(rep_i);
                 if (row_it == gid_to_row_.end()) continue;
-                auto neighbors = index_->search(embeddings_[row_it->second].vector, k_neighbors, &rep_set);
+                auto neighbors = index_->search_radius(embeddings_[row_it->second].vector, cfg_.min_rep_distance, &rep_set);
                 for (const auto& [neighbor_id, dist] : neighbors) {
-                    if (neighbor_id == rep_i || dist >= cfg_.min_rep_distance) continue;
+                    if (neighbor_id == rep_i) continue;
                     auto it = rep_to_idx.find(neighbor_id);
                     if (it != rep_to_idx.end()) {
                         size_t j = it->second;
@@ -2307,9 +2306,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             uint64_t rep_i = representatives[i];
             auto row_it = gid_to_row_.find(rep_i);
             if (row_it == gid_to_row_.end()) continue;
-            auto neighbors = index_->search(embeddings_[row_it->second].vector, k_neighbors, &rep_set);
+            auto neighbors = index_->search_radius(embeddings_[row_it->second].vector, cfg_.min_rep_distance, &rep_set);
             for (const auto& [neighbor_id, dist] : neighbors) {
-                if (neighbor_id == rep_i || dist >= cfg_.min_rep_distance) continue;
+                if (neighbor_id == rep_i) continue;
                 auto it = rep_to_idx.find(neighbor_id);
                 if (it != rep_to_idx.end()) {
                     size_t j = it->second;
@@ -2382,8 +2381,12 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     }
 
     // Phase 4: Build edges (genome → nearest representative)
-    // weight_raw = refined Jaccard estimate J ≈ E[dot(u,v)].
-    // ANI = (2J/(1+J))^(1/k) — calibration-free, derived from Mash formula.
+    // weight_raw = ANI fraction derived from Jaccard via Mash formula.
+    auto jaccard_to_ani_frac = [&](double J) -> float {
+        if (J <= 0.0) return 0.0f;
+        double ratio = 2.0 * J / (1.0 + J);
+        return static_cast<float>(std::pow(ratio, 1.0 / cfg_.kmer_size));
+    };
     std::unordered_set<uint64_t> final_rep_set(representatives.begin(), representatives.end());
 
     // Build O(1) lookup: genome_id → index (same index into embeddings_)
@@ -2428,8 +2431,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         SimilarityEdge edge;
         edge.source   = path_strings[i];
         edge.target   = path_strings[rep_idx];
-        edge.weight_raw = static_cast<float>(J_est);
-        edge.weight     = static_cast<float>(J_est);
+        edge.weight_raw = jaccard_to_ani_frac(J_est);
+        edge.weight     = jaccard_to_ani_frac(J_est);
         edge.aln_frac   = 1.0;
         edges.push_back(edge);
     }
@@ -2991,7 +2994,9 @@ size_t GeodesicDerep::build_index_incremental(
             se.genome_size = emb.genome_size;
             store_embeddings.push_back(std::move(se));
         }
-        store.insert_embeddings(store_embeddings);
+        if (!store.insert_embeddings(store_embeddings))
+            spdlog::error("GEODESIC: Failed to insert {} embeddings in incremental build",
+                          store_embeddings.size());
         newly_embedded = new_embeddings.size();
 
         for (auto& emb : new_embeddings)

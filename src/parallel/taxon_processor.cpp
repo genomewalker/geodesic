@@ -699,14 +699,12 @@ TaxonResult process_taxon(
         r.n_representatives = static_cast<int>(all_representatives.size());
         r.method = "geodesic";
 
-        // Build ani_to_rep map: weight_raw = cosine sim ≈ J, ANI = (2J/(1+J))^(1/k)
+        // Build ani_to_rep map: weight_raw = ANI fraction (Mash formula applied at emission)
         std::unordered_map<std::string, double> ani_to_rep_map;
         for (const auto& e : edges) {
             auto it = path_to_accession.find(e.source);
             if (it == path_to_accession.end()) continue;
-            double sim = std::max(0.0, std::min(1.0, static_cast<double>(e.weight_raw)));
-            double ratio = 2.0 * sim / (1.0 + sim);
-            double ani = std::max(70.0, std::min(100.0, std::pow(ratio, 1.0 / kmer_size) * 100.0));
+            double ani = std::clamp(static_cast<double>(e.weight_raw) * 100.0, 70.0, 100.0);
             auto& best = ani_to_rep_map[it->second];
             best = std::max(best, ani);
         }
