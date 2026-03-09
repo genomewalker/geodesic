@@ -14,7 +14,7 @@
    - *Stratified anchors*: anchors stratified by fill fraction $f_i = n_{\mathrm{real}}/m$ across 5 quantile strata, ensuring sparse MAGs and complete genomes are equally represented as landmarks.
    - *Averaged kernel*: anchor Gram matrix uses dual-sketch average $K[i,j] = (J_1+J_2)/2$, halving Jaccard estimation variance.
    - *Containment blend*: when $f_i < 0.2$, Jaccard is blended with bin co-occupancy $\max(C(A{\to}B),\,C(B{\to}A))$ where $C(A{\to}B) = |B_A \cap B_B|/|B_A|$, weighted by $\alpha = 1 - f_i/0.2$.
-   - *Regularisation*: symmetric Laplacian normalisation ($D^{-1/2} K D^{-1/2}$) removes hub-anchor bias; Tikhonov regularisation ($\lambda = 0.01 \cdot \max(\bar{K}_{\mathrm{diag}}, 10^{-4})$) prevents eigenvalue blow-up.
+   - *Regularisation*: symmetric Laplacian normalisation ($D^{-1/2} K D^{-1/2}$) removes hub-anchor bias; Tikhonov regularisation ($\lambda = 0.01\,\bar\mu_K$, floor $10^{-4}$, where $\bar\mu_K$ is the mean kernel diagonal) prevents eigenvalue blow-up.
 
    The Gram matrix is eigendecomposed; all genomes are projected onto the top $d$ eigenvectors via Nyström extension and L2-normalised. $d$ is auto-selected to capture ≥95% of variance. Borderline decisions use exact OPH Jaccard (Phase 7).
 
