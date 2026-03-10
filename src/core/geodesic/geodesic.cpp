@@ -1113,46 +1113,53 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
         stats.p95 = nn_dists[n * 95 / 100];
         return stats;
     }
-    if (is_verbose()) spdlog::info("GEODESIC: computing isolation scores (k={})", cfg_.isolation_k);
-
-    // Single HNSW pass: compute mean k-NN distance (isolation) AND collect 1-NN
-    // distance per genome for threshold calibration — avoids a second HNSW sweep.
+    // k_iso: neighbours used for isolation score (mean angular distance to k nearest).
+    // k_mst: neighbours collected per genome for MST edge list — scales with log2(n) so
+    //        large clonal taxa (100k+ genomes) get enough edges to connect pathotype clusters.
+    //        Isolation scoring always uses the fixed k_iso; MST uses the wider k_mst window.
     size_t n_emb = embeddings_.size();
+    const int k_iso = cfg_.isolation_k;
+    const int k_mst = (n_emb >= 4)
+        ? std::max(k_iso, std::min(50, static_cast<int>(2.0 * std::log2(static_cast<double>(n_emb)))))
+        : k_iso;
+    const bool adaptive_k = (k_mst > k_iso);
+
+    if (is_verbose()) spdlog::info("GEODESIC: computing isolation scores (k_iso={}, k_mst={})", k_iso, k_mst);
+
+    // Single HNSW pass: compute mean k-NN distance (isolation) AND collect edges for MST.
     const int saved_ef = index_->ef_search;
-    // ef=15 is too low for small-medium taxa (n=50-500): isolation scores become inaccurate,
-    // causing a centroid-like genome to appear most-isolated and become rep1. FPS then
-    // stops at 1 rep while the brute-force coverage pass shows many genomes at 92-95% ANI.
     // Scale ef with n: min 50 (adequate recall for k=10), cap 200 for speed on large taxa.
     index_->ef_search = std::max(50, std::min(200, static_cast<int>(n_emb / 100)));
     std::vector<float> nn_dists(n_emb, 1.0f);
 
     // k-NN edge collection for MST (binary_search_filter analog).
-    // Pre-allocated: genome ei's j-th neighbor at position ei * knn_k + j.
+    // Pre-allocated: genome ei's j-th neighbor at position ei * k_mst + j.
     // Sentinel: dist = 1.0f (impossible for real genomic data).
-    const int knn_k = cfg_.isolation_k;
     struct KNNEdge { uint32_t u, v; float dist; };
-    std::vector<KNNEdge> knn_edges(n_emb * knn_k, {0, 0, 1.0f});
+    std::vector<KNNEdge> knn_edges(n_emb * k_mst, {0, 0, 1.0f});
 
 #if GEODESIC_USE_OMP
     #pragma omp parallel for schedule(dynamic, 100) num_threads(cfg_.threads)
 #endif
     for (size_t ei = 0; ei < n_emb; ++ei) {
         auto& emb = embeddings_[ei];
-        auto neighbors = index_->search(emb.vector, cfg_.isolation_k + 1);
+        auto neighbors = index_->search(emb.vector, k_mst + 1);
 
         float total_dist = 0.0f;
-        int count = 0;
+        int iso_count = 0;
         int edge_count = 0;
         for (const auto& [id, dist] : neighbors) {
             if (id != emb.genome_id) {
-                if (count == 0) nn_dists[ei] = dist;  // first non-self = 1-NN
-                total_dist += dist;
-                ++count;
+                if (iso_count == 0) nn_dists[ei] = dist;  // first non-self = 1-NN
+                if (iso_count < k_iso) {
+                    total_dist += dist;
+                }
+                ++iso_count;
                 // Collect k-NN edges for MST; gid_to_row_ is read-only here (thread-safe)
-                if (edge_count < knn_k) {
+                if (edge_count < k_mst) {
                     auto it = gid_to_row_.find(id);
                     if (it != gid_to_row_.end()) {
-                        knn_edges[ei * knn_k + edge_count] = {
+                        knn_edges[ei * k_mst + edge_count] = {
                             static_cast<uint32_t>(ei),
                             static_cast<uint32_t>(it->second),
                             dist};
@@ -1162,7 +1169,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             }
         }
 
-        emb.isolation_score = (count > 0) ? total_dist / count : 1.0f;
+        emb.isolation_score = (iso_count > 0) ? total_dist / std::min(iso_count, k_iso) : 1.0f;
     }
     index_->ef_search = saved_ef;
 
@@ -1253,8 +1260,11 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             disconnected = (components > 1);
             if (is_verbose()) {
                 spdlog::info("GEODESIC: MST over {} non-outlier genomes "
-                             "(components={}, max_edge={:.5f})",
-                             n_main, components, mst_max_edge);
+                             "(k_mst={}, components={}, max_edge={:.5f})",
+                             n_main, k_mst, components, mst_max_edge);
+            } else if (disconnected && adaptive_k) {
+                spdlog::info("GEODESIC: k-NN graph disconnected at k_mst={} (components={}); "
+                             "threshold from spanning forest", k_mst, components);
             }
         }
     }
@@ -1330,9 +1340,16 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     stats.p95 = nn_dists[n * 95 / 100];
     stats.mst_max_edge = mst_max_edge;
     stats.low_pair_count   = (mst_n_main < 20);
-    stats.high_gap_ratio   = (mst_max_edge > 0.0 && stats.p50 > 1e-9
-                              && mst_max_edge / stats.p50 > 5.0);
-    stats.disconnected_mst = disconnected;
+    // Use P95 as denominator: P50 is dominated by intra-clone distances in bimodal taxa
+    // (clonal pathogens have P50 ≈ 0.003), causing false alarms when the MST bridge
+    // correctly spans to an inter-pathotype gap. P95 better represents the upper end of
+    // normal within-population variation, so ratio > 5 is a real outlier signal.
+    stats.high_gap_ratio   = (mst_max_edge > 0.0 && stats.p95 > 1e-9
+                              && mst_max_edge / stats.p95 > 5.0);
+    // disconnected_mst is expected at fixed k_iso for large (100k+) clonal taxa;
+    // adaptive k_mst already gave extra edges to improve connectivity, so if still
+    // disconnected the flag is informational rather than alarming.
+    stats.disconnected_mst = disconnected && !adaptive_k;
     return stats;
 }
 
