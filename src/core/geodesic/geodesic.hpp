@@ -284,10 +284,14 @@ public:
         double mst_max_edge = 0.0;
         double mst_w2 = 0.0;             // second-largest MST edge (penultimate Kruskal merge)
         uint32_t bridge_min_side = 0;    // smaller component at the final MST merge
+        int k_conn = -1;           // smallest tested k where graph connects (-1 = never)
+        int k_cap  = 0;            // K_cap used for the final threshold
+        double drift_base = 0.0;   // mst_max(k_mst)/mst_max(K_cap) - 1 (>0.05 = unstable)
         // Instability flags: when set, mst_max_edge may not reflect intra-species scale.
         bool low_pair_count      = false;  // < 20 non-outlier genomes in MST
         bool pathological_bridge = false;  // tiny-side AND isolated terminal merge
-        bool disconnected_mst    = false;  // MST has > 1 component (truly disconnected)
+        bool disconnected_mst    = false;  // MST has > 1 component at K_cap (truly disconnected)
+        bool threshold_unstable  = false;  // |drift_base| > 5%
     };
 
     // Phase 3: Compute isolation scores AND return NN distance stats in one HNSW pass.

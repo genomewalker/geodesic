@@ -465,22 +465,24 @@ TaxonResult process_taxon(
             geodesic.set_diversity_threshold(diversity_threshold);
             geodesic.set_min_rep_distance(min_rep_distance);
 
-            if (nn.low_pair_count || nn.pathological_bridge || nn.disconnected_mst) {
-                spdlog::warn("[{}] Threshold instability detected: low_pairs={} bridge={} disconnected={}. "
+            if (nn.low_pair_count || nn.pathological_bridge || nn.disconnected_mst || nn.threshold_unstable) {
+                spdlog::warn("[{}] Threshold instability detected: low_pairs={} bridge={} disconnected={} unstable={}. "
                              "diversity_threshold={:.4f} (use --geodesic-diversity-threshold to override)",
                              taxon.taxonomy,
                              nn.low_pair_count, nn.pathological_bridge, nn.disconnected_mst,
-                             diversity_threshold);
+                             nn.threshold_unstable, diversity_threshold);
             }
 
             double thr_j   = std::cos(static_cast<double>(diversity_threshold) * M_PI);
             double thr_ani = GeodesicDerep::jaccard_to_ani(std::max(0.0, thr_j), kmer_size);
             spdlog::info("[{}] geodesic: k={} dim={} sketch={} | "
                          "div_thr={:.4f} ({:.1f}% ANI, MST={:.4f}) | "
-                         "min_rep={:.4f} (NN P5={:.4f} P50={:.4f} P95={:.4f})",
+                         "min_rep={:.4f} (NN P5={:.4f} P50={:.4f} P95={:.4f}) | "
+                         "k_conn={} K_cap={} drift={:.0f}%",
                          taxon.taxonomy, kmer_size, embedding_dim, sketch_size,
                          diversity_threshold, thr_ani, nn.mst_max_edge,
-                         min_rep_distance, nn.p5, nn.p50, nn.p95);
+                         min_rep_distance, nn.p5, nn.p50, nn.p95,
+                         nn.k_conn, nn.k_cap, nn.drift_base * 100.0);
         }
 
         // Detect potential contamination before selection

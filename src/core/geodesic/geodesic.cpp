@@ -161,20 +161,12 @@ struct GeodesicDerep::HNSWIndex {
         ef_search = std::max(1, ef_search_value);
         dim = embs[0].vector.size();
         space = std::make_unique<hnswlib::InnerProductSpace>(dim);
+        // Serial insertion with explicit seed — deterministic graph regardless of thread count.
         index = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-            space.get(), embs.size(), M, ef_construction);
-        index->setEf(ef_search);  // Set once here; never mutated during concurrent search
-
-        // Add all embeddings to the index (parallel)
-        if (!embs.empty()) {
-            index->addPoint(embs[0].vector.data(), 0);
-#if GEODESIC_USE_OMP
-            #pragma omp parallel for schedule(dynamic, 1000)
-#endif
-            for (size_t i = 1; i < embs.size(); ++i) {
-                index->addPoint(embs[i].vector.data(), i);
-            }
-        }
+            space.get(), embs.size(), M, ef_construction, /*seed=*/42);
+        index->setEf(ef_search);
+        for (size_t i = 0; i < embs.size(); ++i)
+            index->addPoint(embs[i].vector.data(), i);
     }
 
     // KNN search - returns (genome_id, angular_distance) pairs
@@ -1122,28 +1114,30 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     const int k_mst = (n_emb >= 4)
         ? std::max(k_iso, std::min(50, static_cast<int>(2.0 * std::log2(static_cast<double>(n_emb)))))
         : k_iso;
-    const bool adaptive_k = (k_mst > k_iso);
+    // K_cap: upper k budget for HNSW query. Evaluate Kruskal's at both k_mst (baseline,
+    // for stability drift check) and K_cap (final threshold). If k_mst is at the graph
+    // percolation boundary, K_cap's denser coverage yields a stable threshold.
+    const int K_cap = std::min(64, std::max(k_mst + 16, 48));
 
-    if (is_verbose()) spdlog::info("GEODESIC: computing isolation scores (k_iso={}, k_mst={})", k_iso, k_mst);
+    if (is_verbose()) spdlog::info("GEODESIC: computing isolation scores (k_iso={}, k_mst={}, K_cap={})",
+                                   k_iso, k_mst, K_cap);
 
-    // Single HNSW pass: compute mean k-NN distance (isolation) AND collect edges for MST.
+    // Single HNSW pass at K_cap: isolation scores + neighbor table for multi-prefix MST.
     const int saved_ef = index_->ef_search;
-    // Scale ef with n: min 50 (adequate recall for k=10), cap 200 for speed on large taxa.
-    index_->ef_search = std::max(50, std::min(200, static_cast<int>(n_emb / 100)));
+    index_->ef_search = std::max(K_cap * 2, std::min(200, static_cast<int>(n_emb / 100)));
     std::vector<float> nn_dists(n_emb, 1.0f);
 
-    // k-NN edge collection for MST (binary_search_filter analog).
-    // Pre-allocated: genome ei's j-th neighbor at position ei * k_mst + j.
-    // Sentinel: dist = 1.0f (impossible for real genomic data).
-    struct KNNEdge { uint32_t u, v; float dist; };
-    std::vector<KNNEdge> knn_edges(n_emb * k_mst, {0, 0, 1.0f});
+    // Neighbor table: nb_ids[ei*K_cap + j] = row-index of j-th neighbor of genome ei.
+    // Sentinel UINT32_MAX = slot unfilled.
+    std::vector<uint32_t> nb_ids(n_emb * K_cap, UINT32_MAX);
+    std::vector<float>    nb_dists(n_emb * K_cap, 1.0f);
 
 #if GEODESIC_USE_OMP
     #pragma omp parallel for schedule(dynamic, 100) num_threads(cfg_.threads)
 #endif
     for (size_t ei = 0; ei < n_emb; ++ei) {
         auto& emb = embeddings_[ei];
-        auto neighbors = index_->search(emb.vector, k_mst + 1);
+        auto neighbors = index_->search(emb.vector, K_cap + 1);
 
         float total_dist = 0.0f;
         int iso_count = 0;
@@ -1151,18 +1145,13 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
         for (const auto& [id, dist] : neighbors) {
             if (id != emb.genome_id) {
                 if (iso_count == 0) nn_dists[ei] = dist;  // first non-self = 1-NN
-                if (iso_count < k_iso) {
-                    total_dist += dist;
-                }
+                if (iso_count < k_iso) total_dist += dist;
                 ++iso_count;
-                // Collect k-NN edges for MST; gid_to_row_ is read-only here (thread-safe)
-                if (edge_count < k_mst) {
+                if (edge_count < K_cap) {
                     auto it = gid_to_row_.find(id);
                     if (it != gid_to_row_.end()) {
-                        knn_edges[ei * k_mst + edge_count] = {
-                            static_cast<uint32_t>(ei),
-                            static_cast<uint32_t>(it->second),
-                            dist};
+                        nb_ids  [ei * K_cap + edge_count] = static_cast<uint32_t>(it->second);
+                        nb_dists[ei * K_cap + edge_count] = dist;
                         ++edge_count;
                     }
                 }
@@ -1173,24 +1162,21 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     }
     index_->ef_search = saved_ef;
 
-    // Kruskal's MST to find the maximum spanning-tree edge (binary_search_filter analog).
-    // This is the minimum θ at which the k-NN graph becomes connected — the natural
-    // population-structure scale, analogous to the Python binary_search_filter which
-    // finds the maximum similarity threshold where the graph stays connected.
-    //
-    // Contamination candidates (high isolation score) are excluded from the MST.
-    // This mirrors binary_search_filter's behavior: the SKANI graph it operates on
-    // has no edges for outlier genomes (too distant from the species cluster), so
-    // they never inflate the connectivity threshold.
+    // Kruskal's MST: minimum θ where k-NN graph becomes connected — binary_search_filter analog.
+    // Run at k_mst (baseline) and K_cap (final). K_cap result is always used as threshold;
+    // if k_mst is at the percolation boundary, K_cap's denser coverage is stable.
+    // Outlier genomes (isolation_score > mean+2σ) are excluded, mirroring how SKANI graph
+    // has no edges for distant outliers.
     double mst_max_edge = 0.0;
     double mst_w2 = 0.0;
     uint32_t bridge_min_side = 0;
     std::vector<double> mst_weights;
     size_t mst_n_main = 0;
     bool disconnected = false;
+    int k_conn_val = -1;
+    double drift_base = 0.0;
     {
         // Compute mean + 2σ of isolation scores to identify outliers.
-        // Same formula used by detect_contamination_candidates() — ensures consistent exclusion.
         double iso_mean = 0.0, iso_m2 = 0.0;
         size_t iso_n = 0;
         for (size_t i = 0; i < n_emb; ++i) {
@@ -1201,23 +1187,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
         const double iso_std = (iso_n > 1) ? std::sqrt(iso_m2 / iso_n) : 0.0;
         const float  iso_thr = static_cast<float>(iso_mean + 2.0 * iso_std);
 
-        // Build edge list excluding edges where either endpoint is an outlier.
-        // Deduplicate (u < v only): symmetric edges don't affect MST correctness.
-        std::vector<KNNEdge> edges;
-        edges.reserve(knn_edges.size());
-        for (const auto& e : knn_edges) {
-            if (e.dist >= 1.0f) continue;
-            if (embeddings_[e.u].isolation_score >= iso_thr) continue;
-            if (e.v >= n_emb || embeddings_[e.v].isolation_score >= iso_thr) continue;
-            if (e.u < e.v) edges.push_back(e);
-            else if (e.u > e.v) edges.push_back({e.v, e.u, e.dist});
-            // u == v: self-loop, skip
-        }
-        // Sort by distance (Kruskal's processes cheapest edges first)
-        std::sort(edges.begin(), edges.end(),
-                  [](const KNNEdge& a, const KNNEdge& b) { return a.dist < b.dist; });
-
-        // Count non-outlier genomes for union-find range
+        // Remap non-outlier genomes to contiguous [0, n_main)
         size_t n_main = 0;
         std::vector<uint32_t> main_remap(n_emb, UINT32_MAX);
         for (size_t i = 0; i < n_emb; ++i) {
@@ -1227,56 +1197,91 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
         mst_n_main = n_main;
 
         if (n_main >= 2) {
-            // Remap edge endpoints to contiguous [0, n_main)
-            for (auto& e : edges) {
-                e.u = main_remap[e.u];
-                e.v = main_remap[e.v];
-            }
-            edges.erase(std::remove_if(edges.begin(), edges.end(),
-                [](const KNNEdge& e){ return e.u == UINT32_MAX || e.v == UINT32_MAX; }),
-                edges.end());
-
-            // Union-Find (path-compressed, union-by-rank) over non-outlier genomes
-            std::vector<uint32_t> parent(n_main);
-            std::vector<uint8_t>  rank(n_main, 0);
-            std::vector<uint32_t> comp_size(n_main, 1);
-            std::iota(parent.begin(), parent.end(), 0);
-            auto find_uf = [&](uint32_t x) -> uint32_t {
-                while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
-                return x;
+            // Kruskal's using up to k_lim neighbors per genome from the neighbor table.
+            struct KNNEdge { uint32_t u, v; float dist; };
+            struct MstResult {
+                double   max_edge  = 0.0;
+                double   w2        = 0.0;
+                uint32_t bridge_min = 0;
+                std::vector<double> weights;
+                size_t   components = 0;
             };
-            auto unite = [&](uint32_t a, uint32_t b, uint32_t& out_a, uint32_t& out_b) -> bool {
-                a = find_uf(a); b = find_uf(b);
-                if (a == b) { out_a = out_b = 0; return false; }
-                out_a = comp_size[a]; out_b = comp_size[b];
-                if (rank[a] < rank[b]) std::swap(a, b);
-                parent[b] = a;
-                comp_size[a] += comp_size[b];
-                if (rank[a] == rank[b]) ++rank[a];
-                return true;
-            };
-
-            // Collect MST edge weights for bridge detection
-            mst_weights.reserve(n_main > 1 ? n_main - 1 : 0);
-            size_t components = n_main;
-            for (const auto& e : edges) {
-                uint32_t sa = 0, sb = 0;
-                if (unite(e.u, e.v, sa, sb)) {
-                    mst_w2 = mst_max_edge;
-                    mst_max_edge = e.dist;
-                    mst_weights.push_back(e.dist);
-                    bridge_min_side = std::min(sa, sb);
-                    if (--components == 1) break;
+            auto run_kruskal = [&](int k_lim) -> MstResult {
+                std::vector<KNNEdge> edges;
+                edges.reserve(n_emb * k_lim);
+                for (size_t ei = 0; ei < n_emb; ++ei) {
+                    if (main_remap[ei] == UINT32_MAX) continue;
+                    for (int j = 0; j < k_lim; ++j) {
+                        uint32_t nid = nb_ids  [ei * K_cap + j];
+                        float    nd  = nb_dists[ei * K_cap + j];
+                        if (nid == UINT32_MAX || nd >= 1.0f) break;
+                        if (nid >= n_emb || main_remap[nid] == UINT32_MAX) continue;
+                        uint32_t ru = main_remap[ei], rv = main_remap[nid];
+                        if      (ru < rv) edges.push_back({ru, rv, nd});
+                        else if (ru > rv) edges.push_back({rv, ru, nd});
+                    }
                 }
-            }
-            disconnected = (components > 1);
+                std::sort(edges.begin(), edges.end(),
+                          [](const KNNEdge& a, const KNNEdge& b) { return a.dist < b.dist; });
+
+                std::vector<uint32_t> parent(n_main), comp_sz(n_main, 1);
+                std::vector<uint8_t>  rank(n_main, 0);
+                std::iota(parent.begin(), parent.end(), 0);
+                auto find_uf = [&](uint32_t x) -> uint32_t {
+                    while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+                    return x;
+                };
+                auto unite_uf = [&](uint32_t a, uint32_t b,
+                                    uint32_t& oa, uint32_t& ob) -> bool {
+                    a = find_uf(a); b = find_uf(b);
+                    if (a == b) { oa = ob = 0; return false; }
+                    oa = comp_sz[a]; ob = comp_sz[b];
+                    if (rank[a] < rank[b]) std::swap(a, b);
+                    parent[b] = a; comp_sz[a] += comp_sz[b];
+                    if (rank[a] == rank[b]) ++rank[a];
+                    return true;
+                };
+
+                MstResult res;
+                res.components = n_main;
+                res.weights.reserve(n_main > 1 ? n_main - 1 : 0);
+                for (const auto& e : edges) {
+                    uint32_t sa = 0, sb = 0;
+                    if (unite_uf(e.u, e.v, sa, sb)) {
+                        res.w2         = res.max_edge;
+                        res.max_edge   = e.dist;
+                        res.bridge_min = std::min(sa, sb);
+                        res.weights.push_back(e.dist);
+                        if (--res.components == 1) break;
+                    }
+                }
+                return res;
+            };
+
+            // Baseline at k_mst (for drift check); final at K_cap (stable threshold).
+            const auto res_base = run_kruskal(k_mst);
+            const auto res_cap  = run_kruskal(K_cap);
+
+            if (res_base.components == 1) k_conn_val = k_mst;
+            else if (res_cap.components == 1) k_conn_val = K_cap;
+            if (res_cap.max_edge > 1e-9 && res_base.max_edge > 1e-9)
+                drift_base = res_base.max_edge / res_cap.max_edge - 1.0;
+
+            mst_max_edge    = res_cap.max_edge;
+            mst_w2          = res_cap.w2;
+            bridge_min_side = res_cap.bridge_min;
+            mst_weights     = res_cap.weights;
+            disconnected    = (res_cap.components > 1);
+
             if (is_verbose()) {
                 spdlog::info("GEODESIC: MST over {} non-outlier genomes "
-                             "(k_mst={}, components={}, max_edge={:.5f})",
-                             n_main, k_mst, components, mst_max_edge);
-            } else if (disconnected && adaptive_k) {
-                spdlog::info("GEODESIC: k-NN graph disconnected at k_mst={} (components={}); "
-                             "threshold from spanning forest", k_mst, components);
+                             "(k_mst={} K_cap={} k_conn={} components={} "
+                             "max_edge={:.5f} drift={:.0f}%)",
+                             n_main, k_mst, K_cap, k_conn_val,
+                             res_cap.components, mst_max_edge, drift_base * 100.0);
+            } else if (disconnected) {
+                spdlog::info("GEODESIC: k-NN graph disconnected at K_cap={} (components={}); "
+                             "threshold from spanning forest", K_cap, res_cap.components);
             }
         }
     }
@@ -1350,14 +1355,15 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     stats.p5  = nn_dists[n * 5  / 100];
     stats.p50 = nn_dists[n * 50 / 100];
     stats.p95 = nn_dists[n * 95 / 100];
-    stats.mst_max_edge   = mst_max_edge;
-    stats.mst_w2         = mst_w2;
+    stats.mst_max_edge    = mst_max_edge;
+    stats.mst_w2          = mst_w2;
     stats.bridge_min_side = bridge_min_side;
-    stats.low_pair_count  = (mst_n_main < 20);
-    // disconnected_mst is expected at fixed k_iso for large (100k+) clonal taxa;
-    // adaptive k_mst already gave extra edges to improve connectivity, so if still
-    // disconnected the flag is informational rather than alarming.
-    stats.disconnected_mst = disconnected && !adaptive_k;
+    stats.k_conn          = k_conn_val;
+    stats.k_cap           = K_cap;
+    stats.drift_base      = drift_base;
+    stats.low_pair_count    = (mst_n_main < 20);
+    stats.disconnected_mst  = disconnected;
+    stats.threshold_unstable = (mst_n_main >= 2) && (std::abs(drift_base) > 0.05);
     // Pathological bridge detection: an anomalous single accession bridging two taxa
     // has a tiny smaller-side component AND the terminal MST merge is isolated
     // (no other MST edges exist near that scale). Genuine multi-scale population
