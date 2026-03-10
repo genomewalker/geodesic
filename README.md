@@ -20,7 +20,7 @@
 
 3. **Index** — build an [HNSW](https://arxiv.org/abs/1603.09320) nearest-neighbour index on the sphere for sub-linear candidate retrieval.
 
-4. **Score** — compute isolation scores (mean angular distance to $k=10$ nearest neighbours) and build the minimum spanning tree of the k-NN graph via Kruskal's algorithm. The longest MST edge sets the diversity threshold $\theta$: the minimum inter-strain scale at which the proximity graph becomes connected. This is inferred from the data, not a fixed parameter. Flag anomalous genomes (contamination candidates) when isolation score $> \mu + z\sigma$.
+4. **Score** — compute isolation scores (mean angular distance to $k_\text{iso}=10$ nearest neighbours) and build the minimum spanning tree of the k-NN graph via Kruskal's algorithm. MST edge collection uses an adaptive $k_\text{mst} = \max(10, \min(50, \lfloor 2\log_2 n\rfloor))$ to maintain connectivity for large clonal taxa (e.g. $k_\text{mst}=35$ for $n=233{,}000$). The longest MST edge sets the diversity threshold $\theta$: the minimum inter-strain scale at which the proximity graph becomes connected. This is inferred from the data, not a fixed parameter. Flag anomalous genomes (contamination candidates) when isolation score $> \mu + z\sigma$.
 
 5. **Select** — quality-weighted [Farthest Point Sampling (FPS)](https://en.wikipedia.org/wiki/Farthest-first_traversal) on the unit sphere. FPS is a greedy 2-approximation to the k-center problem: each step adds the genome farthest from its nearest representative, with fitness weighted by $q_i/100 \cdot \sqrt{L_i/L_m}$ (CheckM2 quality × genome size). Stops when every genome is within $\theta$ of some representative.
 
