@@ -1110,7 +1110,12 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     //        large clonal taxa (100k+ genomes) get enough edges to connect pathotype clusters.
     //        Isolation scoring always uses the fixed k_iso; MST uses the wider k_mst window.
     size_t n_emb = embeddings_.size();
-    const int k_iso = cfg_.isolation_k;
+    const int k_iso_min = cfg_.isolation_k;
+    // Adaptive k_iso: scales with log2(n) for stable density estimates in large populations.
+    // Bounded [k_iso_min, 20] so it stays local. Uses neighbors already queried at K_cap.
+    const int k_iso = (n_emb >= 4)
+        ? std::max(k_iso_min, std::min(20, static_cast<int>(std::log2(static_cast<double>(n_emb)))))
+        : k_iso_min;
     const int k_mst = (n_emb >= 4)
         ? std::max(k_iso, std::min(50, static_cast<int>(2.0 * std::log2(static_cast<double>(n_emb)))))
         : k_iso;
@@ -1203,7 +1208,8 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
                 double   max_edge  = 0.0;
                 double   w2        = 0.0;
                 uint32_t bridge_min = 0;
-                std::vector<double> weights;
+                std::vector<double>   weights;
+                std::vector<uint32_t> labels;  // component label for each of n_main genomes
                 size_t   components = 0;
             };
             auto run_kruskal = [&](int k_lim) -> MstResult {
@@ -1255,6 +1261,16 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
                         if (--res.components == 1) break;
                     }
                 }
+                // Assign compact component labels (root → label via first-seen order)
+                res.labels.resize(n_main);
+                std::unordered_map<uint32_t, uint32_t> root_label;
+                uint32_t next_lbl = 0;
+                for (uint32_t j = 0; j < static_cast<uint32_t>(n_main); ++j) {
+                    uint32_t root = find_uf(j);
+                    auto [it, ins] = root_label.emplace(root, next_lbl);
+                    if (ins) ++next_lbl;
+                    res.labels[j] = it->second;
+                }
                 return res;
             };
 
@@ -1272,6 +1288,14 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             bridge_min_side = res_cap.bridge_min;
             mst_weights     = res_cap.weights;
             disconnected    = (res_cap.components > 1);
+
+            // Store per-genome component labels for per-component contamination thresholds.
+            // Genomes excluded from MST (main_remap[i]==UINT32_MAX) keep component_ids_[i]=-1.
+            component_ids_.assign(n_emb, -1);
+            for (size_t i = 0; i < n_emb; ++i) {
+                if (main_remap[i] != UINT32_MAX)
+                    component_ids_[i] = static_cast<int>(res_cap.labels[main_remap[i]]);
+            }
 
             if (is_verbose()) {
                 spdlog::info("GEODESIC: MST over {} non-outlier genomes "
@@ -2701,10 +2725,38 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
     size_t n   = embeddings_.size();
     size_t dim = static_cast<size_t>(runtime_dim_);
 
-    // Isolation score z-score for nn_outlier: Welford online mean/std over all genomes.
-    // Flagging: nn_outlier = isolation_score > mean + z_threshold * std.
-    // This is population-relative: a genome is flagged if its k-NN distances are anomalously
-    // high relative to the taxon's own distribution, regardless of absolute ANI scale.
+    // Per-component isolation score thresholds.
+    // Genomes in the same connected subpopulation (component_ids_[i] >= 0) are compared
+    // to their component's local mean+z*std. This prevents small-but-genuine sublineages
+    // (rare STs, environmental clades) from being falsely flagged as outliers because
+    // their inter-genome distances are larger than the dominant lineage.
+    // Genomes with component_ids_[i] == -1 were already global outliers during MST and
+    // are always flagged.
+    const int n_comps = [&]() -> int {
+        if (component_ids_.empty() || component_ids_.size() < n) return 0;
+        int mx = -1;
+        for (size_t i = 0; i < n; ++i) if (component_ids_[i] > mx) mx = component_ids_[i];
+        return mx + 1;
+    }();
+
+    std::vector<double> comp_mean(n_comps, 0.0), comp_m2(n_comps, 0.0);
+    std::vector<size_t> comp_n(n_comps, 0);
+    for (size_t i = 0; i < n; ++i) {
+        const int c = (n_comps > 0) ? component_ids_[i] : -1;
+        if (c < 0) continue;
+        const double v = embeddings_[i].isolation_score;
+        const double delta = v - comp_mean[c];
+        comp_mean[c] += delta / static_cast<double>(++comp_n[c]);
+        comp_m2[c]   += delta * (v - comp_mean[c]);
+    }
+    std::vector<float> comp_thr(n_comps, std::numeric_limits<float>::max());
+    for (int c = 0; c < n_comps; ++c) {
+        if (comp_n[c] < 2) continue;
+        const double std_c = std::sqrt(comp_m2[c] / static_cast<double>(comp_n[c] - 1));
+        comp_thr[c] = static_cast<float>(comp_mean[c] + z_threshold * std_c);
+    }
+
+    // Global fallback (used when component_ids_ unavailable, e.g. brute-force small-n path)
     double iso_mean = 0.0, iso_m2 = 0.0;
     for (size_t i = 0; i < n; ++i) {
         const double v = embeddings_[i].isolation_score;
@@ -2763,7 +2815,10 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
 
     std::vector<ContaminationCandidate> candidates;
     for (size_t i = 0; i < n; ++i) {
-        const bool is_nn_outlier = embeddings_[i].isolation_score > nn_threshold;
+        const int comp_id = (n_comps > 0) ? component_ids_[i] : -1;
+        const float thr = (comp_id >= 0) ? comp_thr[comp_id] : nn_threshold;
+        // comp_id == -1: MST global outlier → always flag.  >= 0: component-local thr.
+        const bool is_nn_outlier = (comp_id < 0) || (embeddings_[i].isolation_score > thr);
 
         // kmer_div z-score: informational, NOT used for flagging.
         const float kmer_div_z = (embeddings_[i].genome_size > 0 && kmer_div_std > 1e-9)
@@ -2792,7 +2847,7 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
         c.genome_size_zscore   = sz_z;
         c.nn_outlier           = is_nn_outlier;
         c.kmer_div_zscore      = kmer_div_z;
-        c.margin_to_threshold  = embeddings_[i].isolation_score - nn_threshold;
+        c.margin_to_threshold  = embeddings_[i].isolation_score - thr;
         c.flag_reason          = std::move(reason);
         c.path                 = embeddings_[i].path;
         candidates.push_back(c);
@@ -2805,9 +2860,9 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
                                                 [](const auto& c) { return c.nn_outlier; });
     if (!candidates.empty())
         spdlog::info("GEODESIC: {} contamination candidates ({} misassigned, "
-                     "nn_thr={:.4f}={:.3f}+{}*{:.3f})",
+                     "{} components, global_thr={:.4f}={:.3f}+{}*{:.3f})",
                      candidates.size(), n_misassigned,
-                     nn_threshold, iso_mean, z_threshold, iso_std);
+                     n_comps, nn_threshold, iso_mean, z_threshold, iso_std);
 
     return candidates;
 }

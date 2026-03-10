@@ -347,6 +347,10 @@ private:
     struct HNSWIndex;
     std::unique_ptr<HNSWIndex> index_;
 
+    // Per-genome component label from K_cap Kruskal (-1 = MST outlier).
+    // Set by compute_isolation_scores(), read by detect_contamination_candidates().
+    std::vector<int> component_ids_;
+
     // Last selected representatives (for incremental workflows)
     std::vector<uint64_t> last_representative_ids_;
 
