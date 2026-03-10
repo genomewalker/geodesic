@@ -2816,8 +2816,13 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
     std::vector<ContaminationCandidate> candidates;
     for (size_t i = 0; i < n; ++i) {
         const int comp_id = (n_comps > 0) ? component_ids_[i] : -1;
-        const float thr = (comp_id >= 0) ? comp_thr[comp_id] : nn_threshold;
-        // comp_id == -1: MST global outlier → always flag.  >= 0: component-local thr.
+        // Per-component threshold: use max(comp_thr, global_thr).
+        // The max ensures tight components (near-zero within-component std → comp_thr ≈ mean)
+        // fall back to the global threshold and don't over-flag normal variation.
+        // Per-component threshold only tightens flagging when a component is more diverse
+        // than the global average — protecting rare-but-genuine heterogeneous sublineages.
+        const float thr = (comp_id >= 0)
+            ? std::max(comp_thr[comp_id], nn_threshold) : nn_threshold;
         const bool is_nn_outlier = (comp_id < 0) || (embeddings_[i].isolation_score > thr);
 
         // kmer_div z-score: informational, NOT used for flagging.
