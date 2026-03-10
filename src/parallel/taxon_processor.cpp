@@ -465,11 +465,11 @@ TaxonResult process_taxon(
             geodesic.set_diversity_threshold(diversity_threshold);
             geodesic.set_min_rep_distance(min_rep_distance);
 
-            if (nn.low_pair_count || nn.high_gap_ratio || nn.disconnected_mst) {
-                spdlog::warn("[{}] Threshold instability detected: low_pairs={} gap_ratio={} disconnected={}. "
+            if (nn.low_pair_count || nn.pathological_bridge || nn.disconnected_mst) {
+                spdlog::warn("[{}] Threshold instability detected: low_pairs={} bridge={} disconnected={}. "
                              "diversity_threshold={:.4f} (use --geodesic-diversity-threshold to override)",
                              taxon.taxonomy,
-                             nn.low_pair_count, nn.high_gap_ratio, nn.disconnected_mst,
+                             nn.low_pair_count, nn.pathological_bridge, nn.disconnected_mst,
                              diversity_threshold);
             }
 

@@ -1183,6 +1183,9 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     // has no edges for outlier genomes (too distant from the species cluster), so
     // they never inflate the connectivity threshold.
     double mst_max_edge = 0.0;
+    double mst_w2 = 0.0;
+    uint32_t bridge_min_side = 0;
+    std::vector<double> mst_weights;
     size_t mst_n_main = 0;
     bool disconnected = false;
     {
@@ -1236,24 +1239,33 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             // Union-Find (path-compressed, union-by-rank) over non-outlier genomes
             std::vector<uint32_t> parent(n_main);
             std::vector<uint8_t>  rank(n_main, 0);
+            std::vector<uint32_t> comp_size(n_main, 1);
             std::iota(parent.begin(), parent.end(), 0);
             auto find_uf = [&](uint32_t x) -> uint32_t {
                 while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
                 return x;
             };
-            auto unite = [&](uint32_t a, uint32_t b) -> bool {
+            auto unite = [&](uint32_t a, uint32_t b, uint32_t& out_a, uint32_t& out_b) -> bool {
                 a = find_uf(a); b = find_uf(b);
-                if (a == b) return false;
+                if (a == b) { out_a = out_b = 0; return false; }
+                out_a = comp_size[a]; out_b = comp_size[b];
                 if (rank[a] < rank[b]) std::swap(a, b);
                 parent[b] = a;
+                comp_size[a] += comp_size[b];
                 if (rank[a] == rank[b]) ++rank[a];
                 return true;
             };
 
+            // Collect MST edge weights for bridge detection
+            mst_weights.reserve(n_main > 1 ? n_main - 1 : 0);
             size_t components = n_main;
             for (const auto& e : edges) {
-                if (unite(e.u, e.v)) {
+                uint32_t sa = 0, sb = 0;
+                if (unite(e.u, e.v, sa, sb)) {
+                    mst_w2 = mst_max_edge;
                     mst_max_edge = e.dist;
+                    mst_weights.push_back(e.dist);
+                    bridge_min_side = std::min(sa, sb);
                     if (--components == 1) break;
                 }
             }
@@ -1338,18 +1350,38 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     stats.p5  = nn_dists[n * 5  / 100];
     stats.p50 = nn_dists[n * 50 / 100];
     stats.p95 = nn_dists[n * 95 / 100];
-    stats.mst_max_edge = mst_max_edge;
-    stats.low_pair_count   = (mst_n_main < 20);
-    // Use P95 as denominator: P50 is dominated by intra-clone distances in bimodal taxa
-    // (clonal pathogens have P50 ≈ 0.003), causing false alarms when the MST bridge
-    // correctly spans to an inter-pathotype gap. P95 better represents the upper end of
-    // normal within-population variation, so ratio > 5 is a real outlier signal.
-    stats.high_gap_ratio   = (mst_max_edge > 0.0 && stats.p95 > 1e-9
-                              && mst_max_edge / stats.p95 > 5.0);
+    stats.mst_max_edge   = mst_max_edge;
+    stats.mst_w2         = mst_w2;
+    stats.bridge_min_side = bridge_min_side;
+    stats.low_pair_count  = (mst_n_main < 20);
     // disconnected_mst is expected at fixed k_iso for large (100k+) clonal taxa;
     // adaptive k_mst already gave extra edges to improve connectivity, so if still
     // disconnected the flag is informational rather than alarming.
     stats.disconnected_mst = disconnected && !adaptive_k;
+    // Pathological bridge detection: an anomalous single accession bridging two taxa
+    // has a tiny smaller-side component AND the terminal MST merge is isolated
+    // (no other MST edges exist near that scale). Genuine multi-scale population
+    // structure (e.g. S. enterica serovars) has substantial components on both sides
+    // and many inter-group MST edges near the same scale → stays silent.
+    if (mst_max_edge > 0.0 && mst_n_main >= 2) {
+        const int tail_count = static_cast<int>(std::count_if(
+            mst_weights.begin(), mst_weights.end(),
+            [w1 = mst_max_edge](double w) { return w >= 0.8 * w1; }));
+        const bool is_tiny_side = (bridge_min_side <= 10)
+                               && (static_cast<double>(bridge_min_side) / mst_n_main <= 0.005);
+        const bool is_isolated  = (tail_count <= 2)
+                               || (mst_w2 > 1e-9 && mst_max_edge / mst_w2 >= 1.8);
+        stats.pathological_bridge = is_tiny_side && is_isolated;
+    }
+    // Log multiscale separation as a diagnostic (not a warning — high ratio is expected
+    // for species with genuine serovar/pathotype structure).
+    if (mst_max_edge > 0.0 && stats.p95 > 1e-9) {
+        if (is_verbose() || mst_max_edge / stats.p95 > 5.0)
+            spdlog::info("GEODESIC: multiscale diagnostic: mst_max/P95={:.1f} "
+                         "(mst={:.4f} P95={:.4f} w2={:.4f} bridge_min_side={})",
+                         mst_max_edge / stats.p95, mst_max_edge, stats.p95,
+                         mst_w2, bridge_min_side);
+    }
     return stats;
 }
 
