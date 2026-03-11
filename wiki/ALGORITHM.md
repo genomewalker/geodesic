@@ -57,7 +57,9 @@ The specific mixing function (SplitMix64 with a bin-index XOR) is a local implem
 
 **Jaccard property.** For any bin $t$ that is real in at least one genome:
 
-$$\Pr\!\left[\text{sig}_A[t] = \text{sig}_B[t]\right] = J(A, B) = \frac{|A \cap B|}{|A \cup B|}$$
+$$\Pr\!\left[\text{sig}_A[t] = \text{sig}_B[t]\right] \approx J(A, B) = \frac{|A \cap B|}{|A \cup B|}$$
+
+(Equality holds before densification; after densification, filled bins introduce correlation and the identity is approximate.)
 
 where $A$ and $B$ are the sets of distinct canonical k-mers. Over $m$ bins, the fraction of collisions is an unbiased estimator of $J$ with approximate variance:
 
@@ -108,7 +110,7 @@ where $|G_i|$ is the number of distinct canonical k-mers. Fill fraction saturate
 
 ### Motivation
 
-Exact pairwise Jaccard over $n$ genomes requires $O(n^2 m)$ operations — infeasible for $n = 10^5$. The [Nyström method](https://en.wikipedia.org/wiki/Nystr%C3%B6m_method) (Williams & Seeger 2001) approximates the $n \times n$ kernel matrix from a small anchor subset of size $p \ll n$. The dominant cost becomes $O(n \cdot p \cdot m)$ for the genome-to-anchor similarities.
+Exact pairwise Jaccard over $n$ genomes requires $O(n^2 m)$ operations — infeasible for $n = 10^5$. The embedding uses a [Nyström-style](https://en.wikipedia.org/wiki/Nystr%C3%B6m_method) heuristic with ridge regularisation (Williams & Seeger 2001), not a formal Mercer kernel approximation: the blended kernel (Jaccard + bin co-occupancy) is not guaranteed positive semi-definite, and Laplacian normalisation changes the inner-product semantics. The method approximates the $n \times n$ similarity matrix from a small anchor subset of size $p \ll n$. The dominant cost becomes $O(n \cdot p \cdot m)$ for the genome-to-anchor similarities.
 
 ### Anchor Sampling
 
@@ -211,13 +213,13 @@ For clonal taxa with a tight distribution, $\text{NN}_{P95}$ is small and drives
 
 ## Phase 5: Farthest Point Sampling
 
-[Farthest Point Sampling (FPS)](https://en.wikipedia.org/wiki/Farthest-first_traversal) selects representatives greedily: each step adds the genome farthest from all current representatives. For unweighted FPS on a metric space, this gives a 2-approximation to the k-center problem (Gonzalez 1985): if $\text{OPT}_k$ is the optimal k-center radius, FPS gives radius $\leq 2 \cdot \text{OPT}_k$.
+[Farthest Point Sampling (FPS)](https://en.wikipedia.org/wiki/Farthest-first_traversal) selects representatives greedily: each step adds the genome farthest from all current representatives, forming a greedy $\theta$-cover. For unweighted FPS with fixed $k$ on a metric space, Gonzalez (1985) showed a 2-approximation to the k-center problem. That bound does not apply here: quality weighting, batch processing ($B=16$), and threshold-based stopping (variable $k$) violate the Gonzalez conditions. Coverage is evaluated empirically.
 
 **Quality and size weighting.** Each genome is assigned a fitness score:
 
 $$\text{fitness}(G_i) = \text{dist}(G_i) \cdot \frac{\text{quality}_i}{100} \cdot \sqrt{\frac{\text{size}_i}{\text{median\_size}}}$$
 
-where $\text{quality} = \text{completeness} - 5 \times \text{contamination}$ (a heuristic combining CheckM2 completeness and contamination estimates, commonly used in genome quality filtering but not a CheckM2-defined metric). This weighting biases selection toward high-quality complete genomes. The formal 2-approximation guarantee of unweighted FPS does not carry over; coverage is evaluated empirically.
+where $\text{quality} = \text{completeness} - 5 \times \text{contamination}$ (a heuristic combining CheckM2 completeness and contamination estimates, commonly used in genome quality filtering but not a CheckM2-defined metric). This weighting biases selection toward high-quality complete genomes.
 
 **Algorithm:**
 1. Start with the genome maximising $\text{isolation} \times \text{quality} \times \text{size}$ as the first representative

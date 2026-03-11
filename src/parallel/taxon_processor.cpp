@@ -379,7 +379,9 @@ TaxonResult process_taxon(
         }
 
         // Both thresholds are placeholders — replaced below using real NN distances.
-        float min_rep_distance = diversity_threshold * 0.5f;
+        // theta/4 ensures coverage-preserving merge: by triangle inequality,
+        // theta/2 can leave genomes 1.5*theta away from kept rep.
+        float min_rep_distance = diversity_threshold * 0.25f;
 
         GeodesicDerep::Config gcfg{
             .embedding_dim = embedding_dim,
@@ -460,8 +462,10 @@ TaxonResult process_taxon(
 
             diversity_threshold = std::max(1e-6f,
                 std::min(diversity_threshold, mst_threshold));
+            // theta/4 ensures coverage-preserving merge: by triangle inequality,
+            // theta/2 can leave genomes 1.5*theta away from kept rep.
             min_rep_distance = std::min(static_cast<float>(nn.p5),
-                                        diversity_threshold * 0.5f);
+                                        diversity_threshold * 0.25f);
 
             geodesic.set_diversity_threshold(diversity_threshold);
             geodesic.set_min_rep_distance(min_rep_distance);

@@ -181,7 +181,7 @@ body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font
       <div class="alg-step-num">04 · Selection</div>
       <div class="alg-step-title">Choosing representatives to cover all diversity</div>
       <div class="alg-step-body">
-        Quality-weighted farthest-point sampling: greedy 2-approximation to the k-center problem. Stops when every genome is within the ANI threshold of some representative. Colored zones show coverage.
+        Quality-weighted farthest-point sampling: greedy &theta;-cover that adds the genome farthest from any current representative. Stops when every genome is within the ANI threshold of some representative. Colored zones show coverage.
       </div>
     </div>
     <div class="alg-step" data-step="4">
@@ -1087,7 +1087,7 @@ footer{padding:28px 40px;border-top:1px solid var(--border);display:flex;align-i
       <div class="alg-step-num">04 · Selection</div>
       <div class="alg-step-title">Choosing representatives to cover all diversity</div>
       <div class="alg-step-body">
-        Quality-weighted farthest-point sampling: greedy 2-approximation to the k-center problem. Stops when every genome is within the ANI threshold of some representative. Colored zones show coverage.
+        Quality-weighted farthest-point sampling: greedy &theta;-cover that adds the genome farthest from any current representative. Stops when every genome is within the ANI threshold of some representative. Colored zones show coverage.
       </div>
     </div>
     <div class="alg-step" data-step="4">
