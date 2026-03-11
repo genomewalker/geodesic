@@ -154,18 +154,19 @@ struct GeodesicDerep::HNSWIndex {
     std::vector<GenomeEmbedding>* embeddings;
     int ef_search;
 
-    void build(std::vector<GenomeEmbedding>& embs, int M, int ef_construction, int ef_search_value) {
+    void build(std::vector<GenomeEmbedding>& embs, int M, int ef_construction, int ef_search_value, int n_threads = 1) {
         embeddings = &embs;
         if (embs.empty()) return;
 
         ef_search = std::max(1, ef_search_value);
         dim = embs[0].vector.size();
         space = std::make_unique<hnswlib::InnerProductSpace>(dim);
-        // Serial insertion with explicit seed — deterministic graph regardless of thread count.
         index = std::make_unique<hnswlib::HierarchicalNSW<float>>(
             space.get(), embs.size(), M, ef_construction, /*seed=*/42);
         index->setEf(ef_search);
-        for (size_t i = 0; i < embs.size(); ++i)
+        index->addPoint(embs[0].vector.data(), 0);  // seed point inserted first
+        #pragma omp parallel for schedule(static) num_threads(n_threads)
+        for (size_t i = 1; i < embs.size(); ++i)
             index->addPoint(embs[i].vector.data(), i);
     }
 
@@ -1072,7 +1073,7 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
 
     // Build HNSW index — skip for small n (brute-force pairwise is faster)
     if (n > SMALL_N_THRESHOLD) {
-        index_->build(embeddings_, cfg_.hnsw_m, cfg_.hnsw_ef_construction, cfg_.hnsw_ef_search);
+        index_->build(embeddings_, cfg_.hnsw_m, cfg_.hnsw_ef_construction, cfg_.hnsw_ef_search, cfg_.threads);
         if (is_verbose()) spdlog::info("GEODESIC: HNSW index built ({} embeddings, M={}, ef={})",
                      embeddings_.size(), cfg_.hnsw_m, cfg_.hnsw_ef_construction);
         t_phase("HNSW build");
@@ -3242,7 +3243,7 @@ size_t GeodesicDerep::build_index_incremental(
 
     // Build HNSW index from Nyström (or placeholder) vectors
     if (n > SMALL_N_THRESHOLD) {
-        index_->build(embeddings_, cfg_.hnsw_m, cfg_.hnsw_ef_construction, cfg_.hnsw_ef_search);
+        index_->build(embeddings_, cfg_.hnsw_m, cfg_.hnsw_ef_construction, cfg_.hnsw_ef_search, cfg_.threads);
         if (is_verbose()) spdlog::info("GEODESIC: HNSW index built ({} embeddings, M={}, ef={})",
                      n, cfg_.hnsw_m, cfg_.hnsw_ef_construction);
     }
