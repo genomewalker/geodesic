@@ -1284,6 +1284,75 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
                 }
                 if (k_conn_min < 0) {
                     spdlog::warn("GEODESIC: k-NN graph still disconnected after retry at K_cap={}", K_cap);
+                    // Bridge diagnostic: sample up to 50 cross-component pairs to distinguish
+                    // ANN recall gap (true similarity > J_bridge) vs structural disconnection.
+                    if (!embeddings_.empty() && !embeddings_[0].oph_sig.empty()) {
+                        // Rebuild component labels from final nb_ids state.
+                        std::vector<uint32_t> bd_par(n_main);
+                        std::iota(bd_par.begin(), bd_par.end(), 0);
+                        auto bd_find = [&](uint32_t x) -> uint32_t {
+                            while (bd_par[x] != x) { bd_par[x] = bd_par[bd_par[x]]; x = bd_par[x]; }
+                            return x;
+                        };
+                        for (int k = 0; k < K_cap; ++k) {
+                            for (size_t ei = 0; ei < n_emb; ++ei) {
+                                if (main_remap[ei] == UINT32_MAX) continue;
+                                uint32_t nid = nb_ids[ei * K_cap + k];
+                                if (nid == UINT32_MAX || nid >= n_emb) continue;
+                                if (main_remap[nid] == UINT32_MAX) continue;
+                                uint32_t ra = bd_find(main_remap[ei]);
+                                uint32_t rb = bd_find(main_remap[nid]);
+                                if (ra != rb) bd_par[rb] = ra;
+                            }
+                        }
+                        // Collect component members (ei index → component root).
+                        std::unordered_map<uint32_t, std::vector<uint32_t>> comp_members;
+                        for (uint32_t ei = 0; ei < static_cast<uint32_t>(n_emb); ++ei) {
+                            if (main_remap[ei] == UINT32_MAX) continue;
+                            comp_members[bd_find(main_remap[ei])].push_back(ei);
+                        }
+                        const size_t m_oph = embeddings_[0].oph_sig.size();
+                        // Two-tier thresholds: J_cert (ANI threshold) = definite recall gap;
+                        // J_80 (80% ANI) = possible gap / weaker bridge.
+                        // Sampling uses va[0]/vb[0]: one genome per component pair — sufficient
+                        // for detection but a negative result means "NO_BRIDGE_FOUND", not "STRUCTURAL".
+                        const double q_ani  = std::pow(cfg_.ani_threshold,
+                                                       static_cast<double>(cfg_.kmer_size));
+                        const double J_cert_bd = q_ani / (2.0 - q_ani);
+                        const double q80    = std::pow(0.80, static_cast<double>(cfg_.kmer_size));
+                        const double J_80   = q80 / (2.0 - q80);
+                        double max_cross_jac = 0.0;
+                        size_t n_above_cert = 0, n_above_80 = 0, n_pairs_sampled = 0;
+                        constexpr size_t max_pairs = 50;
+                        std::vector<uint32_t> comp_keys;
+                        comp_keys.reserve(comp_members.size());
+                        for (auto& [k, _] : comp_members) comp_keys.push_back(k);
+                        for (size_t ci = 0; ci < comp_keys.size() && n_pairs_sampled < max_pairs; ++ci) {
+                            for (size_t cj = ci + 1; cj < comp_keys.size() && n_pairs_sampled < max_pairs; ++cj) {
+                                const auto& va = comp_members[comp_keys[ci]];
+                                const auto& vb = comp_members[comp_keys[cj]];
+                                if (va.empty() || vb.empty()) continue;
+                                const uint32_t a = va[0], b = vb[0];
+                                const auto& sig_a = embeddings_[a].oph_sig;
+                                const auto& sig_b = embeddings_[b].oph_sig;
+                                if (sig_a.size() != m_oph || sig_b.size() != m_oph) continue;
+                                const double jac = refine_jaccard_ptr(sig_a.data(), sig_b.data(), m_oph);
+                                max_cross_jac = std::max(max_cross_jac, jac);
+                                if (jac > J_cert_bd) ++n_above_cert;
+                                if (jac > J_80)      ++n_above_80;
+                                ++n_pairs_sampled;
+                            }
+                        }
+                        const char* diagnosis = (n_above_cert > 0)
+                            ? "ANN_RECALL_GAP (pairs above ANI-threshold Jaccard — HNSW missed edges)"
+                            : (n_above_80 > 0)
+                                ? "POSSIBLE_GAP (pairs 80-95% ANI — weak bridges missed by HNSW)"
+                                : "NO_BRIDGE_FOUND (sampled pairs below 80% ANI — likely structural)";
+                        spdlog::warn("GEODESIC: bridge diagnostic: {} pairs sampled, max_jac={:.4f} "
+                                     "(J_cert={:.4f}, J_80={:.4f}), {} above cert, {} above 80% → {}",
+                                     n_pairs_sampled, max_cross_jac, J_cert_bd, J_80,
+                                     n_above_cert, n_above_80, diagnosis);
+                    }
                 }
             }
 
@@ -2445,11 +2514,15 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         representatives = std::move(refined_reps);
     }
 
-    // Phase 7c: Universal OPH certification.
-    // The Nyström embedding is a candidate-generation layer, not a coverage guarantee:
-    // densified OPH bins inflate the kernel for sparse genomes (MAGs), causing embedding
-    // dot-products to overestimate similarity.  Verify every non-rep, non-excluded genome
-    // against its assigned representative using exact OPH Jaccard (sig1, SIMD).
+    // Phase 7c: Universal sketch-space certification.
+    // The Nyström embedding is a candidate-generation layer, not a coverage guarantee.
+    // Densified OPH bins inflate kernel values for sparse MAGs, causing embedding
+    // dot-products to overestimate similarity. We verify every non-rep, non-excluded
+    // genome against its assigned representative using exact OPH Jaccard (sig1, SIMD).
+    // COVERAGE GUARANTEE: every non-rep genome is within J_cert (Jaccard equivalent of
+    // ani_threshold) of some representative *in sketch space*. This is NOT a guarantee
+    // in true ANI space — OPH estimation error depends on real-bin occupancy and J, so
+    // borderline genomes (near the ANI threshold) may be slightly miscertified.
     // For failures, scan all current representatives exhaustively before promoting.
     if (nystrom_applied_ && !embeddings_.empty() && !embeddings_[0].oph_sig.empty()) {
         // Build rep-row index.
@@ -2469,6 +2542,61 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                                        static_cast<double>(cfg_.kmer_size));
         const float J_cert  = static_cast<float>(q_cert / (2.0 - q_cert));
 
+        // Two-arm OPH certification:
+        // Arm 1: symmetric Jaccard(i, ri) >= J_cert (standard case).
+        // Arm 2: directional containment C(small→large) for size-asymmetric pairs
+        // (MAG << complete genome, size_ratio < 0.5). Containment = n_match / n_small_real
+        // where n_small_real counts ALL real OPH bins in the smaller genome (from
+        // real_bins_mask), and n_match counts co-occupied bins with matching hash values.
+        // Using n_small_real as denominator (not co-occupied bins n_both_real) avoids
+        // inflating the score when the large genome has many empty bins that reduce
+        // n_both_real but do not represent missing k-mer content in the small genome.
+        auto oph_certified = [&](size_t i, size_t ri) -> bool {
+            const auto& sig_i = embeddings_[i].oph_sig;
+            const auto& sig_r = embeddings_[ri].oph_sig;
+            if (sig_i.size() != m_oph || sig_r.size() != m_oph) return false;
+            // Arm 1: symmetric Jaccard.
+            const double jac = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
+            if (static_cast<float>(jac) >= J_cert) return true;
+            // Arm 2: directional containment for sketch-asymmetric pairs.
+            // Trigger on n_real_bins ratio (not genome_size): a fragmented MAG may have
+            // similar genome_size to a complete genome but far fewer occupied OPH bins.
+            // n_real_bins directly measures sketch coverage, matching containment semantics.
+            const uint32_t bins_i = embeddings_[i].n_real_bins;
+            const uint32_t bins_r = embeddings_[ri].n_real_bins;
+            if (bins_i == 0 || bins_r == 0) return false;
+            const double bins_ratio = (bins_i < bins_r)
+                ? static_cast<double>(bins_i) / static_cast<double>(bins_r)
+                : static_cast<double>(bins_r) / static_cast<double>(bins_i);
+            if (bins_ratio > 0.5) return false;
+            // Identify small and large by n_real_bins (sketch coverage).
+            const bool i_is_small = (bins_i <= bins_r);
+            const auto& mask_small = i_is_small
+                ? embeddings_[i].real_bins_mask : embeddings_[ri].real_bins_mask;
+            const auto& mask_large = i_is_small
+                ? embeddings_[ri].real_bins_mask : embeddings_[i].real_bins_mask;
+            const uint16_t* sig_small = i_is_small ? sig_i.data() : sig_r.data();
+            const uint16_t* sig_large = i_is_small ? sig_r.data() : sig_i.data();
+            if (mask_small.empty() || mask_large.empty()) return false;
+            int n_match = 0, n_small_real = 0;
+            const size_t n_words = std::min(mask_small.size(), mask_large.size());
+            for (size_t w = 0; w < n_words; ++w) {
+                n_small_real += __builtin_popcountll(mask_small[w]);
+                uint64_t both_real = mask_small[w] & mask_large[w];
+                while (both_real) {
+                    const int bit = __builtin_ctzll(both_real);
+                    const size_t t = w * 64 + static_cast<size_t>(bit);
+                    if (t < m_oph && sig_small[t] == sig_large[t]) ++n_match;
+                    both_real &= both_real - 1;
+                }
+            }
+            if (n_small_real == 0) return false;
+            // Containment threshold is q_cert = ANI^k (raw probability), not J_cert.
+            // J_cert = q/(2-q) is derived for symmetric Jaccard; at 95% ANI / k=21,
+            // q_cert ≈ 0.34 vs J_cert ≈ 0.21. Using J_cert here would be too permissive.
+            return static_cast<double>(n_match) / n_small_real >= q_cert;
+        };
+
         std::vector<size_t> repair_queue;
 #if GEODESIC_USE_OMP
         {
@@ -2486,26 +2614,26 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                     // Fast path: check assigned rep first.
                     auto rep_it = gid_to_row_.find(nearest_rep[i]);
                     if (rep_it != gid_to_row_.end()) {
-                        const auto& sig_r = embeddings_[rep_it->second].oph_sig;
-                        if (sig_r.size() == m_oph) {
-                            double jac = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
-                            if (static_cast<float>(jac) >= J_cert) continue;
-                        }
+                        if (oph_certified(i, rep_it->second)) continue;
                     }
 
-                    // Exhaustive scan over all reps.
-                    double best_jac = -1.0;
+                    // Exhaustive scan: find best certified rep (highest Jaccard among certified).
+                    // Check oph_certified for every rep — not just max-Jaccard — because a
+                    // size-asymmetric rep with lower Jaccard may pass the containment arm while
+                    // a higher-Jaccard rep fails both arms.
+                    double best_cert_jac = -1.0;
                     size_t best_rep_row = SIZE_MAX;
                     for (size_t ri : cert_rep_idx) {
+                        if (!oph_certified(i, ri)) continue;
                         const auto& sig_r = embeddings_[ri].oph_sig;
                         if (sig_r.size() != m_oph) continue;
                         double j = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
-                        if (j > best_jac) { best_jac = j; best_rep_row = ri; }
+                        if (j > best_cert_jac) { best_cert_jac = j; best_rep_row = ri; }
                     }
 
-                    if (best_rep_row != SIZE_MAX && static_cast<float>(best_jac) >= J_cert) {
+                    if (best_rep_row != SIZE_MAX) {
                         nearest_rep[i]    = store_.genome_ids[best_rep_row];
-                        max_sim_to_rep[i] = static_cast<float>(best_jac);
+                        max_sim_to_rep[i] = static_cast<float>(best_cert_jac);
                     } else {
                         local_repair.push_back(i);
                     }
@@ -2525,35 +2653,37 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             // Fast path: check assigned rep first.
             auto rep_it = gid_to_row_.find(nearest_rep[i]);
             if (rep_it != gid_to_row_.end()) {
-                const auto& sig_r = embeddings_[rep_it->second].oph_sig;
-                if (sig_r.size() == m_oph) {
-                    double jac = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
-                    if (static_cast<float>(jac) >= J_cert) continue;
-                }
+                if (oph_certified(i, rep_it->second)) continue;
             }
 
             // Assigned rep failed: exhaustive scan over all reps.
-            double best_jac = -1.0;
+            // Check oph_certified for every rep (not just max-Jaccard) to catch
+            // size-asymmetric pairs where containment arm certifies at lower Jaccard.
+            double best_cert_jac = -1.0;
             size_t best_rep_row = SIZE_MAX;
             for (size_t ri : cert_rep_idx) {
+                if (!oph_certified(i, ri)) continue;
                 const auto& sig_r = embeddings_[ri].oph_sig;
                 if (sig_r.size() != m_oph) continue;
                 double j = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
-                if (j > best_jac) { best_jac = j; best_rep_row = ri; }
+                if (j > best_cert_jac) { best_cert_jac = j; best_rep_row = ri; }
             }
 
-            if (best_rep_row != SIZE_MAX && static_cast<float>(best_jac) >= J_cert) {
+            if (best_rep_row != SIZE_MAX) {
                 nearest_rep[i]    = store_.genome_ids[best_rep_row];
-                max_sim_to_rep[i] = static_cast<float>(best_jac);
+                max_sim_to_rep[i] = static_cast<float>(best_cert_jac);
             } else {
                 repair_queue.push_back(i);
             }
         }
 #endif
 
+        const size_t n_reps_pre_repair = cert_rep_idx.size();
         if (!repair_queue.empty()) {
-            spdlog::info("GEODESIC: Phase 7c repair: {} genomes uncovered by OPH, promoting as reps",
-                         repair_queue.size());
+            spdlog::info("GEODESIC: Phase 7c repair: {} reps added ({} → {}); "
+                         "post-FPS sketch-space repair (Nyström/Laplacian embedding coverage gap)",
+                         repair_queue.size(), n_reps_pre_repair,
+                         n_reps_pre_repair + repair_queue.size());
             std::vector<const float*> repair_vecs;
             std::vector<uint64_t>     repair_gids;
             repair_vecs.reserve(repair_queue.size());
@@ -2932,10 +3062,14 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
                 (static_cast<double>(store_.genome_sizes[i]) - size_mean) / std_sz)
             : 0.0f;
         const bool is_size_outlier = std::abs(sz_z) > z_threshold;
-        std::string reason;
-        if (is_nn_outlier && is_size_outlier) reason = "nn_outlier+size_outlier";
-        else if (is_nn_outlier) reason = "nn_outlier";
-        else reason = "size_outlier";
+        // Note: only is_nn_outlier reaches here (is_nn_outlier guard above); size_outlier-only is dead.
+        std::string reason = is_size_outlier ? "nn_outlier+size_outlier" : "nn_outlier";
+        // Composite hints: secondary signals that reinforce or explain the primary flag.
+        // Threshold z>3 rather than z>2: at z>2, ~2% of genomes in a normal distribution would
+        // be flagged by chance; z>3 reduces false-positive hints to ~0.1%.
+        if (kmer_div_z > 3.0f) reason += ":kmer_diverse";
+        if (sz_z < -2.0f) reason += ":small_genome";
+        if (embeddings_[i].n_contigs > 100) reason += ":fragmented";
 
         ContaminationCandidate c;
         c.genome_id            = embeddings_[i].genome_id;
