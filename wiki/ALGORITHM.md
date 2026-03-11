@@ -176,6 +176,8 @@ $$\tilde{\mathbf{e}}(G_i) = W^\top \mathbf{k}_G, \qquad \mathbf{e}(G_i) = \tilde
 
 Non-anchors use sig1 only for this step — sig2 is not materialised for them.
 
+> **Design note — dual-sketch asymmetry.** The anchor Gram matrix $K$ uses dual-sketch averaged Jaccard (lower variance), while the extension vector $\mathbf{k}_G$ uses sig1 only. This means the kernel function changes between the anchor block (training) and the cross block (test), which formally breaks standard Nyström coherence (which assumes one consistent kernel $K(x,y)$ throughout). The asymmetry is an engineering trade-off: materialising sig2 for all $n$ non-anchor genomes would double the sketching cost. In practice, the anchor block dominates the spectral approximation quality, and Phase 8 universal certification compensates for any miscoverage arising from the noisier extension. This embedding is therefore a **heuristic** rather than a formal Nyström approximation.
+
 ---
 
 ## Phase 3: HNSW Index
