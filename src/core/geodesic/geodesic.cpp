@@ -1620,17 +1620,10 @@ void GeodesicDerep::apply_nystrom_embeddings() {
     // upper triangle in the parallel loop, lower triangle from upper after.
     RowMajorMatXf K_rm(static_cast<int>(n_anchors), static_cast<int>(n_anchors));
 
-    // Improvement 4: Containment blend for MAG anchors.
-    static constexpr float kContainmentBlendThresh = 0.2f;
-    auto containment_oph = [](const std::vector<uint64_t>& mask_a, uint32_t n_real_a,
-                               const std::vector<uint64_t>& mask_b) -> float {
-        if (n_real_a == 0 || mask_a.empty() || mask_b.empty()) return 0.0f;
-        size_t words = std::min(mask_a.size(), mask_b.size());
-        int shared = 0;
-        for (size_t w = 0; w < words; ++w)
-            shared += __builtin_popcountll(mask_a[w] & mask_b[w]);
-        return static_cast<float>(shared) / static_cast<float>(n_real_a);
-    };
+    // Note: containment blend for sparse MAGs was removed from the Nyström kernel.
+    // The blend (1-a)*J + a*max(C(i→j), C(j→i)) is not guaranteed PSD, breaking
+    // spectral theory. Containment corrections belong in certification (Phase 7/8),
+    // not in the anchor kernel. Pure Jaccard is used here for all genome pairs.
 
 #if GEODESIC_USE_OMP
     #pragma omp parallel for schedule(dynamic, 4) num_threads(cfg_.threads)
@@ -1647,23 +1640,6 @@ void GeodesicDerep::apply_nystrom_embeddings() {
                 float jac2 = static_cast<float>(
                     refine_jaccard(embeddings_[ai].oph_sig2, embeddings_[aj].oph_sig2));
                 jac = (jac + jac2) * 0.5f;
-            }
-            // Improvement 4: containment blend for sparse anchors (MAGs)
-            float f_i = (cfg_.sketch_size > 0)
-                ? static_cast<float>(embeddings_[ai].n_real_bins) / cfg_.sketch_size : 1.0f;
-            float f_j = (cfg_.sketch_size > 0)
-                ? static_cast<float>(embeddings_[aj].n_real_bins) / cfg_.sketch_size : 1.0f;
-            if (f_i < kContainmentBlendThresh || f_j < kContainmentBlendThresh) {
-                float cont_ij = containment_oph(embeddings_[ai].real_bins_mask,
-                                                 embeddings_[ai].n_real_bins,
-                                                 embeddings_[aj].real_bins_mask);
-                float cont_ji = containment_oph(embeddings_[aj].real_bins_mask,
-                                                 embeddings_[aj].n_real_bins,
-                                                 embeddings_[ai].real_bins_mask);
-                float alpha_i = std::max(0.0f, 1.0f - f_i / kContainmentBlendThresh);
-                float alpha_j = std::max(0.0f, 1.0f - f_j / kContainmentBlendThresh);
-                float alpha = std::max(alpha_i, alpha_j);
-                jac = (1.0f - alpha) * jac + alpha * std::max(cont_ij, cont_ji);
             }
             K_rm(i, j) = jac;
         }
@@ -1770,19 +1746,13 @@ void GeodesicDerep::apply_nystrom_embeddings() {
     // (512 × 10000 × 2 bytes) — fits in L3 and stays warm across the parallel loop.
     const size_t m_sig = cfg_.sketch_size;
     std::vector<uint16_t> anchor_slab;
-    std::vector<float>    anchor_fill_f;
-    std::vector<uint32_t> anchor_n_real_v;
     if (m_sig > 0 && !anchor_idx.empty() && !embeddings_[anchor_idx[0]].oph_sig.empty()) {
         anchor_slab.resize(n_anchors * m_sig);
-        anchor_fill_f.resize(n_anchors);
-        anchor_n_real_v.resize(n_anchors);
         for (size_t a = 0; a < n_anchors; ++a) {
             const size_t ai = anchor_idx[a];
             const auto& sig = embeddings_[ai].oph_sig;
             const size_t copy_m = std::min(sig.size(), m_sig);
             std::memcpy(anchor_slab.data() + a * m_sig, sig.data(), copy_m * sizeof(uint16_t));
-            anchor_fill_f[a]   = static_cast<float>(embeddings_[ai].n_real_bins) / static_cast<float>(m_sig);
-            anchor_n_real_v[a] = embeddings_[ai].n_real_bins;
         }
     }
 
@@ -1815,9 +1785,6 @@ void GeodesicDerep::apply_nystrom_embeddings() {
                 // Each Jaccard call compares 10000 uint16_t; AVX2 cuts that to 625 vector ops.
                 if (embeddings_[i].oph_sig.empty()) continue;  // genome failed to sketch
                 const uint16_t* sig_i_ptr = embeddings_[i].oph_sig.data();
-                const float f_i = anchor_slab.empty()
-                    ? 1.0f
-                    : static_cast<float>(embeddings_[i].n_real_bins) / static_cast<float>(m_sig);
                 for (size_t a = 0; a < n_anchors; ++a) {
                     float jac;
                     if (!anchor_slab.empty()) {
@@ -1827,23 +1794,6 @@ void GeodesicDerep::apply_nystrom_embeddings() {
                     } else {
                         jac = static_cast<float>(
                             refine_jaccard(embeddings_[i].oph_sig, embeddings_[anchor_idx[a]].oph_sig));
-                    }
-                    // Improvement 4: containment blend for sparse genomes/anchors (MAGs).
-                    // Precomputed fill fraction; falls back to scattered mask access only for MAGs.
-                    const float f_a = anchor_slab.empty()
-                        ? 1.0f : anchor_fill_f[a];
-                    if (f_i < kContainmentBlendThresh || f_a < kContainmentBlendThresh) {
-                        const size_t ai = anchor_idx[a];
-                        float cont_ia = containment_oph(embeddings_[i].real_bins_mask,
-                                                         embeddings_[i].n_real_bins,
-                                                         embeddings_[ai].real_bins_mask);
-                        float cont_ai = containment_oph(embeddings_[ai].real_bins_mask,
-                                                         anchor_n_real_v[a],
-                                                         embeddings_[i].real_bins_mask);
-                        float alpha_i = std::max(0.0f, 1.0f - f_i / kContainmentBlendThresh);
-                        float alpha_a = std::max(0.0f, 1.0f - f_a / kContainmentBlendThresh);
-                        float alpha   = std::max(alpha_i, alpha_a);
-                        jac = (1.0f - alpha) * jac + alpha * std::max(cont_ia, cont_ai);
                     }
                     k_G(static_cast<int>(a)) = jac;
                 }
@@ -1881,9 +1831,6 @@ void GeodesicDerep::apply_nystrom_embeddings() {
                 // Non-anchor: anchor slab + AVX2 Jaccard (see OMP path for rationale).
                 if (embeddings_[i].oph_sig.empty()) continue;  // genome failed to sketch
                 const uint16_t* sig_i_ptr = embeddings_[i].oph_sig.data();
-                const float f_i = anchor_slab.empty()
-                    ? 1.0f
-                    : static_cast<float>(embeddings_[i].n_real_bins) / static_cast<float>(m_sig);
                 for (size_t a = 0; a < n_anchors; ++a) {
                     float jac;
                     if (!anchor_slab.empty()) {
@@ -1893,20 +1840,6 @@ void GeodesicDerep::apply_nystrom_embeddings() {
                     } else {
                         jac = static_cast<float>(
                             refine_jaccard(embeddings_[i].oph_sig, embeddings_[anchor_idx[a]].oph_sig));
-                    }
-                    const float f_a = anchor_slab.empty() ? 1.0f : anchor_fill_f[a];
-                    if (f_i < kContainmentBlendThresh || f_a < kContainmentBlendThresh) {
-                        const size_t ai = anchor_idx[a];
-                        float cont_ia = containment_oph(embeddings_[i].real_bins_mask,
-                                                         embeddings_[i].n_real_bins,
-                                                         embeddings_[ai].real_bins_mask);
-                        float cont_ai = containment_oph(embeddings_[ai].real_bins_mask,
-                                                         anchor_n_real_v[a],
-                                                         embeddings_[i].real_bins_mask);
-                        float alpha_i = std::max(0.0f, 1.0f - f_i / kContainmentBlendThresh);
-                        float alpha_a = std::max(0.0f, 1.0f - f_a / kContainmentBlendThresh);
-                        float alpha   = std::max(alpha_i, alpha_a);
-                        jac = (1.0f - alpha) * jac + alpha * std::max(cont_ia, cont_ai);
                     }
                     k_G(static_cast<int>(a)) = jac;
                 }
