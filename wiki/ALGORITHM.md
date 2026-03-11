@@ -110,7 +110,7 @@ where $|G_i|$ is the number of distinct canonical k-mers. Fill fraction saturate
 
 ### Motivation
 
-Exact pairwise Jaccard over $n$ genomes requires $O(n^2 m)$ operations — infeasible for $n = 10^5$. The embedding uses a [Nyström-style](https://en.wikipedia.org/wiki/Nystr%C3%B6m_method) heuristic with ridge regularisation (Williams & Seeger 2001), not a formal Mercer kernel approximation: the blended kernel (Jaccard + bin co-occupancy) is not guaranteed positive semi-definite, and Laplacian normalisation changes the inner-product semantics. The method approximates the $n \times n$ similarity matrix from a small anchor subset of size $p \ll n$. The dominant cost becomes $O(n \cdot p \cdot m)$ for the genome-to-anchor similarities.
+Exact pairwise Jaccard over $n$ genomes requires $O(n^2 m)$ operations — infeasible for $n = 10^5$. The embedding uses a [Nyström-style](https://en.wikipedia.org/wiki/Nystr%C3%B6m_method) heuristic with ridge regularisation (Williams & Seeger 2001), not a formal Mercer kernel approximation: pure OPH Jaccard is used throughout the anchor kernel (the earlier containment blend was removed for PSD correctness), but Laplacian normalisation and dual-sketch asymmetry (see below) still break strict Nyström coherence. The method approximates the $n \times n$ similarity matrix from a small anchor subset of size $p \ll n$. The dominant cost becomes $O(n \cdot p \cdot m)$ for the genome-to-anchor similarities.
 
 ### Anchor Sampling
 
@@ -168,7 +168,7 @@ $$W = U_{[:,\,\text{top-}d]} \cdot \operatorname{diag}\!\left(\lambda_{\text{top
 
 Each genome $G_i$ is mapped to a $d$-dimensional unit vector. For anchors, the embedding vector is read directly from $K_\text{reg}$ (row $i$, already degree-normalised). For non-anchor genomes, sig1 is used to compute the genome-to-anchor similarity vector $\mathbf{k}_G$, which is then degree-normalised and projected:
 
-$$k_G[a] = J_1(G_i, \text{anchor}_a) \quad \text{[containment blend if } f_i \text{ or } f_a < 0.2\text{]}$$
+$$k_G[a] = J_1(G_i, \text{anchor}_a)$$
 
 $$\mathbf{k}_G \leftarrow \mathbf{k}_G \odot \mathbf{d}_\text{anchor}^{-1/2} \,/\, \sqrt{\textstyle\sum_a k_G[a]} \quad \text{[degree normalisation]}$$
 
