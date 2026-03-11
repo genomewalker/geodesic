@@ -324,7 +324,7 @@ void ANICalibrator::fit(const std::vector<std::pair<double, double>>& samples) {
 ANICalibrator::Bounds ANICalibrator::predict(double embedding_distance) const {
     if (!fitted_ || distance_grid_.empty()) {
         // Calibration-free formula: ANI = (2J/(1+J))^(1/k), J ≈ cos(π*d)
-        // Derived from Mash chain: 2J/(1+J) = exp(-k*(1-ANI)), k=21
+        // Derived from Mash chain: 2J/(1+J) = ANI^k, k=21
         double approx_ani = 1.0;
         if (embedding_distance > 0.0 && embedding_distance < 0.5) {
             double cos_sim = std::cos(embedding_distance * M_PI);
@@ -1114,7 +1114,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     const int k_iso = (n_emb >= 4)
         ? std::max(k_iso_min, std::min(20, static_cast<int>(std::log2(static_cast<double>(n_emb)))))
         : k_iso_min;
-    const int K_cap = std::min(64, static_cast<int>(n_emb) - 1);
+    int K_cap = std::min(64, static_cast<int>(n_emb) - 1);
 
     if (is_verbose()) spdlog::info("GEODESIC: computing isolation scores (k_iso={}, K_cap={})",
                                    k_iso, K_cap);
@@ -1129,34 +1129,39 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     std::vector<uint32_t> nb_ids(n_emb * K_cap, UINT32_MAX);
     std::vector<float>    nb_dists(n_emb * K_cap, 1.0f);
 
+    // Lambda: full HNSW query at current K_cap, populates nb_ids/nb_dists/nn_dists/isolation scores.
+    auto run_hnsw_query = [&](int query_k_cap) {
 #if GEODESIC_USE_OMP
-    #pragma omp parallel for schedule(dynamic, 100) num_threads(cfg_.threads)
+        #pragma omp parallel for schedule(dynamic, 100) num_threads(cfg_.threads)
 #endif
-    for (size_t ei = 0; ei < n_emb; ++ei) {
-        auto& emb = embeddings_[ei];
-        auto neighbors = index_->search(emb.vector, K_cap + 1);
+        for (size_t ei = 0; ei < n_emb; ++ei) {
+            auto& emb = embeddings_[ei];
+            auto neighbors = index_->search(emb.vector, query_k_cap + 1);
 
-        float total_dist = 0.0f;
-        int iso_count = 0;
-        int edge_count = 0;
-        for (const auto& [id, dist] : neighbors) {
-            if (id != emb.genome_id) {
-                if (iso_count == 0) nn_dists[ei] = dist;  // first non-self = 1-NN
-                if (iso_count < k_iso) total_dist += dist;
-                ++iso_count;
-                if (edge_count < K_cap) {
-                    auto it = gid_to_row_.find(id);
-                    if (it != gid_to_row_.end()) {
-                        nb_ids  [ei * K_cap + edge_count] = static_cast<uint32_t>(it->second);
-                        nb_dists[ei * K_cap + edge_count] = dist;
-                        ++edge_count;
+            float total_dist = 0.0f;
+            int iso_count = 0;
+            int edge_count = 0;
+            for (const auto& [id, dist] : neighbors) {
+                if (id != emb.genome_id) {
+                    if (iso_count == 0) nn_dists[ei] = dist;
+                    if (iso_count < k_iso) total_dist += dist;
+                    ++iso_count;
+                    if (edge_count < query_k_cap) {
+                        auto it = gid_to_row_.find(id);
+                        if (it != gid_to_row_.end()) {
+                            nb_ids  [ei * query_k_cap + edge_count] = static_cast<uint32_t>(it->second);
+                            nb_dists[ei * query_k_cap + edge_count] = dist;
+                            ++edge_count;
+                        }
                     }
                 }
             }
-        }
 
-        emb.isolation_score = (iso_count > 0) ? total_dist / std::min(iso_count, k_iso) : 1.0f;
-    }
+            emb.isolation_score = (iso_count > 0) ? total_dist / std::min(iso_count, k_iso) : 1.0f;
+        }
+    };
+
+    run_hnsw_query(K_cap);
     index_->ef_search = saved_ef;
 
     // Kruskal's MST: minimum θ where k-NN graph becomes connected.
@@ -1223,6 +1228,62 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
                         if (unite_a(main_remap[ei], main_remap[nid])) --comps;
                     }
                     if (comps == 1) { k_conn_min = k + 1; break; }
+                }
+            }
+
+            // === Adaptive K_cap retry ===
+            // If DSU scan never connected, retry with larger K_cap values.
+            // ANN results are NOT prefix-stable: full requery required at each K_cap.
+            if (k_conn_min < 0) {
+                const int retry_caps[] = {128, 256, cfg_.k_cap_max};
+                for (int rc : retry_caps) {
+                    int new_K_cap = std::min(rc, static_cast<int>(n_emb) - 1);
+                    if (new_K_cap <= K_cap) continue;
+
+                    int new_ef = std::max(new_K_cap * 2, std::min(200, static_cast<int>(n_emb / 100)));
+                    spdlog::info("GEODESIC: k-NN disconnected at K_cap={}, retrying with K_cap={} ef_search={}",
+                                 K_cap, new_K_cap, new_ef);
+
+                    // Full requery: reallocate and overwrite neighbor tables completely
+                    K_cap = new_K_cap;
+                    index_->ef_search = new_ef;
+                    nb_ids.assign(n_emb * K_cap, UINT32_MAX);
+                    nb_dists.assign(n_emb * K_cap, 1.0f);
+                    std::fill(nn_dists.begin(), nn_dists.end(), 1.0f);
+                    run_hnsw_query(K_cap);
+                    index_->ef_search = saved_ef;
+
+                    // Re-run DSU scan from scratch
+                    std::vector<uint32_t> par(n_main);
+                    std::vector<uint8_t>  rnk(n_main, 0);
+                    std::iota(par.begin(), par.end(), 0);
+                    auto find_r = [&](uint32_t x) {
+                        while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; }
+                        return x;
+                    };
+                    auto unite_r = [&](uint32_t a, uint32_t b) -> bool {
+                        a = find_r(a); b = find_r(b);
+                        if (a == b) return false;
+                        if (rnk[a] < rnk[b]) std::swap(a, b);
+                        par[b] = a;
+                        if (rnk[a] == rnk[b]) ++rnk[a];
+                        return true;
+                    };
+                    int comps = static_cast<int>(n_main);
+                    for (int k = 0; k < K_cap && comps > 1; ++k) {
+                        for (size_t ei = 0; ei < n_emb; ++ei) {
+                            if (main_remap[ei] == UINT32_MAX) continue;
+                            uint32_t nid = nb_ids[ei * K_cap + k];
+                            if (nid == UINT32_MAX || nid >= n_emb) continue;
+                            if (main_remap[nid] == UINT32_MAX) continue;
+                            if (unite_r(main_remap[ei], main_remap[nid])) --comps;
+                        }
+                        if (comps == 1) { k_conn_min = k + 1; break; }
+                    }
+                    if (k_conn_min > 0) break;
+                }
+                if (k_conn_min < 0) {
+                    spdlog::warn("GEODESIC: k-NN graph still disconnected after retry at K_cap={}", K_cap);
                 }
             }
 
@@ -1649,17 +1710,28 @@ void GeodesicDerep::apply_nystrom_embeddings() {
         return;
     }
 
+    // Numerical regularization only — does not make full kernel PSD.
+    // In-place eigenvalue shift: if anchor Gram has negative eigenvalues beyond
+    // numerical noise, shift the entire spectrum up so lambda_min >= 1e-6.
+    // Eigenvectors are invariant under K → K + δI, so no re-decomposition needed.
+    Eigen::VectorXf eigenvalues_shifted = solver.eigenvalues();
+    const float lambda_min = eigenvalues_shifted(0);  // ascending order in Eigen
+    if (lambda_min < -1e-8f) {
+        const float delta = std::abs(lambda_min) + 1e-6f;
+        spdlog::info("GEODESIC/Nystrom: indefinite anchor matrix (lambda_min={:.6e}), ridge delta={:.6e}",
+                     lambda_min, delta);
+        eigenvalues_shifted.array() += delta;
+    }
+
     // Auto-select d: fewest top eigenvectors that capture >= nystrom_min_variance.
-    // Clamp to non-negative before summing: Gram matrices can have small numerical
-    // negative eigenvalues that shrink total_eig and cause captured > 1.0.
-    const float total_eig = solver.eigenvalues().cwiseMax(0.0f).sum();
+    const float total_eig = eigenvalues_shifted.cwiseMax(0.0f).sum();
     const int max_d = std::min(cfg_.embedding_dim, static_cast<int>(n_anchors));
     int actual_d = 1;
     if (total_eig > 0.0f) {
         float cumsum = 0.0f;
         for (int i = static_cast<int>(n_anchors) - 1;
              i >= 0 && actual_d <= max_d; --i) {
-            cumsum += std::max(0.0f, solver.eigenvalues()(i));
+            cumsum += std::max(0.0f, eigenvalues_shifted(i));
             if (cumsum / total_eig >= cfg_.nystrom_min_variance) break;
             if (actual_d < max_d) ++actual_d;
         }
@@ -1668,8 +1740,8 @@ void GeodesicDerep::apply_nystrom_embeddings() {
     }
 
     Eigen::MatrixXf U = solver.eigenvectors().rightCols(actual_d); // [n_anchors × d]
-    Eigen::VectorXf lam = solver.eigenvalues().tail(actual_d);     // [d]
-    lam = lam.cwiseMax(1e-10f);
+    Eigen::VectorXf lam = eigenvalues_shifted.tail(actual_d);      // [d]
+    lam = lam.cwiseMax(1e-10f);  // safety floor for inv-sqrt
 
     // W = U × diag(λ^{-1/2})   [n_anchors × d]
     Eigen::MatrixXf W = U * lam.cwiseSqrt().cwiseInverse().asDiagonal();
@@ -2460,8 +2532,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         // within mapping distance. Using cos_diversity (diversity_threshold ≈ 99.9% ANI)
         // would wrongly flag all 95-99% genomes as uncovered, triggering a catastrophic
         // exhaustive scan for the whole collection.
-        const double q_cert = std::exp(-static_cast<double>(cfg_.kmer_size)
-                                       * (1.0 - cfg_.ani_threshold));
+        const double q_cert = std::pow(cfg_.ani_threshold,
+                                       static_cast<double>(cfg_.kmer_size));
         const float J_cert  = static_cast<float>(q_cert / (2.0 - q_cert));
 
         std::vector<size_t> repair_queue;
@@ -2603,7 +2675,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     //   at 95% ANI (J=0.212): SNR=50  vs  CountSketch@256: SNR=3.5
     // Borderline zone ≈ 3-sigma of the CountSketch estimator: ±3/√dim ≈ ±0.19
     const bool has_oph = !embeddings_.empty() && !embeddings_[0].oph_sig.empty();
-    const double q_t = std::exp(-cfg_.kmer_size * (1.0 - cfg_.ani_threshold));
+    const double q_t = std::pow(cfg_.ani_threshold, static_cast<double>(cfg_.kmer_size));
     const double J_threshold = q_t / (2.0 - q_t);
     const double J_margin = 3.0 / std::sqrt(static_cast<double>(runtime_dim_));
 
@@ -2772,11 +2844,10 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
     size_t n   = embeddings_.size();
     size_t dim = static_cast<size_t>(runtime_dim_);
 
-    // Per-component isolation score thresholds.
+    // Per-component isolation score thresholds (MAD-based).
     // Genomes in the same connected subpopulation (component_ids_[i] >= 0) are compared
-    // to their component's local mean+z*std. This prevents small-but-genuine sublineages
-    // (rare STs, environmental clades) from being falsely flagged as outliers because
-    // their inter-genome distances are larger than the dominant lineage.
+    // to their component's local median + z * 1.4826 * MAD. MAD is robust to heavy tails
+    // and prevents a few extreme outliers from inflating the threshold (as mean+z*std does).
     // Genomes with component_ids_[i] == -1 were already global outliers during MST and
     // are always flagged.
     const int n_comps = [&]() -> int {
@@ -2786,33 +2857,75 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
         return mx + 1;
     }();
 
-    std::vector<double> comp_mean(n_comps, 0.0), comp_m2(n_comps, 0.0);
-    std::vector<size_t> comp_n(n_comps, 0);
+    // Collect per-component isolation scores for MAD computation.
+    std::vector<std::vector<float>> comp_scores(n_comps);
     for (size_t i = 0; i < n; ++i) {
         const int c = (n_comps > 0) ? component_ids_[i] : -1;
         if (c < 0) continue;
-        const double v = embeddings_[i].isolation_score;
-        const double delta = v - comp_mean[c];
-        comp_mean[c] += delta / static_cast<double>(++comp_n[c]);
-        comp_m2[c]   += delta * (v - comp_mean[c]);
+        comp_scores[c].push_back(embeddings_[i].isolation_score);
     }
     std::vector<float> comp_thr(n_comps, std::numeric_limits<float>::max());
     for (int c = 0; c < n_comps; ++c) {
-        if (comp_n[c] < 2) continue;
-        const double std_c = std::sqrt(comp_m2[c] / static_cast<double>(comp_n[c] - 1));
-        comp_thr[c] = static_cast<float>(comp_mean[c] + z_threshold * std_c);
+        auto& sc = comp_scores[c];
+        if (sc.size() < 2) continue;
+        size_t mid = sc.size() / 2;
+        std::nth_element(sc.begin(), sc.begin() + mid, sc.end());
+        float median_c = sc[mid];
+        // MAD: median of absolute deviations from median
+        std::vector<float> abs_devs(sc.size());
+        for (size_t j = 0; j < sc.size(); ++j)
+            abs_devs[j] = std::abs(sc[j] - median_c);
+        std::nth_element(abs_devs.begin(), abs_devs.begin() + mid, abs_devs.end());
+        float mad_c = abs_devs[mid];
+        if (mad_c > 1e-9f) {
+            comp_thr[c] = median_c + z_threshold * 1.4826f * mad_c;
+        } else {
+            // MAD=0 fallback: use IQR
+            size_t q1i = sc.size() / 4;
+            size_t q3i = 3 * sc.size() / 4;
+            std::nth_element(sc.begin(), sc.begin() + q1i, sc.end());
+            float q1 = sc[q1i];
+            std::nth_element(sc.begin(), sc.begin() + q3i, sc.end());
+            float q3 = sc[q3i];
+            float iqr = q3 - q1;
+            if (iqr > 1e-9f) {
+                comp_thr[c] = median_c + z_threshold * iqr;
+            }
+            // else: comp_thr[c] stays max_float (no flagging)
+        }
     }
 
     // Global fallback (used when component_ids_ unavailable, e.g. brute-force small-n path)
-    double iso_mean = 0.0, iso_m2 = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        const double v = embeddings_[i].isolation_score;
-        const double delta = v - iso_mean;
-        iso_mean += delta / static_cast<double>(i + 1);
-        iso_m2   += delta * (v - iso_mean);
+    // MAD-based threshold: robust to heavy-tailed isolation score distributions.
+    std::vector<float> iso_scores(n);
+    for (size_t i = 0; i < n; ++i)
+        iso_scores[i] = embeddings_[i].isolation_score;
+    size_t g_mid = n / 2;
+    std::nth_element(iso_scores.begin(), iso_scores.begin() + g_mid, iso_scores.end());
+    const float iso_median = iso_scores[g_mid];
+    std::vector<float> iso_abs_devs(n);
+    for (size_t i = 0; i < n; ++i)
+        iso_abs_devs[i] = std::abs(iso_scores[i] - iso_median);
+    std::nth_element(iso_abs_devs.begin(), iso_abs_devs.begin() + g_mid, iso_abs_devs.end());
+    const float iso_mad = iso_abs_devs[g_mid];
+    float nn_threshold;
+    if (iso_mad > 1e-9f) {
+        nn_threshold = iso_median + z_threshold * 1.4826f * iso_mad;
+    } else {
+        // MAD=0 fallback: use IQR
+        size_t g_q1 = n / 4;
+        size_t g_q3 = 3 * n / 4;
+        std::nth_element(iso_scores.begin(), iso_scores.begin() + g_q1, iso_scores.end());
+        float q1 = iso_scores[g_q1];
+        std::nth_element(iso_scores.begin(), iso_scores.begin() + g_q3, iso_scores.end());
+        float q3 = iso_scores[g_q3];
+        float iqr = q3 - q1;
+        if (iqr > 1e-9f) {
+            nn_threshold = iso_median + z_threshold * iqr;
+        } else {
+            nn_threshold = std::numeric_limits<float>::max();
+        }
     }
-    const double iso_std = (n > 1) ? std::sqrt(iso_m2 / static_cast<double>(n - 1)) : 1.0;
-    const float nn_threshold = static_cast<float>(iso_mean + z_threshold * iso_std);
 
     // Genome size z-score: informational only, NOT used as a flagging criterion.
     // MAGs are naturally smaller (incomplete assemblies) and would always appear as size
@@ -2857,14 +2970,14 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
     if (cnorm > 1e-10f) for (float& v : centroid) v /= cnorm;
 
     // Flagging criterion: nn_outlier only.
-    // isolation_score > mean + z_threshold * std → statistically anomalous k-NN distance
+    // isolation_score > median + z_threshold * 1.4826 * MAD → statistically anomalous k-NN distance
     // → likely misassigned taxonomy.
 
     std::vector<ContaminationCandidate> candidates;
     for (size_t i = 0; i < n; ++i) {
         const int comp_id = (n_comps > 0) ? component_ids_[i] : -1;
         // Per-component threshold: use max(comp_thr, global_thr).
-        // The max ensures tight components (near-zero within-component std → comp_thr ≈ mean)
+        // The max ensures tight components (near-zero MAD → comp_thr ≈ median)
         // fall back to the global threshold and don't over-flag normal variation.
         // Per-component threshold only tightens flagging when a component is more diverse
         // than the global average — protecting rare-but-genuine heterogeneous sublineages.
@@ -2912,9 +3025,9 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
                                                 [](const auto& c) { return c.nn_outlier; });
     if (!candidates.empty())
         spdlog::info("GEODESIC: {} contamination candidates ({} misassigned, "
-                     "{} components, global_thr={:.4f}={:.3f}+{}*{:.3f})",
+                     "{} components, global_thr={:.4f}, median={:.3f}, MAD={:.4f})",
                      candidates.size(), n_misassigned,
-                     n_comps, nn_threshold, iso_mean, z_threshold, iso_std);
+                     n_comps, nn_threshold, iso_median, iso_mad);
 
     return candidates;
 }

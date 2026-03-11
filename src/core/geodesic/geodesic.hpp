@@ -157,6 +157,7 @@ public:
 
         // Isolation score
         int isolation_k = 10;  // k nearest neighbors for isolation
+        int k_cap_max = 256;   // Max K_cap for adaptive retry on disconnected k-NN
 
         // FPS stopping criteria (derived from learned embedding↔ANI model)
         float diversity_threshold = 0.02f;    // Stop when diversity gain < this

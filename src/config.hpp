@@ -43,6 +43,7 @@ struct Config {
     int syncmer_s = 0;
     float diversity_threshold = 0.02f;
     float max_rep_fraction = 0.2f;
+    int k_cap_max = 256;  // Max K_cap for adaptive retry on disconnected k-NN
     float nystrom_diagonal_loading = 0.01f;
     bool nystrom_degree_normalize = true;
 

@@ -394,6 +394,7 @@ TaxonResult process_taxon(
             .io_threads = cfg.io_threads,
             .calibration_samples = 0,
             .isolation_k = 10,
+            .k_cap_max = cfg.k_cap_max,
             .diversity_threshold = diversity_threshold,
             .min_rep_distance = min_rep_distance,
             .max_rep_fraction = cfg.max_rep_fraction,

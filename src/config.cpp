@@ -86,6 +86,8 @@ Config parse_args(int argc, char** argv) {
         "Min embedding distance gain to add representative (lower = more reps)")->default_val(0.02f);
     derep->add_option("--geodesic-max-rep-fraction", cfg.max_rep_fraction,
         "Max fraction of genomes as representatives")->default_val(0.2f);
+    derep->add_option("--k-cap-max", cfg.k_cap_max,
+        "Max K_cap for adaptive retry on disconnected k-NN graphs")->default_val(256);
     derep->add_option("--nystrom-diagonal-loading", cfg.nystrom_diagonal_loading,
         "Tikhonov regularization fraction for Nyström Gram matrix diagonal (default: 0.01)")
         ->default_val(0.01);
