@@ -5,3 +5,4 @@ build_asan/
 nohup.out
 *.log
 /tmp/
+docs/make_design_doc.py
