@@ -448,6 +448,10 @@ TaxonResult process_taxon(
         // Phase 3: single HNSW pass — isolation scores + 1-NN distribution fused.
         auto nn = geodesic.compute_isolation_scores();
 
+        // Compute ad-hoc quality scores for genomes without CheckM2 data.
+        // Uses centrality (inverse isolation) and kmer density as quality proxy.
+        geodesic.compute_adhoc_quality_scores();
+
         // diversity_threshold = min(θ_ANI, MST_max_edge):
         //   MST_max_edge: maximum edge in the minimum spanning tree of the k-NN graph.
         //   θ_ANI is the hard upper cap from --ani-threshold (never merge across species).

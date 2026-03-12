@@ -2020,6 +2020,68 @@ void GeodesicDerep::exclude_from_reps(const std::unordered_set<std::string>& pat
     }
 }
 
+void GeodesicDerep::compute_adhoc_quality_scores() {
+    // Compute ad-hoc quality scores for genomes without CheckM2 data.
+    // Quality proxy = centrality × kmer_density (both normalized to 0-1)
+    // - centrality = 1 - (isolation_score / max_isolation) → central genomes preferred
+    // - kmer_density = n_real_bins / (genome_size / 1000) → complete assemblies have more unique kmers
+
+    const size_t n = store_.n;
+    if (n == 0) return;
+
+    // Find ranges for normalization
+    float max_isolation = 0.0f;
+    float max_kmer_density = 0.0f;
+    std::vector<float> kmer_densities(n, 0.0f);
+
+    for (size_t i = 0; i < n; ++i) {
+        if (store_.quality_scores[i] == 0.0f) continue;  // excluded
+
+        max_isolation = std::max(max_isolation, store_.isolation_scores[i]);
+
+        // kmer density = filled bins per kilobase
+        const auto& emb = embeddings_[i];
+        if (emb.genome_size > 0) {
+            float density = static_cast<float>(emb.n_real_bins) / (static_cast<float>(emb.genome_size) / 1000.0f);
+            kmer_densities[i] = density;
+            max_kmer_density = std::max(max_kmer_density, density);
+        }
+    }
+
+    if (max_isolation < 1e-9f) max_isolation = 1.0f;  // prevent div by zero
+    if (max_kmer_density < 1e-9f) max_kmer_density = 1.0f;
+
+    // Update quality scores for genomes with default score (50.0 = no CheckM2)
+    size_t updated = 0;
+    for (size_t i = 0; i < n; ++i) {
+        // Skip excluded genomes and those with real CheckM2 scores (not exactly 50.0)
+        if (store_.quality_scores[i] == 0.0f) continue;
+        if (std::abs(store_.quality_scores[i] - 50.0f) > 0.01f) continue;  // has CheckM2 data
+
+        // centrality: 1 at center, 0 at max isolation
+        float centrality = 1.0f - (store_.isolation_scores[i] / max_isolation);
+        centrality = std::max(0.0f, std::min(1.0f, centrality));
+
+        // kmer_density normalized to 0-1
+        float density_norm = kmer_densities[i] / max_kmer_density;
+        density_norm = std::max(0.0f, std::min(1.0f, density_norm));
+
+        // Combined score: geometric mean × 100 (maps to 0-100 range like CheckM2)
+        // sqrt(centrality × density) prefers balanced genomes
+        float proxy = std::sqrt(centrality * density_norm) * 100.0f;
+
+        // Clamp to reasonable range
+        store_.quality_scores[i] = std::max(1.0f, std::min(99.0f, proxy));
+        embeddings_[i].quality_score = store_.quality_scores[i];
+        ++updated;
+    }
+
+    if (is_verbose() && updated > 0) {
+        spdlog::info("GEODESIC: computed ad-hoc quality scores for {} genomes (centrality × kmer_density)",
+                     updated);
+    }
+}
+
 std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     if (is_verbose()) spdlog::info("GEODESIC: FPS + Electrostatic Refinement (SIMD+parallel optimized)");
 

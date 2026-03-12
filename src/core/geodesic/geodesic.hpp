@@ -225,6 +225,11 @@ public:
     // Call after build_index and detect_contamination, before select_representatives.
     void exclude_from_reps(const std::unordered_set<std::string>& paths);
 
+    // Compute ad-hoc quality scores for genomes without CheckM2 data.
+    // Uses centrality (inverse isolation) and kmer density as proxy for assembly quality.
+    // Call after compute_isolation_scores(), before select_representatives.
+    void compute_adhoc_quality_scores();
+
     // Pre-seed paths as representatives before FPS runs.
     // Call after build_index and before select_representatives.
     void set_pinned_representatives(const std::unordered_set<std::string>& paths);
