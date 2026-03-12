@@ -6,13 +6,25 @@
 
 ## Overview
 
-`geodesic` selects a diverse set of representative genomes per taxon for reference-based short-read mapping. It uses OPH sketching, Nyström spectral embedding, farthest-point sampling, Union-Find merge, and OPH-sketch verification to retain diversity while keeping every genome within an ANI threshold of its nearest representative.
+`geodesic` selects a diverse set of representative genomes per taxon for reference-based short-read mapping. The core challenge is scale: a species like *E. coli* may have 200,000+ assemblies, making all-pairs comparison infeasible. geodesic sidesteps this by placing all genomes on a unit sphere via a compact sketch-based embedding, then greedily picking the most spread-out subset using Farthest Point Sampling. A final sketch-space certification pass guarantees that every genome lands within the ANI threshold of at least one representative.
 
 The pipeline has eight phases:
 
 ```
 Sketch → Embed → Index → Score → Select → Merge → Verify → Certify
+  (1)      (2)    (3)     (4)     (5)      (6)     (7)      (8)
 ```
+
+| Phase | Name | What it does |
+|-------|------|-------------|
+| 1 | Sketch | Hash each genome's k-mers into a compact fingerprint (OPH signature) |
+| 2 | Embed | Project all genomes onto a unit sphere using a small anchor subset (Nyström) |
+| 3 | Index | Build an approximate nearest-neighbour index (HNSW) over the sphere |
+| 4 | Score | Measure how isolated each genome is; infer the taxon's natural diversity scale from an MST |
+| 5 | Select | Greedily pick the most spread-out genomes with quality weighting (Farthest Point Sampling) |
+| 6 | Merge | Collapse representative pairs that are too close via Union-Find |
+| 7 | Verify | Re-check borderline genomes near the coverage boundary with exact sketch Jaccard |
+| 8 | Certify | Universal coverage pass: every genome is certified against its representative in sketch space |
 
 For taxa with exactly 2 genomes, the full pipeline is skipped; see [n=2 fast path](#n2-fast-path).
 
@@ -223,7 +235,7 @@ Beyond $d=256$, accuracy improves by $< 0.1\%$ while cost doubles. The embedding
 
 ## Phase 3: HNSW index
 
-An [HNSW](https://arxiv.org/abs/1603.09320) index (Malkov & Yashunin 2018) is built over all $n$ unit-sphere embeddings using inner product as the metric. Default parameters: $M = 16$, ef\_construction $= 64$, ef\_search $= 50$.
+A [Hierarchical Navigable Small World (HNSW)](https://arxiv.org/abs/1603.09320) index (Malkov & Yashunin 2018) is built over all $n$ unit-sphere embeddings using inner product as the metric. HNSW is a graph-based approximate nearest-neighbour structure that supports sub-linear query time by navigating a layered proximity graph from coarse to fine resolution. Default parameters: $M = 16$, ef\_construction $= 64$, ef\_search $= 50$.
 
 The index serves two purposes:
 - Computing isolation scores (Phase 4): finding the $k_\text{iso}=10$ nearest neighbours of each genome; collecting up to $K_\text{cap}$ edges per genome for the adaptive MST threshold derivation
@@ -255,13 +267,13 @@ $$
 \theta = \min\!\left(\theta_\text{MST},\ \frac{\arccos(J_\text{ANI})}{\pi}\right)
 $$
 
-**$\theta_\text{MST}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding the FastMCD threshold $\mu_\text{MCD} + z \cdot \sigma_\text{MCD}$ excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_\text{MST}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
+**$\theta_\text{MST}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding the [Fast Minimum Covariance Determinant (FastMCD)](https://doi.org/10.1080/00401706.1999.10485535) threshold $\mu_\text{MCD} + z \cdot \sigma_\text{MCD}$ excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_\text{MST}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
 
 **Kruskal's construction.** The k-NN edges are sorted in ascending order of angular distance. Union-Find processes them greedily, adding each edge only if it connects two previously disconnected components. The algorithm terminates as soon as a single component spans all non-outlier genomes; the edge that triggered this merge is $\theta_\text{MST}$ by construction.
 
 **Adaptive $k$ selection.** Isolation scoring uses a fixed $k_\text{iso}$ neighbours. MST edge collection uses a two-phase adaptive scan with budget $K_\text{cap} = \min(64, n-1)$.
 
-**Phase A — DSU connectivity scan.** The k-NN edges are added column by column, incrementing $k$ from 1 to $K_\text{cap}$. A Union-Find structure tracks component membership. The scan halts at the first $k$ for which the core k-NN graph (outliers excluded) becomes fully connected; this value is recorded as $k_\text{conn}$. If no $k \leq K_\text{cap}$ achieves connectivity (e.g., a taxon with genuine phylogenetic sub-lineages), $k_\text{conn} = -1$.
+**Phase A — DSU connectivity scan.** The k-NN edges are added column by column, incrementing $k$ from 1 to $K_\text{cap}$. A [Disjoint Set Union (DSU)](https://en.wikipedia.org/wiki/Disjoint-set_data_structure) structure (also called Union-Find) tracks component membership — each genome starts in its own component, and merging two sets takes near-constant amortised time. The scan halts at the first $k$ for which the core k-NN graph (outliers excluded) becomes fully connected; this value is recorded as $k_\text{conn}$. If no $k \leq K_\text{cap}$ achieves connectivity (e.g., a taxon with genuine phylogenetic sub-lineages), $k_\text{conn} = -1$.
 
 **Phase B — Bottleneck stability probe.** Starting from $k_\text{conn}$ (or $K_\text{cap}$ if $k_\text{conn} = -1$), the bottleneck $B(k)$ (MST max edge at a given $k$) is evaluated at a probe ladder $\{1,2,3,4,6,8,12,16,24,32,48,64\}$ plus $K_\text{cap}$ as a reference value. The smallest $k$ in the ladder for which $B(k)$ is within 3% of $B(K_\text{cap})$ is taken as $k_\text{stable}$. Using $k_\text{conn}$ alone is insufficient: the first edge that connects the graph is often a brittle long-range bridge, giving an artificially elevated $B(k_\text{conn})$. The probe identifies the point at which the bottleneck has stabilised and further neighbours no longer change the MST max edge materially.
 
@@ -287,13 +299,13 @@ When any warning flag is set, the MST threshold is used as-is. Override with `--
 
 When $\theta_\text{MST}$ is unavailable (small-$n$ brute-force path), $\text{NN}_{P95}$ is used directly.
 
-**K_cap retry and bridge diagnostic.** When the k-NN graph fails to connect at $K_\text{cap} = 64$, the algorithm retries at $K_\text{cap} = 128$ then 256, rebuilding the full HNSW index with raised `ef_search` at each level (maximum configurable via `--k-cap-max`). If the graph still does not connect, 50 cross-component genome pairs are sampled and their OPH Jaccard computed. The diagnostic outcome is:
+**K_cap retry and bridge diagnostic.** When the k-NN graph fails to connect at $K_\text{cap} = 64$, the algorithm retries at $K_\text{cap} = 128$ then 256, rebuilding the full HNSW index with raised `ef_search` at each level (maximum configurable via `--k-cap-max`). HNSW is an approximate nearest-neighbour (ANN) structure — it can miss true neighbours, especially in high-dimensional or poorly-connected graphs. If the graph still does not connect after retries, 50 cross-component genome pairs are sampled and their OPH Jaccard computed directly to diagnose whether the disconnection is a retrieval failure or genuine biology:
 
 | Outcome | Condition | Interpretation |
 |---------|-----------|----------------|
-| `ANN_RECALL_GAP` | any pair $J \geq J_\text{cert}$ | HNSW failed to retrieve a genuine neighbour; embedding or index quality issue |
-| `POSSIBLE_GAP` | any pair $J \geq J_{80}$ (80% ANI) | possible genuine phylogenetic sub-structure |
-| `NO_BRIDGE_FOUND` | no pair passes either threshold | taxon genuinely contains multiple well-separated sub-populations |
+| `ANN_RECALL_GAP` | any sampled pair $J \geq J_\text{cert}$ | HNSW missed a true neighbour; the gap is a retrieval artefact, not a real phylogenetic break |
+| `POSSIBLE_GAP` | any sampled pair $J \geq J_{80}$ (80% ANI equivalent) | pairs are similar but below the coverage threshold; could be genuine phylogenetic sub-structure or marginal ANN recall |
+| `NO_BRIDGE_FOUND` | no sampled pair passes either threshold | taxon genuinely contains multiple well-separated sub-populations at the current ANI scale |
 
 Per-component thresholds are used for FPS when the graph remains disconnected.
 
