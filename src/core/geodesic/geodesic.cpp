@@ -550,13 +550,13 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     int kmer, sketch_size, embedding_dim;
     if (ani_p95_sample >= 99.0) {
         // Very clonal (all pairs >99% ANI): high k for within-clone discrimination
-        kmer = 31; sketch_size = 8192; embedding_dim = 512;
+        kmer = 31; sketch_size = 20000; embedding_dim = 512;
     } else if (ani_p95_sample >= 95.0) {
         // Typical species (95–99% ANI): standard resolution
-        kmer = 21; sketch_size = 4096; embedding_dim = 256;
+        kmer = 21; sketch_size = 10000; embedding_dim = 256;
     } else {
         // Very diverse or cross-genus (<95% ANI in sample)
-        kmer = 16; sketch_size = 2048; embedding_dim = 128;
+        kmer = 16; sketch_size = 5000; embedding_dim = 128;
     }
 
     params.kmer_size     = kmer;
