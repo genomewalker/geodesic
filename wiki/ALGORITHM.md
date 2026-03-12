@@ -255,7 +255,7 @@ $$
 \theta = \min\!\left(\theta_\text{MST},\ \frac{\arccos(J_\text{ANI})}{\pi}\right)
 $$
 
-**$\theta_\text{MST}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score $> \mu + 2\sigma$ excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_\text{MST}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
+**$\theta_\text{MST}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding the FastMCD threshold $\mu_\text{MCD} + z \cdot \sigma_\text{MCD}$ excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_\text{MST}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
 
 **Kruskal's construction.** The k-NN edges are sorted in ascending order of angular distance. Union-Find processes them greedily, adding each edge only if it connects two previously disconnected components. The algorithm terminates as soon as a single component spans all non-outlier genomes; the edge that triggered this merge is $\theta_\text{MST}$ by construction.
 
@@ -286,6 +286,16 @@ For clonal taxa (tight NN distribution), $\theta_\text{MST}$ is small and drives
 When any warning flag is set, the MST threshold is used as-is. Override with `--geodesic-diversity-threshold` if the inferred threshold is unsuitable.
 
 When $\theta_\text{MST}$ is unavailable (small-$n$ brute-force path), $\text{NN}_{P95}$ is used directly.
+
+**K_cap retry and bridge diagnostic.** When the k-NN graph fails to connect at $K_\text{cap} = 64$, the algorithm retries at $K_\text{cap} = 128$ then 256, rebuilding the full HNSW index with raised `ef_search` at each level (maximum configurable via `--k-cap-max`). If the graph still does not connect, 50 cross-component genome pairs are sampled and their OPH Jaccard computed. The diagnostic outcome is:
+
+| Outcome | Condition | Interpretation |
+|---------|-----------|----------------|
+| `ANN_RECALL_GAP` | any pair $J \geq J_\text{cert}$ | HNSW failed to retrieve a genuine neighbour; embedding or index quality issue |
+| `POSSIBLE_GAP` | any pair $J \geq J_{80}$ (80% ANI) | possible genuine phylogenetic sub-structure |
+| `NO_BRIDGE_FOUND` | no pair passes either threshold | taxon genuinely contains multiple well-separated sub-populations |
+
+Per-component thresholds are used for FPS when the graph remains disconnected.
 
 ---
 
@@ -356,23 +366,30 @@ Phase 7 (borderline verification) only checks genomes near the embedding coverag
 
 Phase 8 runs a universal coverage check over every non-representative genome.
 
-**J_cert threshold.** The OPH Jaccard equivalent of the user ANI threshold:
+**Certification thresholds.** Two thresholds are derived from the user ANI parameter $p = \text{ANI}/100$ and k-mer size $k$:
 
 $$
-q = \text{ANI}^k, \qquad J_\text{cert} = \frac{q}{2 - q}
+q_\text{cert} = p^k, \qquad J_\text{cert} = \frac{q_\text{cert}}{2 - q_\text{cert}}
 $$
 
-For the default threshold of 95% ANI with $k = 21$: $q \approx 0.341$, $J_\text{cert} \approx 0.212$.
+At 95% ANI with $k = 21$: $q_\text{cert} \approx 0.341$, $J_\text{cert} \approx 0.212$.
+
+$J_\text{cert}$ is used for the symmetric Jaccard arm (equal-size genomes). $q_\text{cert}$ is used directly for the containment arm (sparse genomes), where the genome size asymmetry means Jaccard underestimates similarity.
+
+**Two-arm `oph_certified` function.** For a pair $(G_i, G_j)$, the function returns `true` if either arm passes:
+
+- **Arm 1 (symmetric Jaccard):** $J_\text{dual}(G_i, G_j) \geq J_\text{cert}$.
+- **Arm 2 (directional containment):** triggered when $n_\text{real,small} / n_\text{real,large} < 0.5$ (small genome has fewer than half the occupied OPH bins of the larger). Computes the containment fraction $C = n_\text{match} / n_\text{real,small}$ and requires $C \geq q_\text{cert}$.
 
 **Algorithm.** For each non-representative genome $G_i$ (excluding contamination-excluded genomes):
 
-1. **Fast path**: compute OPH Jaccard between $G_i$ and its assigned representative. If $J \geq J_\text{cert}$, genome is certified; continue.
-2. **Exhaustive scan**: if the fast path fails, compute OPH Jaccard against every representative. Reassign $G_i$ to the closest representative with $J \geq J_\text{cert}$.
-3. **Repair queue**: if no representative passes the threshold, $G_i$ is added to the repair queue and promoted to a new representative.
+1. **Fast path**: run `oph_certified(G_i, R_\text{assigned})` against the currently assigned representative. If it passes (either arm), $G_i$ is certified; continue.
+2. **Exhaustive scan**: if the fast path fails, run `oph_certified(G_i, R_k)` against every representative $R_k$. Reassign $G_i$ to the representative with the highest $J_\text{dual}$ among those that pass. Using either arm ensures that a MAG correctly covered by containment is not incorrectly sent to the repair queue.
+3. **Repair queue**: if no representative passes either arm, $G_i$ is promoted to a new representative.
 
 The outer loop is parallelised with OpenMP (`schedule(dynamic, 256)`); each thread maintains a local repair queue merged after the barrier.
 
-**Coverage guarantee.** After Phase 8, every non-representative genome is within $J_\text{cert}$ OPH Jaccard of at least one representative, independent of Nyström approximation error. Because $J_\text{cert}$ is derived directly from the user ANI threshold via the Mash formula, this is an explicit sketch-space coverage guarantee. The remaining uncertainty is OPH estimation variance: $\sigma_J = \sqrt{J(1-J)/m} \approx 0.004$ at 95% ANI, corresponding to $< 0.1\%$ ANI error near the default threshold with dense assemblies. Sparse genomes (low $m_\text{real}$) have higher variance and looser guarantees.
+**Coverage guarantee.** After Phase 8, every non-representative genome satisfies `oph_certified` against at least one representative, independent of Nyström approximation error. For symmetric pairs this is a sketch-space Jaccard guarantee; for asymmetric pairs it is a directional containment guarantee. The remaining uncertainty is OPH estimation variance: at 95% ANI with $m = 10{,}000$ bins, $\sigma_J \approx 0.004$ for dense assemblies; sparse genomes (low $m_\text{real}$) have higher variance and looser sketch-space guarantees.
 
 ---
 
