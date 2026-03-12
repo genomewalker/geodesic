@@ -321,7 +321,16 @@ $$
 \text{fitness}_i = (1 - s_i) \cdot \frac{q_i}{100} \cdot \sqrt{\frac{L_i}{L_m}}
 $$
 
-where $s_i = \max_{r \in R} \mathbf{e}_r \cdot \mathbf{e}_i$ is the dot-product similarity to the nearest current representative, $q_i$ is the CheckM2 quality score ($\text{completeness} - 5 \times \text{contamination}$; defaults to 100 when unavailable), $L_i$ is genome length, and $L_m$ is the taxon median genome length. The formal 2-approximation guarantee does not carry over to this weighted variant; coverage is evaluated empirically.
+where $s_i = \max_{r \in R} \mathbf{e}_r \cdot \mathbf{e}_i$ is the dot-product similarity to the nearest current representative, $L_i$ is genome length, and $L_m$ is the taxon median genome length. The quality score $q_i$ is:
+
+- **With CheckM2** (`--checkm2`): $q_i = \text{completeness} - 5 \times \text{contamination}$
+- **Without CheckM2**: $q_i = 100 \cdot \sqrt{\text{centrality}_i \times \text{kmer\_density}_i}$
+
+The ad-hoc proxy uses two intrinsic signals:
+- **Centrality** = $1 - \text{isolation}_i / \max(\text{isolation})$ — central genomes are more typical of the species
+- **Kmer density** = $n_{\text{real\_bins}} / (L_i / 1000)$ — complete assemblies have more unique k-mers per kb
+
+The formal Gonzalez (1985) 2-approximation guarantee does not carry over to this weighted variant; coverage is evaluated empirically.
 
 **Algorithm:**
 1. Seed: select the genome maximising $\text{isolation} \times (\text{quality}/100) \times \sqrt{L_i / L_{\text{med}}}$ as the first representative
