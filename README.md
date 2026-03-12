@@ -110,9 +110,9 @@ Already-completed taxa are skipped automatically.
 
 | Species | Genomes | Representatives | Reduction | Runtime | Cov. mean ANI | Cov. min ANI | Threads |
 |---------|---------|-----------------|-----------|---------|---------------|--------------|---------|
-| *E. coli* | 233,166 | 530 | 99.8% | 17 min | 99.91% | 99.74% | 64 |
-| *S. enterica* | 367,440 | 511 | 99.9% | 20 min | 99.96% | 99.76% | 64 |
-| Full GTDB | 5,195,094 | TBD | TBD | TBD | TBD | TBD | 24 |
+| *E. coli* | 233,166 | 599 | 99.7% | 45 min | 99.92% | 99.78% | 24 |
+| *S. enterica* | 367,440 | 436 | 99.9% | 55 min | 99.93% | 99.72% | 24 |
+| Full GTDB | 5,195,094 | — | — | — | — | — | 24 |
 
 Coverage: Phase 8 OPH certification guarantees every genome is within the ANI threshold of its assigned representative in sketch space. Near the default 95% ANI threshold, OPH estimation error is typically well below 0.1 ANI points for dense assemblies.
 
