@@ -57,7 +57,7 @@ h = wymix(canonical XOR (seed + P0),  canonical XOR P1)
 sig1 uses seed = 42, sig2 uses seed = 1337. Both the bin index and the per-bin value are derived from this one hash:
 
 $$
-t = \left\lfloor \frac{h \cdot m}{2^{64}} \right\rfloor, \qquad \text{sig}[t] = \min\!\left(\text{sig}[t],\ h \gg 32\right)
+t = \left\lfloor \frac{h \cdot m}{2^{64}} \right\rfloor, \qquad \text{sig}[t] = \min\!\left(\text{sig}[t],\ \mathrm{hi32}(h)\right)
 $$
 
 The stored uint32 value is truncated to uint16 at storage time (retaining bits 32–47 of $h$). A single hash call per k-mer determines both bin index and comparison value.
@@ -80,10 +80,10 @@ $$
 where $A$ and $B$ are the sets of distinct canonical k-mers. Over $m$ bins, the fraction of collisions is an unbiased estimator of $J$ with approximate variance:
 
 $$
-\text{Var}(\hat{J}) \approx \frac{J(1-J)}{m_\text{real}}
+\text{Var}(\hat{J}) \approx \frac{J(1-J)}{m_{\text{real}}}
 $$
 
-where $m_\text{real}$ is the number of bins that are real in at least one of $A$ or $B$.
+where $m_{\text{real}}$ is the number of bins that are real in at least one of $A$ or $B$.
 
 ### OPH vs bottom-k MinHash
 
@@ -100,13 +100,13 @@ $$
 For two independent $J$ estimators, averaging halves the variance:
 
 $$
-\text{Var}\!\left(\frac{J_1 + J_2}{2}\right) = \frac{J(1-J)}{2\, m_\text{real}}
+\text{Var}\!\left(\frac{J_1 + J_2}{2}\right) = \frac{J(1-J)}{2\, m_{\text{real}}}
 $$
 
 **16-bit storage.** Each per-bin value is stored as a uint16, halving RAM to $20\ \text{KB}$ per sketch per genome. Truncation increases false-match probability; the [b-bit MinHash bias correction](https://dl.acm.org/doi/10.1145/1989323.1989399) (Li & König 2011) corrects this:
 
 $$
-\hat{J}_\text{corr} = \max\!\left(0,\ \frac{\hat{J}_\text{raw} - 2^{-16}}{1 - 2^{-16}}\right)
+\hat{J}_{\text{corr}} = \max\!\left(0,\ \frac{\hat{J}_{\text{raw}} - 2^{-16}}{1 - 2^{-16}}\right)
 $$
 
 **Lazy sig2 materialisation.** sig2 is materialised on demand only for anchor genomes and borderline verification candidates. Non-anchor Nyström extension uses sig1 only. Decompressed FASTA buffers are cached in memory so anchor sig2 materialisation avoids a second NFS read.
@@ -152,28 +152,28 @@ Exact pairwise Jaccard over $n$ genomes requires $O(n^2 m)$ operations, infeasib
 
 ### Anchor sampling
 
-The anchor count is $p = \min(n,\ \max(200,\ 2 \cdot d_\text{cfg}))$, where $d_\text{cfg}$ is the configured maximum embedding dimension (default 256, `--geodesic-dim`). The actual embedding dimension $d$ is auto-selected from the anchor eigenspectrum (see below) and may be less than $d_\text{cfg}$.
+The anchor count is $p = \min(n,\ \max(200,\ 2 \cdot d_{\text{cfg}}))$, where $d_{\text{cfg}}$ is the configured maximum embedding dimension (default 256, `--geodesic-dim`). The actual embedding dimension $d$ is auto-selected from the anchor eigenspectrum (see below) and may be less than $d_{\text{cfg}}$.
 
 Genomes are stratified by fill fraction $f_i$ into $Q = 5$ quantile strata, and an equal number of anchors is drawn from each stratum by Fisher-Yates shuffle. Stratification ensures the anchor Gram matrix covers the full range of genome completeness.
 
 ### Anchor Gram matrix
 
-The $p \times p$ anchor Gram matrix $K_\text{raw}$ is computed using dual-sketch averaged Jaccard:
+The $p \times p$ anchor Gram matrix $K_{\text{raw}}$ is computed using dual-sketch averaged Jaccard:
 
 $$
-K_\text{raw}[i,j] = \frac{J_1(\text{anchor}_i, \text{anchor}_j) + J_2(\text{anchor}_i, \text{anchor}_j)}{2}
+K_{\text{raw}}[i,j] = \frac{J_1(\text{anchor}_i, \text{anchor}_j) + J_2(\text{anchor}_i, \text{anchor}_j)}{2}
 $$
 
 **Bin co-occupancy blend for sparse anchors.** When either anchor has $f_i < 0.2$, a bin co-occupancy statistic is blended in to correct Jaccard underestimation:
 
 $$
-C_\text{occ}(A \to B) = \frac{|\text{mask}_A \cap \text{mask}_B|}{n_{\text{real},A}}
+C_{\text{occ}}(A \to B) = \frac{|\text{mask}_A \cap \text{mask}_B|}{n_{\text{real},A}}
 $$
 
 where $|\text{mask}_A \cap \text{mask}_B|$ is the number of bins occupied in both $A$ and $B$. The blended kernel:
 
 $$
-K_\text{blend}[i,j] = (1-\alpha)\, K_\text{raw}[i,j] + \alpha \cdot \max\!\left(C_\text{occ}(i \to j),\ C_\text{occ}(j \to i)\right)
+K_{\text{blend}}[i,j] = (1-\alpha)\, K_{\text{raw}}[i,j] + \alpha \cdot \max\!\left(C_{\text{occ}}(i \to j),\ C_{\text{occ}}(j \to i)\right)
 $$
 
 with $\alpha_i = \max(0,\ 1 - f_i/0.2)$ (linear ramp from 1 at $f_i=0$ to 0 at $f_i=0.2$), $\alpha = \max(\alpha_i, \alpha_j)$.
@@ -183,23 +183,23 @@ with $\alpha_i = \max(0,\ 1 - f_i/0.2)$ (linear ramp from 1 at $f_i=0$ to 0 at $
 **Symmetric Laplacian normalisation** removes hub-anchor bias:
 
 $$
-K_\text{norm}[i,j] = \frac{K_\text{blend}[i,j]}{\sqrt{d_i \cdot d_j}}, \qquad d_i = \sum_j K_\text{blend}[i,j]
+K_{\text{norm}}[i,j] = \frac{K_{\text{blend}}[i,j]}{\sqrt{d_i \cdot d_j}}, \qquad d_i = \sum_j K_{\text{blend}}[i,j]
 $$
 
-equivalently $K_\text{norm} = D^{-1/2} K_\text{blend} D^{-1/2}$. After this step, dot products approximate a normalised-graph similarity, not raw Jaccard. Phase 7 corrects borderline decisions back to raw sketch Jaccard space.
+equivalently $K_{\text{norm}} = D^{-1/2} K_{\text{blend}} D^{-1/2}$. After this step, dot products approximate a normalised-graph similarity, not raw Jaccard. Phase 7 corrects borderline decisions back to raw sketch Jaccard space.
 
 **Tikhonov ridge** prevents near-zero eigenvalues from blowing up the projection:
 
 $$
-K_\text{reg} = K_\text{norm} + \lambda I, \qquad \lambda = 0.01 \cdot \max\!\left(\overline{K}_\text{diag},\ 10^{-4}\right)
+K_{\text{reg}} = K_{\text{norm}} + \lambda I, \qquad \lambda = 0.01 \cdot \max\!\left(\overline{K}_{\text{diag}},\ 10^{-4}\right)
 $$
 
 ### Nyström extension
 
-The anchor Gram matrix $K_\text{reg}$ is eigendecomposed:
+The anchor Gram matrix $K_{\text{reg}}$ is eigendecomposed:
 
 $$
-K_\text{reg} = U \Lambda U^\top \qquad \text{[SelfAdjointEigenSolver]}
+K_{\text{reg}} = U \Lambda U^\top \qquad \text{[SelfAdjointEigenSolver]}
 $$
 
 The embedding dimension $d$ is auto-selected as the smallest $d'$ such that the top $d'$ eigenvalues explain at least 95% of total non-negative variance:
@@ -220,7 +220,7 @@ where $\tilde{k}_G$ is $k_G$ after degree normalisation. Non-anchors use sig1 on
 
 ### Embedding dimension
 
-The default maximum is $d_\text{cfg} = 256$. Empirical MAE vs ANI on a 159-genome cross-species validation:
+The default maximum is $d_{\text{cfg}} = 256$. Empirical MAE vs ANI on a 159-genome cross-species validation:
 
 | d   | MAE (90–95% ANI) | MAE (95–99% ANI) | Build time |
 |-----|-----------------|-----------------|------------|
@@ -238,7 +238,7 @@ Beyond $d=256$, accuracy improves by $< 0.1\%$ while cost doubles. The embedding
 A [Hierarchical Navigable Small World (HNSW)](https://arxiv.org/abs/1603.09320) index (Malkov & Yashunin 2018) is built over all $n$ unit-sphere embeddings using inner product as the metric. HNSW is a graph-based approximate nearest-neighbour structure that supports sub-linear query time by navigating a layered proximity graph from coarse to fine resolution. Default parameters: $M = 16$, ef\_construction $= 64$, ef\_search $= 50$.
 
 The index serves two purposes:
-- Computing isolation scores (Phase 4): finding the $k_\text{iso}=10$ nearest neighbours of each genome; collecting up to $K_\text{cap}$ edges per genome for the adaptive MST threshold derivation
+- Computing isolation scores (Phase 4): finding the $k_{\text{iso}}=10$ nearest neighbours of each genome; collecting up to $K_{\text{cap}}$ edges per genome for the adaptive MST threshold derivation
 - Finding too-close representative pairs for merging (Phase 6)
 
 For $n \leq 50$ genomes, HNSW overhead exceeds $O(n^2)$ brute-force dot products; the brute-force path is used instead.
@@ -251,10 +251,10 @@ For $n \leq 50$ genomes, HNSW overhead exceeds $O(n^2)$ brute-force dot products
 
 ### Isolation score
 
-For each genome $G_i$, the isolation score is the mean angular distance to its $k_\text{iso} = 10$ nearest neighbours:
+For each genome $G_i$, the isolation score is the mean angular distance to its $k_{\text{iso}} = 10$ nearest neighbours:
 
 $$
-\text{isolation}(G_i) = \frac{1}{k_\text{iso}} \sum_{j \in k_\text{iso}\text{NN}(G_i)} \frac{\arccos(\mathbf{e}_i \cdot \mathbf{e}_j)}{\pi}
+\text{isolation}(G_i) = \frac{1}{k_{\text{iso}}} \sum_{j \in k_{\text{iso}}\text{NN}(G_i)} \frac{\arccos(\mathbf{e}_i \cdot \mathbf{e}_j)}{\pi}
 $$
 
 Higher isolation = more separated from neighbours = stronger candidate for a representative.
@@ -264,46 +264,46 @@ Higher isolation = more separated from neighbours = stronger candidate for a rep
 The diversity threshold $\theta$ controls when FPS terminates. It is derived from the k-NN graph of the taxon, capped at the user ANI threshold:
 
 $$
-\theta = \min\!\left(\theta_\text{MST},\ \frac{\arccos(J_\text{ANI})}{\pi}\right)
+\theta = \min\!\left(\theta_{\text{MST}},\ \frac{\arccos(J_{\text{ANI}})}{\pi}\right)
 $$
 
-**$\theta_\text{MST}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding the [Fast Minimum Covariance Determinant (FastMCD)](https://doi.org/10.1080/00401706.1999.10485535) threshold $\mu_\text{MCD} + z \cdot \sigma_\text{MCD}$ excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_\text{MST}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
+**$\theta_{\text{MST}}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding the [Fast Minimum Covariance Determinant (FastMCD)](https://doi.org/10.1080/00401706.1999.10485535) threshold $\mu_{\text{MCD}} + z \cdot \sigma_{\text{MCD}}$ excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_{\text{MST}}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
 
-**Kruskal's construction.** The k-NN edges are sorted in ascending order of angular distance. Union-Find processes them greedily, adding each edge only if it connects two previously disconnected components. The algorithm terminates as soon as a single component spans all non-outlier genomes; the edge that triggered this merge is $\theta_\text{MST}$ by construction.
+**Kruskal's construction.** The k-NN edges are sorted in ascending order of angular distance. Union-Find processes them greedily, adding each edge only if it connects two previously disconnected components. The algorithm terminates as soon as a single component spans all non-outlier genomes; the edge that triggered this merge is $\theta_{\text{MST}}$ by construction.
 
-**Adaptive $k$ selection.** Isolation scoring uses a fixed $k_\text{iso}$ neighbours. MST edge collection uses a two-phase adaptive scan with budget $K_\text{cap} = \min(64, n-1)$.
+**Adaptive $k$ selection.** Isolation scoring uses a fixed $k_{\text{iso}}$ neighbours. MST edge collection uses a two-phase adaptive scan with budget $K_{\text{cap}} = \min(64, n-1)$.
 
-**Phase A — DSU connectivity scan.** The k-NN edges are added column by column, incrementing $k$ from 1 to $K_\text{cap}$. A [Disjoint Set Union (DSU)](https://en.wikipedia.org/wiki/Disjoint-set_data_structure) structure (also called Union-Find) tracks component membership — each genome starts in its own component, and merging two sets takes near-constant amortised time. The scan halts at the first $k$ for which the core k-NN graph (outliers excluded) becomes fully connected; this value is recorded as $k_\text{conn}$. If no $k \leq K_\text{cap}$ achieves connectivity (e.g., a taxon with genuine phylogenetic sub-lineages), $k_\text{conn} = -1$.
+**Phase A — DSU connectivity scan.** The k-NN edges are added column by column, incrementing $k$ from 1 to $K_{\text{cap}}$. A [Disjoint Set Union (DSU)](https://en.wikipedia.org/wiki/Disjoint-set_data_structure) structure (also called Union-Find) tracks component membership — each genome starts in its own component, and merging two sets takes near-constant amortised time. The scan halts at the first $k$ for which the core k-NN graph (outliers excluded) becomes fully connected; this value is recorded as $k_{\text{conn}}$. If no $k \leq K_{\text{cap}}$ achieves connectivity (e.g., a taxon with genuine phylogenetic sub-lineages), $k_{\text{conn}} = -1$.
 
-**Phase B — Bottleneck stability probe.** Starting from $k_\text{conn}$ (or $K_\text{cap}$ if $k_\text{conn} = -1$), the bottleneck $B(k)$ (MST max edge at a given $k$) is evaluated at a probe ladder $\{1,2,3,4,6,8,12,16,24,32,48,64\}$ plus $K_\text{cap}$ as a reference value. The smallest $k$ in the ladder for which $B(k)$ is within 3% of $B(K_\text{cap})$ is taken as $k_\text{stable}$. Using $k_\text{conn}$ alone is insufficient: the first edge that connects the graph is often a brittle long-range bridge, giving an artificially elevated $B(k_\text{conn})$. The probe identifies the point at which the bottleneck has stabilised and further neighbours no longer change the MST max edge materially.
+**Phase B — Bottleneck stability probe.** Starting from $k_{\text{conn}}$ (or $K_{\text{cap}}$ if $k_{\text{conn}} = -1$), the bottleneck $B(k)$ (MST max edge at a given $k$) is evaluated at a probe ladder $\{1,2,3,4,6,8,12,16,24,32,48,64\}$ plus $K_{\text{cap}}$ as a reference value. The smallest $k$ in the ladder for which $B(k)$ is within 3% of $B(K_{\text{cap}})$ is taken as $k_{\text{stable}}$. Using $k_{\text{conn}}$ alone is insufficient: the first edge that connects the graph is often a brittle long-range bridge, giving an artificially elevated $B(k_{\text{conn}})$. The probe identifies the point at which the bottleneck has stabilised and further neighbours no longer change the MST max edge materially.
 
-The MST is then constructed at $k_\text{stable}$ edges per genome. For $k_\text{conn} = -1$ taxa, $k_\text{stable} = K_\text{cap}$ and per-component thresholds are used. Isolation scoring is unaffected.
+The MST is then constructed at $k_{\text{stable}}$ edges per genome. For $k_{\text{conn}} = -1$ taxa, $k_{\text{stable}} = K_{\text{cap}}$ and per-component thresholds are used. Isolation scoring is unaffected.
 
-**Observed values.** *E. coli* 200 genomes: $k_\text{conn}=8$, $k_\text{stable}=24$, $K_\text{cap}=64$. *S. enterica* 2,000 genomes: $k_\text{conn}=-1$, $k_\text{stable}=64$.
+**Observed values.** *E. coli* 200 genomes: $k_{\text{conn}}=8$, $k_{\text{stable}}=24$, $K_{\text{cap}}=64$. *S. enterica* 2,000 genomes: $k_{\text{conn}}=-1$, $k_{\text{stable}}=64$.
 
-For clonal taxa (tight NN distribution), $\theta_\text{MST}$ is small and drives more representatives. For diverse taxa, the ANI cap is the binding constraint. Outlier genomes are excluded from the MST to prevent contaminated assemblies from inflating $\theta_\text{MST}$ via long bridge edges.
+For clonal taxa (tight NN distribution), $\theta_{\text{MST}}$ is small and drives more representatives. For diverse taxa, the ANI cap is the binding constraint. Outlier genomes are excluded from the MST to prevent contaminated assemblies from inflating $\theta_{\text{MST}}$ via long bridge edges.
 
 **Instability detection.** Three flags are computed after MST construction:
 
 | Flag | Condition | Severity | Interpretation |
 |------|-----------|----------|----------------|
 | `low_pair_count` | fewer than 20 non-outlier genomes | warning | MST built on too few points; threshold unreliable |
-| `high_gap_ratio` | $\theta_\text{MST} / \text{NN}_{P95} > 5$ | warning | one long bridge edge dominates; MST may conflate sub-populations |
-| `disconnected_mst` | MST has $> 1$ component at $k_\text{iso}$ (not at adaptive $k_\text{stable}$) | warning | k-NN graph not connected; threshold is a lower bound |
+| `high_gap_ratio` | $\theta_{\text{MST}} / \text{NN}_{P95} > 5$ | warning | one long bridge edge dominates; MST may conflate sub-populations |
+| `disconnected_mst` | MST has $> 1$ component at $k_{\text{iso}}$ (not at adaptive $k_{\text{stable}}$) | warning | k-NN graph not connected; threshold is a lower bound |
 
 `high_gap_ratio` uses $\text{NN}_{P95}$ as denominator. Clonal taxa (e.g. *E. coli*, *S. enterica*) have $\text{NN}_{P50} \approx 0.003$ (intra-clone distances), which would produce false alarms when the MST bridge correctly captures an inter-pathotype gap; $\text{NN}_{P95}$ represents the upper bound of normal within-population variation and is a more robust reference.
 
-`disconnected_mst` is only raised when the graph remains disconnected even at the adaptive $k_\text{stable}$ (i.e., $k_\text{conn} = -1$). A graph that is disconnected at $k_\text{iso}$ but connects before $K_\text{cap}$ logs an info message instead.
+`disconnected_mst` is only raised when the graph remains disconnected even at the adaptive $k_{\text{stable}}$ (i.e., $k_{\text{conn}} = -1$). A graph that is disconnected at $k_{\text{iso}}$ but connects before $K_{\text{cap}}$ logs an info message instead.
 
 When any warning flag is set, the MST threshold is used as-is. Override with `--geodesic-diversity-threshold` if the inferred threshold is unsuitable.
 
-When $\theta_\text{MST}$ is unavailable (small-$n$ brute-force path), $\text{NN}_{P95}$ is used directly.
+When $\theta_{\text{MST}}$ is unavailable (small-$n$ brute-force path), $\text{NN}_{P95}$ is used directly.
 
-**K_cap retry and bridge diagnostic.** When the k-NN graph fails to connect at $K_\text{cap} = 64$, the algorithm retries at $K_\text{cap} = 128$ then 256, rebuilding the full HNSW index with raised `ef_search` at each level (maximum configurable via `--k-cap-max`). HNSW is an approximate nearest-neighbour (ANN) structure — it can miss true neighbours, especially in high-dimensional or poorly-connected graphs. If the graph still does not connect after retries, 50 cross-component genome pairs are sampled and their OPH Jaccard computed directly to diagnose whether the disconnection is a retrieval failure or genuine biology:
+**K_cap retry and bridge diagnostic.** When the k-NN graph fails to connect at $K_{\text{cap}} = 64$, the algorithm retries at $K_{\text{cap}} = 128$ then 256, rebuilding the full HNSW index with raised `ef_search` at each level (maximum configurable via `--k-cap-max`). HNSW is an approximate nearest-neighbour (ANN) structure — it can miss true neighbours, especially in high-dimensional or poorly-connected graphs. If the graph still does not connect after retries, 50 cross-component genome pairs are sampled and their OPH Jaccard computed directly to diagnose whether the disconnection is a retrieval failure or genuine biology:
 
 | Outcome | Condition | Interpretation |
 |---------|-----------|----------------|
-| `ANN_RECALL_GAP` | any sampled pair $J \geq J_\text{cert}$ | HNSW missed a true neighbour; the gap is a retrieval artefact, not a real phylogenetic break |
+| `ANN_RECALL_GAP` | any sampled pair $J \geq J_{\text{cert}}$ | HNSW missed a true neighbour; the gap is a retrieval artefact, not a real phylogenetic break |
 | `POSSIBLE_GAP` | any sampled pair $J \geq J_{80}$ (80% ANI equivalent) | pairs are similar but below the coverage threshold; could be genuine phylogenetic sub-structure or marginal ANN recall |
 | `NO_BRIDGE_FOUND` | no sampled pair passes either threshold | taxon genuinely contains multiple well-separated sub-populations at the current ANI scale |
 
@@ -324,7 +324,7 @@ $$
 where $s_i = \max_{r \in R} \mathbf{e}_r \cdot \mathbf{e}_i$ is the dot-product similarity to the nearest current representative, $q_i$ is the CheckM2 quality score ($\text{completeness} - 5 \times \text{contamination}$; defaults to 100 when unavailable), $L_i$ is genome length, and $L_m$ is the taxon median genome length. The formal 2-approximation guarantee does not carry over to this weighted variant; coverage is evaluated empirically.
 
 **Algorithm:**
-1. Seed: select the genome maximising $\text{isolation} \times (\text{quality}/100) \times \sqrt{L_i / L_\text{med}}$ as the first representative
+1. Seed: select the genome maximising $\text{isolation} \times (\text{quality}/100) \times \sqrt{L_i / L_{\text{med}}}$ as the first representative
 2. Maintain $s_j$ for all active (uncovered) genomes after each representative is added
 3. Each round: partial-sort the active set by fitness; promote the top-$B = 16$ genomes to representatives
 4. Remove newly covered genomes ($(1 - s_i) < \theta$) from the active set
@@ -336,9 +336,9 @@ Batching $B = 16$ candidates fuses 16 distance updates into one parallel pass, r
 
 ## Phase 6: Union-Find merge
 
-Quality weighting can place two representatives closer than intended. Representatives with embedding distance below $d_\text{min}$ are merged via [Union-Find](https://en.wikipedia.org/wiki/Disjoint-set_data_structure): the pair is collapsed to the survivor with higher $\text{quality} \times \text{size}$.
+Quality weighting can place two representatives closer than intended. Representatives with embedding distance below $d_{\text{min}}$ are merged via [Union-Find](https://en.wikipedia.org/wiki/Disjoint-set_data_structure): the pair is collapsed to the survivor with higher $\text{quality} \times \text{size}$.
 
-Merge candidates are found via HNSW search over the representative set. $d_\text{min} = \min(\text{NN}_{P5},\ \theta / 2)$.
+Merge candidates are found via HNSW search over the representative set. $d_{\text{min}} = \min(\text{NN}_{P5},\ \theta / 2)$.
 
 ---
 
@@ -362,13 +362,13 @@ For each borderline-covered genome $G_i$:
 2. For each candidate representative $R_k$, compute dual-sketch averaged OPH Jaccard:
 
 $$
-J_\text{dual} = \frac{J(\text{sig1}_i,\ \text{sig1}_{R_k}) + J(\text{sig2}_i,\ \text{sig2}_{R_k})}{2}
+J_{\text{dual}} = \frac{J(\text{sig1}_i,\ \text{sig1}_{R_k}) + J(\text{sig2}_i,\ \text{sig2}_{R_k})}{2}
 $$
 
-3. Convert: $d_\text{sketch} = \arccos\!\left(\min(1, \max(0, J_\text{dual}))\right) / \pi$
-4. Promote $G_i$ to representative only if all checked representatives satisfy $d_\text{sketch} \geq \theta$.
+3. Convert: $d_{\text{sketch}} = \arccos\!\left(\min(1, \max(0, J_{\text{dual}}))\right) / \pi$
+4. Promote $G_i$ to representative only if all checked representatives satisfy $d_{\text{sketch}} \geq \theta$.
 
-This uses OPH sketch Jaccard ($m = 10{,}000$ bins), not exact ANI, with variance $J(1-J) / (2\, m_\text{real})$.
+This uses OPH sketch Jaccard ($m = 10{,}000$ bins), not exact ANI, with variance $J(1-J) / (2\, m_{\text{real}})$.
 
 ---
 
@@ -381,27 +381,27 @@ Phase 8 runs a universal coverage check over every non-representative genome.
 **Certification thresholds.** Two thresholds are derived from the user ANI parameter $p = \text{ANI}/100$ and k-mer size $k$:
 
 $$
-q_\text{cert} = p^k, \qquad J_\text{cert} = \frac{q_\text{cert}}{2 - q_\text{cert}}
+q_{\text{cert}} = p^k, \qquad J_{\text{cert}} = \frac{q_{\text{cert}}}{2 - q_{\text{cert}}}
 $$
 
-At 95% ANI with $k = 21$: $q_\text{cert} \approx 0.341$, $J_\text{cert} \approx 0.212$.
+At 95% ANI with $k = 21$: $q_{\text{cert}} \approx 0.341$, $J_{\text{cert}} \approx 0.212$.
 
-$J_\text{cert}$ is used for the symmetric Jaccard arm (equal-size genomes). $q_\text{cert}$ is used directly for the containment arm (sparse genomes), where the genome size asymmetry means Jaccard underestimates similarity.
+$J_{\text{cert}}$ is used for the symmetric Jaccard arm (equal-size genomes). $q_{\text{cert}}$ is used directly for the containment arm (sparse genomes), where the genome size asymmetry means Jaccard underestimates similarity.
 
 **Two-arm `oph_certified` function.** For a pair $(G_i, G_j)$, the function returns `true` if either arm passes:
 
-- **Arm 1 (symmetric Jaccard):** $J_\text{dual}(G_i, G_j) \geq J_\text{cert}$.
-- **Arm 2 (directional containment):** triggered when $n_\text{real,small} / n_\text{real,large} < 0.5$ (small genome has fewer than half the occupied OPH bins of the larger). Computes the containment fraction $C = n_\text{match} / n_\text{real,small}$ and requires $C \geq q_\text{cert}$.
+- **Arm 1 (symmetric Jaccard):** $J_{\text{dual}}(G_i, G_j) \geq J_{\text{cert}}$.
+- **Arm 2 (directional containment):** triggered when $n_{\text{real,small}} / n_{\text{real,large}} < 0.5$ (small genome has fewer than half the occupied OPH bins of the larger). Computes the containment fraction $C = n_{\text{match}} / n_{\text{real,small}}$ and requires $C \geq q_{\text{cert}}$.
 
 **Algorithm.** For each non-representative genome $G_i$ (excluding contamination-excluded genomes):
 
-1. **Fast path**: run `oph_certified(G_i, R_\text{assigned})` against the currently assigned representative. If it passes (either arm), $G_i$ is certified; continue.
-2. **Exhaustive scan**: if the fast path fails, run `oph_certified(G_i, R_k)` against every representative $R_k$. Reassign $G_i$ to the representative with the highest $J_\text{dual}$ among those that pass. Using either arm ensures that a MAG correctly covered by containment is not incorrectly sent to the repair queue.
+1. **Fast path**: run `oph_certified(G_i, R_{\text{assigned}})` against the currently assigned representative. If it passes (either arm), $G_i$ is certified; continue.
+2. **Exhaustive scan**: if the fast path fails, run `oph_certified(G_i, R_k)` against every representative $R_k$. Reassign $G_i$ to the representative with the highest $J_{\text{dual}}$ among those that pass. Using either arm ensures that a MAG correctly covered by containment is not incorrectly sent to the repair queue.
 3. **Repair queue**: if no representative passes either arm, $G_i$ is promoted to a new representative.
 
 The outer loop is parallelised with OpenMP (`schedule(dynamic, 256)`); each thread maintains a local repair queue merged after the barrier.
 
-**Coverage guarantee.** After Phase 8, every non-representative genome satisfies `oph_certified` against at least one representative, independent of Nyström approximation error. For symmetric pairs this is a sketch-space Jaccard guarantee; for asymmetric pairs it is a directional containment guarantee. The remaining uncertainty is OPH estimation variance: at 95% ANI with $m = 10{,}000$ bins, $\sigma_J \approx 0.004$ for dense assemblies; sparse genomes (low $m_\text{real}$) have higher variance and looser sketch-space guarantees.
+**Coverage guarantee.** After Phase 8, every non-representative genome satisfies `oph_certified` against at least one representative, independent of Nyström approximation error. For symmetric pairs this is a sketch-space Jaccard guarantee; for asymmetric pairs it is a directional containment guarantee. The remaining uncertainty is OPH estimation variance: at 95% ANI with $m = 10{,}000$ bins, $\sigma_J \approx 0.004$ for dense assemblies; sparse genomes (low $m_{\text{real}}$) have higher variance and looser sketch-space guarantees.
 
 ---
 
@@ -435,7 +435,7 @@ The model assumes equal genome sizes, i.i.d. substitutions, and negligible indel
 The angular distance threshold corresponding to an ANI cutoff (before degree normalisation):
 
 $$
-\theta_\text{ANI} = \frac{\arccos(J_\text{threshold})}{\pi}
+\theta_{\text{ANI}} = \frac{\arccos(J_{\text{threshold}})}{\pi}
 $$
 
 After degree normalisation, dot products approximate a normalised-graph similarity rather than raw Jaccard. Phase 7 corrects borderline decisions back to sketch Jaccard space.
@@ -449,12 +449,12 @@ After degree normalisation, dot products approximate a normalised-graph similari
 | Sketch | OPH per genome (rolling hash) | $O(L)$ where $L$ = genome length |
 | Embed anchors | Gram matrix $K$ | $O(p^2 m)$ |
 | Embed all | Nyström extension (sig1 only) | $O(npm)$ |
-| Eigendecomp | $K_\text{reg}$ ($p \times p$) | $O(p^3)$ |
+| Eigendecomp | $K_{\text{reg}}$ ($p \times p$) | $O(p^3)$ |
 | Index | HNSW build | $O(nM \log n)$ |
-| Score | kNN isolation ($k_\text{iso}$) + adaptive DSU scan + MST (Kruskal, $k_\text{stable} \leq K_\text{cap}$) | $O(n \log n)$ |
+| Score | kNN isolation ($k_{\text{iso}}$) + adaptive DSU scan + MST (Kruskal, $k_{\text{stable}} \leq K_{\text{cap}}$) | $O(n \log n)$ |
 | Select | FPS batched ($B=16$) | $O(nrd/B)$ where $r$ = number of reps |
 | Merge | HNSW search + Union-Find | $O(r \log r)$ |
-| Verify | OPH sketch Jaccard | $O(n_\text{borderline} \cdot m)$ |
+| Verify | OPH sketch Jaccard | $O(n_{\text{borderline}} \cdot m)$ |
 | Certify | Universal OPH coverage check | $O(nm)$ fast path; $O(n \cdot r \cdot m)$ worst case |
 
 Typical values: $p \approx 512$, $m = 10{,}000$, $d \approx 64$–$256$. Embedding (Nyström extension) dominates for $n > 10{,}000$; FPS dominates for medium-size taxa.
