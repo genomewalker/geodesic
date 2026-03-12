@@ -255,15 +255,15 @@ $$
 \theta = \min\!\left(\theta_\text{MST},\ \frac{\arccos(J_\text{ANI})}{\pi}\right)
 $$
 
-**$\theta_\text{MST}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (with genomic outliers — isolation score $> \mu + 2\sigma$ — excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_\text{MST}$ is the minimum angular distance at which the k-NN proximity graph becomes connected — the natural inter-strain scale of the taxon.
+**$\theta_\text{MST}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score $> \mu + 2\sigma$ excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_\text{MST}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
 
 **Kruskal's construction.** The k-NN edges are sorted in ascending order of angular distance. Union-Find processes them greedily, adding each edge only if it connects two previously disconnected components. The algorithm terminates as soon as a single component spans all non-outlier genomes; the edge that triggered this merge is $\theta_\text{MST}$ by construction.
 
 **Adaptive $k$ selection.** Isolation scoring uses a fixed $k_\text{iso}$ neighbours. MST edge collection uses a two-phase adaptive scan with budget $K_\text{cap} = \min(64, n-1)$.
 
-**Phase A — DSU connectivity scan.** The k-NN edges are added column by column, incrementing $k$ from 1 to $K_\text{cap}$. A Union-Find structure tracks component membership. The scan halts at the first $k$ for which the core k-NN graph (outliers excluded) becomes fully connected; this value is recorded as $k_\text{conn}$. If no $k \leq K_\text{cap}$ achieves connectivity (e.g. a taxon with genuine phylogenetic sub-lineages), $k_\text{conn} = -1$.
+**Phase A — DSU connectivity scan.** The k-NN edges are added column by column, incrementing $k$ from 1 to $K_\text{cap}$. A Union-Find structure tracks component membership. The scan halts at the first $k$ for which the core k-NN graph (outliers excluded) becomes fully connected; this value is recorded as $k_\text{conn}$. If no $k \leq K_\text{cap}$ achieves connectivity (e.g., a taxon with genuine phylogenetic sub-lineages), $k_\text{conn} = -1$.
 
-**Phase B — Bottleneck stability probe.** Starting from $k_\text{conn}$ (or $K_\text{cap}$ if $k_\text{conn} = -1$), the bottleneck $B(k)$ — the MST max edge at a given $k$ — is evaluated at a probe ladder $\{1,2,3,4,6,8,12,16,24,32,48,64\}$ plus $K_\text{cap}$ as a reference value. The smallest $k$ in the ladder for which $B(k)$ is within 3% of $B(K_\text{cap})$ is taken as $k_\text{stable}$. Using $k_\text{conn}$ alone is insufficient: the first edge that connects the graph is often a brittle long-range bridge, giving an artificially elevated $B(k_\text{conn})$. The probe identifies the point at which the bottleneck has stabilised and further neighbours no longer change the MST max edge materially.
+**Phase B — Bottleneck stability probe.** Starting from $k_\text{conn}$ (or $K_\text{cap}$ if $k_\text{conn} = -1$), the bottleneck $B(k)$ (MST max edge at a given $k$) is evaluated at a probe ladder $\{1,2,3,4,6,8,12,16,24,32,48,64\}$ plus $K_\text{cap}$ as a reference value. The smallest $k$ in the ladder for which $B(k)$ is within 3% of $B(K_\text{cap})$ is taken as $k_\text{stable}$. Using $k_\text{conn}$ alone is insufficient: the first edge that connects the graph is often a brittle long-range bridge, giving an artificially elevated $B(k_\text{conn})$. The probe identifies the point at which the bottleneck has stabilised and further neighbours no longer change the MST max edge materially.
 
 The MST is then constructed at $k_\text{stable}$ edges per genome. For $k_\text{conn} = -1$ taxa, $k_\text{stable} = K_\text{cap}$ and per-component thresholds are used. Isolation scoring is unaffected.
 
@@ -352,7 +352,7 @@ This uses OPH sketch Jaccard ($m = 10{,}000$ bins), not exact ANI, with variance
 
 ## Phase 8: Universal OPH certification
 
-Phase 7 (borderline verification) only checks genomes near the embedding coverage boundary. Nyström approximation error is not uniform — it is larger for sparse genomes (MAGs, incomplete assemblies) whose k-mer sets differ substantially from the anchor sample. A genome that appears covered in embedding space may be genuinely uncovered in OPH sketch space.
+Phase 7 (borderline verification) only checks genomes near the embedding coverage boundary. Nyström approximation error is not uniform; it is larger for sparse genomes (MAGs, incomplete assemblies) whose k-mer sets differ substantially from the anchor sample. A genome that appears covered in embedding space may be genuinely uncovered in OPH sketch space.
 
 Phase 8 runs a universal coverage check over every non-representative genome.
 

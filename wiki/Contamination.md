@@ -6,7 +6,7 @@ geodesic identifies potentially contaminated and chimeric assemblies before repr
 
 ## Why this matters
 
-A contaminated or chimeric assembly contains sequence from multiple lineages and looks artificially "diverse" — its k-mer composition reflects both parents, pushing it far from other taxon members in embedding space. If selected as a representative, reads from neither lineage map cleanly: species abundance is smeared across clades, lineage-specific loci lose coverage, and variant calls become unreliable. Worse, diversity-maximising selection actively favours such assemblies because they appear to fill underrepresented parts of sequence space. Contamination filtering protects the biological meaning of the representative set.
+A contaminated or chimeric assembly contains sequence from multiple lineages and looks artificially "diverse": its k-mer composition reflects both parents, pushing it far from other taxon members in embedding space. If selected as a representative, reads from neither lineage map cleanly: species abundance is smeared across clades, lineage-specific loci lose coverage, and variant calls become unreliable. Worse, diversity-maximising selection actively favours such assemblies because they appear to fill underrepresented parts of sequence space. Contamination filtering protects the biological meaning of the representative set.
 
 ---
 
@@ -93,4 +93,4 @@ The `_contamination.tsv` file contains all flagged candidates with columns:
 taxonomy  accession  nn_outlier  isolation_score  kmer_div_zscore  genome_size_zscore  centroid_distance  anomaly_score  genome_length_bp  n_contigs  margin_to_threshold  flag_reason
 ```
 
-All genomes still appear in `_derep_genomes.tsv` assigned to their nearest representative — contamination detection only affects selection eligibility, not assignment.
+All genomes still appear in `_derep_genomes.tsv` assigned to their nearest representative; contamination detection only affects selection eligibility, not assignment.
