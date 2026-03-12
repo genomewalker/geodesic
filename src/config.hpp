@@ -39,7 +39,7 @@ struct Config {
     int calibration_pairs = 50;
     int embedding_dim = 512;
     int kmer_size = 21;
-    int sketch_size = 10000;
+    int sketch_size = 4096;
     int syncmer_s = 0;
     float diversity_threshold = 0.02f;
     float max_rep_fraction = 0.2f;

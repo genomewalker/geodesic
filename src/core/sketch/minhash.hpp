@@ -51,8 +51,8 @@ struct MinHashSketch {
 
 class MinHasher {
 public:
-    static constexpr int DEFAULT_SKETCH_SIZE = 10000;
-    static constexpr int OPH_BINS = 10000;
+    static constexpr int DEFAULT_SKETCH_SIZE = 4096;
+    static constexpr int OPH_BINS = 4096;
 
     struct Config {
         int kmer_size = 16;      // k=16 gives J~0.29 at 95% ANI

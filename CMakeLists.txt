@@ -17,6 +17,9 @@ if(COMPILER_SUPPORTS_FMA)
     message(STATUS "FMA enabled for fused multiply-add")
 endif()
 
+# Frame pointers for perf call-graph profiling (negligible overhead)
+add_compile_options(-fno-omit-frame-pointer)
+
 # Enable OpenMP for parallel processing
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)

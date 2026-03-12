@@ -499,7 +499,7 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
         return dists;
     };
 
-    CalibratedParams params{ 21, 256, 10000 };
+    CalibratedParams params{ 21, 256, 4096 };
 
     if (genomes.size() < 2) return params;
 
@@ -519,10 +519,10 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     std::vector<size_t> idx_vec(seen.begin(), seen.end());
 
     // ----------------------------------------------------------------
-    // Step 2: first pass with default params (k=21, sketch=10k, dim=256)
+    // Step 2: first pass with default params (k=21, sketch=4k, dim=256)
     //         to measure spread and choose final tier
     // ----------------------------------------------------------------
-    const int k0 = 21, s0 = 10000, d0 = 256;
+    const int k0 = 21, s0 = 4096, d0 = 256;
     auto cache0 = embed_sample(idx_vec, k0, s0, d0);
     auto dists0  = compute_distances(pairs, cache0);
 
@@ -550,13 +550,13 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     int kmer, sketch_size, embedding_dim;
     if (ani_p95_sample >= 99.0) {
         // Very clonal (all pairs >99% ANI): high k for within-clone discrimination
-        kmer = 31; sketch_size = 20000; embedding_dim = 512;
+        kmer = 31; sketch_size = 8192; embedding_dim = 512;
     } else if (ani_p95_sample >= 95.0) {
         // Typical species (95–99% ANI): standard resolution
-        kmer = 21; sketch_size = 10000; embedding_dim = 256;
+        kmer = 21; sketch_size = 4096; embedding_dim = 256;
     } else {
         // Very diverse or cross-genus (<95% ANI in sample)
-        kmer = 16; sketch_size = 5000;  embedding_dim = 128;
+        kmer = 16; sketch_size = 2048; embedding_dim = 128;
     }
 
     params.kmer_size     = kmer;
@@ -1811,8 +1811,8 @@ void GeodesicDerep::apply_nystrom_embeddings() {
 
     // Pack anchor signatures into a contiguous slab for cache-friendly access.
     // Without packing, each of the 512 anchor sigs is a separate heap allocation,
-    // causing cache/TLB misses when scanning them per genome. The slab is ~10 MB
-    // (512 × 10000 × 2 bytes) — fits in L3 and stays warm across the parallel loop.
+    // causing cache/TLB misses when scanning them per genome. The slab is ~4 MB
+    // (512 × 4096 × 2 bytes) — fits in L2/L3 and stays warm across the parallel loop.
     const size_t m_sig = cfg_.sketch_size;
     std::vector<uint16_t> anchor_slab;
     if (m_sig > 0 && !anchor_idx.empty() && !embeddings_[anchor_idx[0]].oph_sig.empty()) {
@@ -1842,7 +1842,7 @@ void GeodesicDerep::apply_nystrom_embeddings() {
         Eigen::VectorXf k_G(static_cast<int>(n_anchors));
         Eigen::VectorXf e_raw(actual_d);
 
-        #pragma omp for schedule(dynamic, 50)
+        #pragma omp for schedule(static)
         for (size_t i = 0; i < n; ++i) {
             int32_t ap = anchor_pos[i];
             if (ap >= 0) {
@@ -1851,7 +1851,7 @@ void GeodesicDerep::apply_nystrom_embeddings() {
                 k_G = K.row(ap).transpose();
             } else {
                 // Non-anchor: sig1 only, via contiguous anchor slab + AVX2 equality count.
-                // Each Jaccard call compares 10000 uint16_t; AVX2 cuts that to 625 vector ops.
+                // Each Jaccard call compares 4096 uint16_t; AVX2 cuts that to 256 vector ops.
                 if (embeddings_[i].oph_sig.empty()) continue;  // genome failed to sketch
                 const uint16_t* sig_i_ptr = embeddings_[i].oph_sig.data();
                 for (size_t a = 0; a < n_anchors; ++a) {
@@ -2733,7 +2733,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     for (size_t i = 0; i < n; ++i) path_strings[i] = store_.paths[i].string();
 
     // OPH refinement: for pairs whose 256-dim estimate is near the threshold,
-    // refine J via exact bin-counting. SNR of direct OPH comparison with M=10000:
+    // refine J via exact bin-counting. SNR of direct OPH comparison with M=4096:
     //   at 90% ANI (J=0.065): SNR=26  vs  CountSketch@256: SNR=1
     //   at 95% ANI (J=0.212): SNR=50  vs  CountSketch@256: SNR=3.5
     // Borderline zone ≈ 3-sigma of the CountSketch estimator: ±3/√dim ≈ ±0.19
