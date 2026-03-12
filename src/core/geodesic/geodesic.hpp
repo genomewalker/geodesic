@@ -141,10 +141,10 @@ public:
         // ANI threshold for redundancy
         double ani_threshold = 0.95;
 
-        // HNSW index parameters
-        int hnsw_m = 48;             // Higher M for better recall
-        int hnsw_ef_construction = 400;
-        int hnsw_ef_search = 200;
+        // HNSW index parameters (reduced for speed; K_cap ensures coverage)
+        int hnsw_m = 16;
+        int hnsw_ef_construction = 64;
+        int hnsw_ef_search = 100;
 
         // Parallelism
         int threads = 4;
