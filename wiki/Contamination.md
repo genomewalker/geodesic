@@ -27,13 +27,13 @@ Six per-genome signals are computed and stored in the `contamination_candidates`
 
 ## Flagging criterion
 
-A genome is excluded from representative selection when `nn_outlier = TRUE`. The threshold is derived from a [Fast Minimum Covariance Determinant (FastMCD)](https://doi.org/10.1080/00401706.1999.10485535) (Rousseeuw & Van Driessen 1999) robust location/scale estimate of the taxon's isolation score distribution. FastMCD finds the $h$-subset of observations ($h = \lceil 0.75n \rceil$) with minimum covariance determinant, giving a breakdown point of ~25%: up to a quarter of genomes can be contaminated without biasing the estimator.
+A genome is excluded from representative selection when `nn_outlier = TRUE`. The threshold is derived from a [Median Absolute Deviation (MAD)](https://en.wikipedia.org/wiki/Median_absolute_deviation)-based robust estimate of the per-component isolation score distribution. MAD has a breakdown point of 50%: up to half of genomes can be contaminated without biasing the estimator.
 
 $$
-\text{threshold} = \mu_\text{MCD} + z \cdot \sigma_\text{MCD}
+\text{threshold} = \tilde{\mu} + z \cdot 1.4826 \cdot \mathrm{MAD}
 $$
 
-where $\mu_\text{MCD}$ and $\sigma_\text{MCD}$ are the FastMCD location and scale, and $z$ is configurable via `--z-threshold` (default 2.0). Ordinary mean and SD are not used because contaminated genomes form a long right tail in the isolation score distribution; including them in the estimator inflates $\sigma$ and raises the threshold, masking the very outliers we want to detect.
+where $\tilde{\mu}$ is the component median isolation score, $\mathrm{MAD} = \text{median}(|x_i - \tilde{\mu}|)$, and $z$ is configurable via `--z-threshold` (default 2.0). The factor 1.4826 makes MAD consistent with standard deviation for normal distributions. Ordinary mean and SD are not used because contaminated genomes form a long right tail in the isolation score distribution; including them in the estimator inflates $\sigma$ and raises the threshold, masking the very outliers we want to detect.
 
 Genomes with `isolation_score > threshold` have anomalously large mean distance to their nearest neighbours in embedding space, the primary signal of taxonomic misassignment or cross-species contamination. Their fitness is set to zero: they cannot be selected as representatives but remain in the output assigned to their nearest representative.
 

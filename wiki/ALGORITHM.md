@@ -267,7 +267,7 @@ $$
 \theta = \min\!\left(\theta_{\text{MST}},\ \frac{\arccos(J_{\text{ANI}})}{\pi}\right)
 $$
 
-**$\theta_{\text{MST}}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding the [Fast Minimum Covariance Determinant (FastMCD)](https://doi.org/10.1080/00401706.1999.10485535) threshold $\mu_{\text{MCD}} + z \cdot \sigma_{\text{MCD}}$ excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_{\text{MST}}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
+**$\theta_{\text{MST}}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding the MAD-based threshold $\tilde{\mu} + z \cdot 1.4826 \cdot \mathrm{MAD}$ excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_{\text{MST}}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
 
 **Kruskal's construction.** The k-NN edges are sorted in ascending order of angular distance. Union-Find processes them greedily, adding each edge only if it connects two previously disconnected components. The algorithm terminates as soon as a single component spans all non-outlier genomes; the edge that triggered this merge is $\theta_{\text{MST}}$ by construction.
 
