@@ -78,7 +78,7 @@ Config parse_args(int argc, char** argv) {
     derep->add_option("--geodesic-kmer-size", cfg.kmer_size,
         "GEODESIC k-mer size (larger = more discriminative at high ANI)")->default_val(21);
     derep->add_option("--geodesic-sketch-size", cfg.sketch_size,
-        "GEODESIC sketch size (larger = more accurate Jaccard)")->default_val(4096);
+        "GEODESIC sketch size (larger = more accurate Jaccard)")->default_val(10000);
     derep->add_option("--geodesic-syncmer-s", cfg.syncmer_s,
         "GEODESIC open-syncmer submer length (0=disabled, smaller=faster/sparser OPH)")
         ->default_val(0);
