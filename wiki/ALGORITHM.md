@@ -273,9 +273,9 @@ $$
 
 **Adaptive $k$ selection.** Isolation scoring uses a fixed $k_{\text{iso}}$ neighbours. MST edge collection uses a two-phase adaptive scan with budget $K_{\text{cap}} = \min(64, n-1)$.
 
-**Phase A — DSU connectivity scan.** The k-NN edges are added column by column, incrementing $k$ from 1 to $K_{\text{cap}}$. A [Disjoint Set Union (DSU)](https://en.wikipedia.org/wiki/Disjoint-set_data_structure) structure (also called Union-Find) tracks component membership — each genome starts in its own component, and merging two sets takes near-constant amortised time. The scan halts at the first $k$ for which the core k-NN graph (outliers excluded) becomes fully connected; this value is recorded as $k_{\text{conn}}$. If no $k \leq K_{\text{cap}}$ achieves connectivity (e.g., a taxon with genuine phylogenetic sub-lineages), $k_{\text{conn}} = -1$.
+**Phase A -- DSU connectivity scan.** The k-NN edges are added column by column, incrementing $k$ from 1 to $K_{\text{cap}}$. A [Disjoint Set Union (DSU)](https://en.wikipedia.org/wiki/Disjoint-set_data_structure) structure (also called Union-Find) tracks component membership -- each genome starts in its own component, and merging two sets takes near-constant amortised time. The scan halts at the first $k$ for which the core k-NN graph (outliers excluded) becomes fully connected; this value is recorded as $k_{\text{conn}}$. If no $k \leq K_{\text{cap}}$ achieves connectivity (e.g., a taxon with genuine phylogenetic sub-lineages), $k_{\text{conn}} = -1$.
 
-**Phase B — Bottleneck stability probe.** Starting from $k_{\text{conn}}$ (or $K_{\text{cap}}$ if $k_{\text{conn}} = -1$), the bottleneck $B(k)$ (MST max edge at a given $k$) is evaluated at a probe ladder $\{1,2,3,4,6,8,12,16,24,32,48,64\}$ plus $K_{\text{cap}}$ as a reference value. The smallest $k$ in the ladder for which $B(k)$ is within 3% of $B(K_{\text{cap}})$ is taken as $k_{\text{stable}}$. Using $k_{\text{conn}}$ alone is insufficient: the first edge that connects the graph is often a brittle long-range bridge, giving an artificially elevated $B(k_{\text{conn}})$. The probe identifies the point at which the bottleneck has stabilised and further neighbours no longer change the MST max edge materially.
+**Phase B -- Bottleneck stability probe.** Starting from $k_{\text{conn}}$ (or $K_{\text{cap}}$ if $k_{\text{conn}} = -1$), the bottleneck $B(k)$ (MST max edge at a given $k$) is evaluated at a probe ladder $\{1,2,3,4,6,8,12,16,24,32,48,64\}$ plus $K_{\text{cap}}$ as a reference value. The smallest $k$ in the ladder for which $B(k)$ is within 3% of $B(K_{\text{cap}})$ is taken as $k_{\text{stable}}$. Using $k_{\text{conn}}$ alone is insufficient: the first edge that connects the graph is often a brittle long-range bridge, giving an artificially elevated $B(k_{\text{conn}})$. The probe identifies the point at which the bottleneck has stabilised and further neighbours no longer change the MST max edge materially.
 
 The MST is then constructed at $k_{\text{stable}}$ edges per genome. For $k_{\text{conn}} = -1$ taxa, $k_{\text{stable}} = K_{\text{cap}}$ and per-component thresholds are used. Isolation scoring is unaffected.
 
@@ -299,7 +299,7 @@ When any warning flag is set, the MST threshold is used as-is. Override with `--
 
 When $\theta_{\text{MST}}$ is unavailable (small-$n$ brute-force path), $\text{NN}_{P95}$ is used directly.
 
-**K_cap retry and bridge diagnostic.** When the k-NN graph fails to connect at $K_{\text{cap}} = 64$, the algorithm retries at $K_{\text{cap}} = 128$ then 256, rebuilding the full HNSW index with raised `ef_search` at each level (maximum configurable via `--k-cap-max`). HNSW is an approximate nearest-neighbour (ANN) structure — it can miss true neighbours, especially in high-dimensional or poorly-connected graphs. If the graph still does not connect after retries, 50 cross-component genome pairs are sampled and their OPH Jaccard computed directly to diagnose whether the disconnection is a retrieval failure or genuine biology:
+**K_cap retry and bridge diagnostic.** When the k-NN graph fails to connect at $K_{\text{cap}} = 64$, the algorithm retries at $K_{\text{cap}} = 128$ then 256, rebuilding the full HNSW index with raised `ef_search` at each level (maximum configurable via `--k-cap-max`). HNSW is an approximate nearest-neighbour (ANN) structure -- it can miss true neighbours, especially in high-dimensional or poorly-connected graphs. If the graph still does not connect after retries, 50 cross-component genome pairs are sampled and their OPH Jaccard computed directly to diagnose whether the disconnection is a retrieval failure or genuine biology:
 
 | Outcome | Condition | Interpretation |
 |---------|-----------|----------------|
@@ -321,13 +321,13 @@ $$
 \text{fitness}_i = d_i \cdot \sqrt{\frac{L_i}{L_m}}
 $$
 
-where $d_i = \sqrt{2(1 - s_i)}$ is the angular distance proxy to the nearest representative (monotonic in true angular distance), $L_i$ is genome length, and $L_m$ is the taxon median genome length. Quality serves as a **tie-breaker only** — it does not multiply into fitness. This preserves the pure FPS objective (maximize diversity) while preferring higher-quality assemblies among equidistant candidates.
+where $d_i = \sqrt{2(1 - s_i)}$ is the angular distance proxy to the nearest representative (monotonic in true angular distance), $L_i$ is genome length, and $L_m$ is the taxon median genome length. Quality serves as a **tie-breaker only** -- it does not multiply into fitness. This preserves the pure FPS objective (maximize diversity) while preferring higher-quality assemblies among equidistant candidates.
 
 **Quality score** $q_i$ is:
 - **With CheckM2** (`--checkm2`): $q_i = \text{completeness} - 5 \times \text{contamination}$
 - **Without CheckM2**: $q_i = (n_{\text{real\_bins}} / \text{sketch\_size}) \times 100$ (sketch completeness)
 
-The ad-hoc proxy measures what fraction of the OPH sketch bins are filled — a simple, geometry-independent proxy for assembly completeness. Unlike the previous centrality-based formula, sketch completeness does not anti-correlate with isolation, avoiding the parabolic fitness that selected mid-isolation genomes.
+The ad-hoc proxy measures what fraction of the OPH sketch bins are filled -- a simple, geometry-independent proxy for assembly completeness. Unlike the previous centrality-based formula, sketch completeness does not anti-correlate with isolation, avoiding the parabolic fitness that selected mid-isolation genomes.
 
 **Algorithm:**
 1. Seed: select the genome maximising $\text{isolation} \times \sqrt{L_i / L_{\text{med}}}$ as the first representative (quality breaks ties)
