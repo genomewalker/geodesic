@@ -1980,15 +1980,22 @@ void GeodesicDerep::compute_isolation_scores_brute() {
     if (median_sz == 0.0f) median_sz = 1.0f;
 
     // Permutation sort: avoid O(n log n) random swaps of large GenomeEmbedding structs.
+    // Sort by isolation × sqrt(size), with quality as tie-breaker only.
+    // Quality should NOT multiply fitness — that anti-correlates with isolation when
+    // using ad-hoc scores, creating a parabolic fitness that selects mediocre genomes.
     {
         std::vector<size_t> perm(n);
         std::iota(perm.begin(), perm.end(), 0);
         std::sort(perm.begin(), perm.end(), [&](size_t a, size_t b) {
             float la = std::sqrt(static_cast<float>(embeddings_[a].genome_size) / median_sz);
             float lb = std::sqrt(static_cast<float>(embeddings_[b].genome_size) / median_sz);
-            float fa = embeddings_[a].isolation_score * (embeddings_[a].quality_score / 100.0f) * la;
-            float fb = embeddings_[b].isolation_score * (embeddings_[b].quality_score / 100.0f) * lb;
+            // Primary: isolation × sqrt(size) — pure diversity signal
+            float fa = embeddings_[a].isolation_score * la;
+            float fb = embeddings_[b].isolation_score * lb;
             if (fa != fb) return fa > fb;
+            // Tie-breaker: higher quality wins
+            if (embeddings_[a].quality_score != embeddings_[b].quality_score)
+                return embeddings_[a].quality_score > embeddings_[b].quality_score;
             return embeddings_[a].genome_id < embeddings_[b].genome_id;
         });
         std::vector<GenomeEmbedding> sorted;
@@ -2022,62 +2029,40 @@ void GeodesicDerep::exclude_from_reps(const std::unordered_set<std::string>& pat
 
 void GeodesicDerep::compute_adhoc_quality_scores() {
     // Compute ad-hoc quality scores for genomes without CheckM2 data.
-    // Quality proxy = centrality × kmer_density (both normalized to 0-1)
-    // - centrality = 1 - (isolation_score / max_isolation) → central genomes preferred
-    // - kmer_density = n_real_bins / (genome_size / 1000) → complete assemblies have more unique kmers
+    // Quality = sketch completeness (n_real_bins / sketch_size) × 100
+    //
+    // Design rationale (per GPT-5.4 analysis):
+    // - Quality must NOT depend on isolation/centrality — that anti-correlates with
+    //   the FPS objective (isolation × quality), creating a parabolic fitness that
+    //   selects mediocre mid-isolation genomes instead of the most diverse.
+    // - Sketch completeness is orthogonal to embedding geometry, measuring how much
+    //   of the OPH sketch is filled (proxy for assembly completeness/quality).
+    // - Quality is used as a tie-breaker in FPS, not the primary selection signal.
 
     const size_t n = store_.n;
     if (n == 0) return;
 
-    // Find ranges for normalization
-    float max_isolation = 0.0f;
-    float max_kmer_density = 0.0f;
-    std::vector<float> kmer_densities(n, 0.0f);
-
-    for (size_t i = 0; i < n; ++i) {
-        if (store_.quality_scores[i] == 0.0f) continue;  // excluded
-
-        max_isolation = std::max(max_isolation, store_.isolation_scores[i]);
-
-        // kmer density = filled bins per kilobase
-        const auto& emb = embeddings_[i];
-        if (emb.genome_size > 0) {
-            float density = static_cast<float>(emb.n_real_bins) / (static_cast<float>(emb.genome_size) / 1000.0f);
-            kmer_densities[i] = density;
-            max_kmer_density = std::max(max_kmer_density, density);
-        }
-    }
-
-    if (max_isolation < 1e-9f) max_isolation = 1.0f;  // prevent div by zero
-    if (max_kmer_density < 1e-9f) max_kmer_density = 1.0f;
-
-    // Update quality scores for genomes with default score (50.0 = no CheckM2)
+    const float sketch_size = static_cast<float>(cfg_.sketch_size);
     size_t updated = 0;
+
     for (size_t i = 0; i < n; ++i) {
         // Skip excluded genomes and those with real CheckM2 scores (not exactly 50.0)
         if (store_.quality_scores[i] == 0.0f) continue;
         if (std::abs(store_.quality_scores[i] - 50.0f) > 0.01f) continue;  // has CheckM2 data
 
-        // centrality: 1 at center, 0 at max isolation
-        float centrality = 1.0f - (store_.isolation_scores[i] / max_isolation);
-        centrality = std::max(0.0f, std::min(1.0f, centrality));
+        // Sketch completeness: fraction of OPH bins filled (0-1) → scale to 0-100
+        const auto& emb = embeddings_[i];
+        float completeness = static_cast<float>(emb.n_real_bins) / sketch_size;
+        float proxy = completeness * 100.0f;
 
-        // kmer_density normalized to 0-1
-        float density_norm = kmer_densities[i] / max_kmer_density;
-        density_norm = std::max(0.0f, std::min(1.0f, density_norm));
-
-        // Combined score: geometric mean × 100 (maps to 0-100 range like CheckM2)
-        // sqrt(centrality × density) prefers balanced genomes
-        float proxy = std::sqrt(centrality * density_norm) * 100.0f;
-
-        // Clamp to reasonable range
+        // Clamp to [1, 99] — 0.0 is reserved as exclusion sentinel
         store_.quality_scores[i] = std::max(1.0f, std::min(99.0f, proxy));
         embeddings_[i].quality_score = store_.quality_scores[i];
         ++updated;
     }
 
     if (is_verbose() && updated > 0) {
-        spdlog::info("GEODESIC: computed ad-hoc quality scores for {} genomes (centrality × kmer_density)",
+        spdlog::info("GEODESIC: computed ad-hoc quality scores for {} genomes (sketch completeness)",
                      updated);
     }
 }
@@ -2151,11 +2136,13 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
     // Phase 1: Start with most isolated genome (skip if pinned reps already seeded).
     // Data is sorted by genome_id (deterministic), not isolation score, so we scan
-    // for argmax of the composite isolation-quality-length score.
+    // for argmax of isolation × sqrt(size), with quality as tie-breaker.
+    // Quality should NOT multiply the score — it conflicts with isolation for ad-hoc scores.
     if (representatives.empty()) {
         size_t first_idx = 0;
         {
             float best = -1.0f;
+            float best_quality = -1.0f;
             std::vector<uint64_t> tmp_sizes(n);
             for (size_t i = 0; i < n; ++i) tmp_sizes[i] = store_.genome_sizes[i];
             auto mid = tmp_sizes.begin() + static_cast<ptrdiff_t>(n / 2);
@@ -2164,8 +2151,13 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             for (size_t i = 0; i < n; ++i) {
                 if (store_.quality_scores[i] == 0.0f) continue;
                 float len = std::sqrt(static_cast<float>(store_.genome_sizes[i]) / median_sz);
-                float score = store_.isolation_scores[i] * (store_.quality_scores[i] / 100.0f) * len;
-                if (score > best) { best = score; first_idx = i; }
+                // Primary: isolation × sqrt(size)
+                float score = store_.isolation_scores[i] * len;
+                if (score > best || (score == best && store_.quality_scores[i] > best_quality)) {
+                    best = score;
+                    best_quality = store_.quality_scores[i];
+                    first_idx = i;
+                }
             }
         }
         if (first_idx == n) first_idx = 0;  // fallback: all excluded (shouldn't happen)
@@ -2228,7 +2220,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
     while (!active.empty() && representatives.size() < max_reps) {
         // Compute fitness for all active members in parallel
-        std::vector<std::pair<float, size_t>> fit_active(active.size());
+        // FPS fitness = distance × sqrt(size) — quality is a tie-breaker only
+        struct FitEntry { float dist_fit; float quality; size_t idx; };
+        std::vector<FitEntry> fit_active(active.size());
 #if GEODESIC_USE_OMP
         #pragma omp parallel for
 #endif
@@ -2238,19 +2232,23 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             // Fast angular distance proxy: sqrt(2(1-sim)) ≈ acos(sim) for sim near 1.
             // Preserves ranking for FPS candidate selection (monotonic in sim).
             float d_proxy = std::sqrt(2.0f * std::max(0.0f, 1.0f - sim));
-            fit_active[ai] = {d_proxy * (store_.quality_scores[i] / 100.0f) * length_factors[i], i};
+            // Primary fitness: distance × sqrt(size) — pure diversity signal
+            fit_active[ai] = {d_proxy * length_factors[i], store_.quality_scores[i], i};
         }
 
         // Partial sort: bring top-B to front (O(n) average)
+        // Compare by (dist_fit DESC, quality DESC) — quality breaks ties only
         if (fit_active.empty()) break;
+        auto cmp = [](const FitEntry& x, const FitEntry& y) {
+            if (x.dist_fit != y.dist_fit) return x.dist_fit > y.dist_fit;
+            return x.quality > y.quality;  // tie-breaker
+        };
         size_t b = std::min(FPS_BATCH, fit_active.size());
-        std::nth_element(fit_active.begin(), fit_active.begin() + b, fit_active.end(),
-                         [](const auto& x, const auto& y) { return x.first > y.first; });
-        std::sort(fit_active.begin(), fit_active.begin() + b,
-                  [](const auto& x, const auto& y) { return x.first > y.first; });
+        std::nth_element(fit_active.begin(), fit_active.begin() + b, fit_active.end(), cmp);
+        std::sort(fit_active.begin(), fit_active.begin() + b, cmp);
 
         // Stopping criterion: top candidate covered ↔ sim > cos_diversity
-        float top_sim = max_sim_to_rep[fit_active[0].second];
+        float top_sim = max_sim_to_rep[fit_active[0].idx];
         if (top_sim > cos_diversity) {
             if (is_verbose()) {
                 float top_dist = std::acos(std::clamp(top_sim, -1.0f, 1.0f)) / static_cast<float>(M_PI);
@@ -2265,7 +2263,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         std::vector<uint64_t> batch_gids;
         std::vector<const float*> batch_vecs;
         for (size_t k = 0; k < b; ++k) {
-            size_t i = fit_active[k].second;
+            size_t i = fit_active[k].idx;
             // dist < diversity_threshold ↔ sim > cos_diversity
             if (max_sim_to_rep[i] > cos_diversity) continue;
             batch_idx.push_back(i);

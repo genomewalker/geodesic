@@ -315,25 +315,22 @@ Per-component thresholds are used for FPS when the graph remains disconnected.
 
 [Farthest point sampling (FPS)](https://en.wikipedia.org/wiki/Farthest-first_traversal) selects representatives greedily: each step adds the uncovered genome with the highest fitness score. For unweighted FPS on a metric space, this gives a 2-approximation to the k-center problem (Gonzalez 1985).
 
-**Fitness score.** Each genome is weighted by assembly quality and size to bias selection toward complete, uncontaminated assemblies:
+**Fitness score.** Each genome is scored by distance and size:
 
 $$
-\text{fitness}_i = (1 - s_i) \cdot \frac{q_i}{100} \cdot \sqrt{\frac{L_i}{L_m}}
+\text{fitness}_i = d_i \cdot \sqrt{\frac{L_i}{L_m}}
 $$
 
-where $s_i = \max_{r \in R} \mathbf{e}_r \cdot \mathbf{e}_i$ is the dot-product similarity to the nearest current representative, $L_i$ is genome length, and $L_m$ is the taxon median genome length. The quality score $q_i$ is:
+where $d_i = \sqrt{2(1 - s_i)}$ is the angular distance proxy to the nearest representative (monotonic in true angular distance), $L_i$ is genome length, and $L_m$ is the taxon median genome length. Quality serves as a **tie-breaker only** — it does not multiply into fitness. This preserves the pure FPS objective (maximize diversity) while preferring higher-quality assemblies among equidistant candidates.
 
+**Quality score** $q_i$ is:
 - **With CheckM2** (`--checkm2`): $q_i = \text{completeness} - 5 \times \text{contamination}$
-- **Without CheckM2**: $q_i = 100 \cdot \sqrt{\text{centrality}_i \times \text{kmer\_density}_i}$
+- **Without CheckM2**: $q_i = (n_{\text{real\_bins}} / \text{sketch\_size}) \times 100$ (sketch completeness)
 
-The ad-hoc proxy uses two intrinsic signals:
-- **Centrality** = $1 - \text{isolation}_i / \max(\text{isolation})$ — central genomes are more typical of the species
-- **Kmer density** = $n_{\text{real\_bins}} / (L_i / 1000)$ — complete assemblies have more unique k-mers per kb
-
-The formal Gonzalez (1985) 2-approximation guarantee does not carry over to this weighted variant; coverage is evaluated empirically.
+The ad-hoc proxy measures what fraction of the OPH sketch bins are filled — a simple, geometry-independent proxy for assembly completeness. Unlike the previous centrality-based formula, sketch completeness does not anti-correlate with isolation, avoiding the parabolic fitness that selected mid-isolation genomes.
 
 **Algorithm:**
-1. Seed: select the genome maximising $\text{isolation} \times (\text{quality}/100) \times \sqrt{L_i / L_{\text{med}}}$ as the first representative
+1. Seed: select the genome maximising $\text{isolation} \times \sqrt{L_i / L_{\text{med}}}$ as the first representative (quality breaks ties)
 2. Maintain $s_j$ for all active (uncovered) genomes after each representative is added
 3. Each round: partial-sort the active set by fitness; promote the top-$B = 16$ genomes to representatives
 4. Remove newly covered genomes ($(1 - s_i) < \theta$) from the active set
