@@ -284,9 +284,9 @@ int run_pipeline(Config& cfg) {
             //   Large  (p75+): total_budget/4 threads, 4 concurrent
             //   Medium (p25+): total_budget/8 threads, 8 concurrent  (min 1)
             //   Small  (<p25): 1 thread,      total_budget concurrent
-            const int t_giant  = total_budget;
-            const int t_large  = std::max(1, total_budget / 4);
-            const int t_medium = std::max(1, total_budget / 8);
+            const int t_giant  = std::max(12, total_budget / 2);  // 2 concurrent giants
+            const int t_large  = std::max(1, total_budget / 6);   // 6 concurrent large
+            const int t_medium = std::max(1, total_budget / 12);  // 12 concurrent medium
             size_t cnt_giant = 0, cnt_large = 0, cnt_medium = 0, cnt_small = 0;
             for (size_t i = 0; i < n; ++i) {
                 if      (sizes[i] >= p95) { taxon_threads[i] = t_giant;  ++cnt_giant; }
@@ -361,8 +361,8 @@ int run_pipeline(Config& cfg) {
     std::condition_variable done_cv;
 
     // Partition taxa into large (size > 10) and tiny batches (size <= 10, grouped by 100).
-    static constexpr size_t TINY_SCHED_THRESHOLD = 10;
-    static constexpr size_t TINY_BATCH_SIZE = 100;
+    static constexpr size_t TINY_SCHED_THRESHOLD = 100;  // batch taxa ≤100 genomes
+    static constexpr size_t TINY_BATCH_SIZE = 200;       // larger batches
 
     std::vector<size_t> large_indices;
     std::vector<std::vector<size_t>> tiny_batches;
