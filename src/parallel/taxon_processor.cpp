@@ -4,6 +4,7 @@
 #include "core/similarity/skani.hpp"
 #include "core/sketch/minhash.hpp"
 #include "db/embedding_store.hpp"
+#include "db/sketch_store.hpp"
 #include "db/operations.hpp"
 
 #include <algorithm>
@@ -128,7 +129,9 @@ TaxonResult process_taxon(
     db::DBManager& db,
     db::EmbeddingStore* emb_store,
     const std::unordered_map<std::string, GuncQuality>* gunc_scores,
-    bool in_batch_txn) {
+    bool in_batch_txn,
+    db::AsyncDBWriter* async_writer,
+    db::SketchStore* sketch_store) {
     try {
         const int threads = (thread_budget > 0) ? thread_budget : cfg.threads;
         // -----------------------------------------------------------
@@ -164,10 +167,18 @@ TaxonResult process_taxon(
             r.n_representatives = 1;
             r.method = "fixed";
 
-            db::ops::insert_result(db, r);
-            db::ops::insert_genomes_derep(db, taxon.taxonomy, all_accessions,
-                                          {*taxon.forced_representative});
-            db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
+            if (async_writer) {
+                db::TaxonWritePayload p;
+                p.result = r;
+                p.all_accessions = all_accessions;
+                p.representatives = {*taxon.forced_representative};
+                async_writer->push(std::move(p));
+            } else {
+                db::ops::insert_result(db, r);
+                db::ops::insert_genomes_derep(db, taxon.taxonomy, all_accessions,
+                                              {*taxon.forced_representative});
+                db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
+            }
             return r;
         }
 
@@ -184,11 +195,19 @@ TaxonResult process_taxon(
             r.n_representatives = 1;
             r.method = "singleton";
 
-            db::ops::insert_result(db, r);
-            db::ops::insert_genomes_derep(db, taxon.taxonomy,
-                                          {taxon.genomes[0].accession},
-                                          {taxon.genomes[0].accession});
-            db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
+            if (async_writer) {
+                db::TaxonWritePayload p;
+                p.result = r;
+                p.all_accessions = {taxon.genomes[0].accession};
+                p.representatives = {taxon.genomes[0].accession};
+                async_writer->push(std::move(p));
+            } else {
+                db::ops::insert_result(db, r);
+                db::ops::insert_genomes_derep(db, taxon.taxonomy,
+                                              {taxon.genomes[0].accession},
+                                              {taxon.genomes[0].accession});
+                db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
+            }
             return r;
         }
 
@@ -329,14 +348,24 @@ TaxonResult process_taxon(
             div_stats.diversity_max_ani  = div_max;
             div_stats.diversity_n_pairs  = div_pairs;
 
-            auto& conn = db.thread_connection();
-            if (!in_batch_txn) conn.Query("BEGIN TRANSACTION");
-            db::ops::insert_result(db, r);
-            db::ops::insert_genomes_derep(db, taxon.taxonomy, all_accessions,
-                                          representatives, ani_to_rep_map);
-            db::ops::insert_diversity_stats(db, div_stats);
-            db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
-            if (!in_batch_txn) conn.Query("COMMIT");
+            if (async_writer) {
+                db::TaxonWritePayload p;
+                p.result = r;
+                p.diversity_stats = div_stats;
+                p.all_accessions = all_accessions;
+                p.representatives = representatives;
+                p.ani_map = ani_to_rep_map;
+                async_writer->push(std::move(p));
+            } else {
+                auto& conn = db.thread_connection();
+                if (!in_batch_txn) conn.Query("BEGIN TRANSACTION");
+                db::ops::insert_result(db, r);
+                db::ops::insert_genomes_derep(db, taxon.taxonomy, all_accessions,
+                                              representatives, ani_to_rep_map);
+                db::ops::insert_diversity_stats(db, div_stats);
+                db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
+                if (!in_batch_txn) conn.Query("COMMIT");
+            }
             return r;
         }
 
@@ -406,9 +435,15 @@ TaxonResult process_taxon(
 
         GeodesicDerep geodesic(gcfg);
 
-        // Build index with incremental support if embedding store is available
+        // Build index: sketch cache > incremental embedding store > full NFS read
         size_t newly_embedded = 0;
-        if (emb_store && cfg.incremental) {
+        if (sketch_store) {
+            auto accessions = collect_accessions(taxon);
+            geodesic.build_index_from_sketches(accessions, file_paths, *sketch_store,
+                                               quality_scores, cfg.require_sketches,
+                                               emb_store, taxon.taxonomy);
+            newly_embedded = file_paths.size();
+        } else if (emb_store && cfg.incremental) {
             newly_embedded = geodesic.build_index_incremental(
                 file_paths, *emb_store, taxon.taxonomy, quality_scores);
             if (is_verbose()) spdlog::info("[{}] Incremental: {} new embeddings (reused {})",
@@ -722,7 +757,16 @@ TaxonResult process_taxon(
             best = std::max(best, ani);
         }
 
-        {
+        if (async_writer) {
+            db::TaxonWritePayload p;
+            p.result = r;
+            p.diversity_stats = div_stats;
+            p.all_accessions = all_accessions;
+            p.representatives = all_representatives;
+            p.ani_map = ani_to_rep_map;
+            p.contamination = contam_records;
+            async_writer->push(std::move(p));
+        } else {
             auto& conn = db.thread_connection();
             conn.Query("BEGIN TRANSACTION");
             if (!contam_records.empty())
@@ -754,18 +798,28 @@ TaxonResult process_taxon(
 std::vector<TaxonResult> process_tiny_batch(
     const std::vector<const Taxon*>& taxa,
     const Config& cfg,
-    db::DBManager& db) {
+    db::DBManager& db,
+    db::AsyncDBWriter* async_writer,
+    db::SketchStore* sketch_store) {
     std::vector<TaxonResult> results;
     results.reserve(taxa.size());
-    auto& conn = db.thread_connection();
-    conn.Query("BEGIN TRANSACTION");
-    try {
+    if (async_writer) {
+        // Async path: each taxon pushes its payload; no batch transaction needed
         for (const Taxon* t : taxa)
-            results.push_back(process_taxon(*t, cfg, 1, db, nullptr, nullptr, /*in_batch_txn=*/true));
-        conn.Query("COMMIT");
-    } catch (...) {
-        conn.Query("ROLLBACK");
-        throw;
+            results.push_back(process_taxon(*t, cfg, 1, db, nullptr, nullptr,
+                                            /*in_batch_txn=*/false, async_writer, sketch_store));
+    } else {
+        auto& conn = db.thread_connection();
+        conn.Query("BEGIN TRANSACTION");
+        try {
+            for (const Taxon* t : taxa)
+                results.push_back(process_taxon(*t, cfg, 1, db, nullptr, nullptr,
+                                                /*in_batch_txn=*/true, nullptr, sketch_store));
+            conn.Query("COMMIT");
+        } catch (...) {
+            conn.Query("ROLLBACK");
+            throw;
+        }
     }
     return results;
 }

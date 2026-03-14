@@ -346,6 +346,26 @@ int run_pipeline(Config& cfg) {
     }
     db::EmbeddingStore* emb_store_ptr = emb_store.get();
 
+    // Open sketch cache if --sketch-db was provided
+    std::unique_ptr<db::SketchStore> sketch_store;
+    if (cfg.sketch_db.has_value()) {
+        sketch_store = std::make_unique<db::SketchStore>();
+        try {
+            db::SketchStore::Meta meta{
+                .kmer_size   = cfg.kmer_size,
+                .sketch_size = cfg.sketch_size,
+                .syncmer_s   = cfg.syncmer_s,
+            };
+            sketch_store->open(*cfg.sketch_db, meta);
+            spdlog::info("Sketch cache opened: {}", cfg.sketch_db->string());
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to open sketch cache at {}: {} — proceeding without",
+                         cfg.sketch_db->string(), e.what());
+            sketch_store.reset();
+        }
+    }
+    db::SketchStore* sketch_store_ptr = sketch_store.get();
+
     // Adaptive thread budget: acquire as many slots as available (up to desired),
     // minimum 1 to guarantee forward progress.
     int budget_avail = total_budget;
@@ -401,10 +421,12 @@ int run_pipeline(Config& cfg) {
             int acquired = budget_acquire(desired);
             pool.detach_task(
                 [&taxa, i, &cfg, &db, emb_store_ptr, gunc_scores_ptr, async_writer_ptr,
+                 sketch_store_ptr,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release, acquired] {
                     auto result = process_taxon(taxa[i], cfg, acquired, db, emb_store_ptr,
-                                               gunc_scores_ptr, false, async_writer_ptr);
+                                               gunc_scores_ptr, false, async_writer_ptr,
+                                               sketch_store_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         done_queue.push(std::move(result));
@@ -421,10 +443,11 @@ int run_pipeline(Config& cfg) {
             for (size_t i : batch_indices)
                 batch_taxa.push_back(&taxa[i]);
             pool.detach_task(
-                [batch_taxa, &cfg, &db, async_writer_ptr,
+                [batch_taxa, &cfg, &db, async_writer_ptr, sketch_store_ptr,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release] {
-                    auto results = process_tiny_batch(batch_taxa, cfg, db, async_writer_ptr);
+                    auto results = process_tiny_batch(batch_taxa, cfg, db, async_writer_ptr,
+                                                      sketch_store_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         for (auto& r : results)

@@ -14,6 +14,7 @@
 namespace derep {
 
 namespace db { class EmbeddingStore; }  // Forward declaration
+namespace db { class SketchStore; }     // Forward declaration
 
 // Aligned allocator for SIMD-friendly memory layout
 template <typename T, size_t Alignment = 64>
@@ -214,6 +215,18 @@ public:
         const std::string& taxonomy,
         const std::unordered_map<std::string, double>& quality_scores = {});
 
+    // Sketch-cache build: load oph_sig from SketchStore instead of reading NFS files.
+    // Falls back to embed_genome() for cache misses when require_sketches=false.
+    // When require_sketches=true, cache misses are recorded in failed_reads_.
+    void build_index_from_sketches(
+        const std::vector<std::string>& accessions,
+        const std::vector<std::filesystem::path>& genomes,
+        db::SketchStore& sketch_store,
+        const std::unordered_map<std::string, double>& quality_scores = {},
+        bool require_sketches = false,
+        db::EmbeddingStore* emb_store = nullptr,
+        const std::string& taxonomy = "");
+
     // Async variant: uses pre-Nyström float snapshot, streams in batches to cap RAM overhead.
     void save_embeddings_async(db::EmbeddingStore& store, const std::string& taxonomy,
                                std::vector<std::vector<float>>&& vec_snap);
@@ -403,6 +416,10 @@ private:
     // their FASTA files. Used for anchors (Gram matrix) and borderline candidates
     // (Phase 7 verification). Skips indices that already have sig2 or lack a path.
     void materialize_sig2_for_indices(const std::vector<size_t>& indices);
+
+    // Shared tail of build_index / build_index_from_sketches:
+    // SoA copy, Nyström embedding, async save, HNSW build.
+    void finalize_embeddings_(db::EmbeddingStore* emb_store, const std::string& taxonomy);
 
     // Brute-force O(n²) isolation scores for small n (no HNSW needed)
     void compute_isolation_scores_brute();

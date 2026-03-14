@@ -3,6 +3,7 @@
 #include "core/progress.hpp"
 #include "core/logging.hpp"
 #include "db/embedding_store.hpp"
+#include "db/sketch_store.hpp"
 #include "io/gz_reader.hpp"
 #include <hnswlib/hnswlib.h>
 #include <spdlog/spdlog.h>
@@ -1030,6 +1031,13 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
     }
     t_phase("OPH sketch (embed_genome)");
 
+    finalize_embeddings_(emb_store, taxonomy);
+    t_phase("finalize (SoA+Nyström+HNSW)");
+}
+
+void GeodesicDerep::finalize_embeddings_(db::EmbeddingStore* emb_store, const std::string& taxonomy) {
+    const size_t n = embeddings_.size();
+
     // Build canonical ID → row map (identity at this point, but needed after future sorts)
     gid_to_row_.clear();
     gid_to_row_.reserve(n);
@@ -1046,13 +1054,10 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
         std::copy(embeddings_[i].vector.begin(), embeddings_[i].vector.end(), store_.row(i));
     }
 
-    t_phase("SoA copy");
-
     // Nyström spectral embedding (replaces CountSketch placeholder vectors)
     nystrom_applied_ = false;
     if (n > SMALL_N_THRESHOLD) {
         apply_nystrom_embeddings();  // sets nystrom_applied_ = true, updates store_.data
-        t_phase("Nyström embedding (total)");
     }
 
     // Release buffer cache — anchor sig2 materialization is done.
@@ -1076,8 +1081,76 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
         index_->build(embeddings_, cfg_.hnsw_m, cfg_.hnsw_ef_construction, cfg_.hnsw_ef_search, cfg_.threads);
         if (is_verbose()) spdlog::info("GEODESIC: HNSW index built ({} embeddings, M={}, ef={})",
                      embeddings_.size(), cfg_.hnsw_m, cfg_.hnsw_ef_construction);
-        t_phase("HNSW build");
     }
+}
+
+void GeodesicDerep::build_index_from_sketches(
+    const std::vector<std::string>& accessions,
+    const std::vector<std::filesystem::path>& genomes,
+    db::SketchStore& sketch_store,
+    const std::unordered_map<std::string, double>& quality_scores,
+    bool require_sketches,
+    db::EmbeddingStore* emb_store,
+    const std::string& taxonomy)
+{
+    const size_t n = accessions.size();
+    if (is_verbose()) spdlog::info("GEODESIC: loading {} genomes from sketch cache (dim={}, k={})",
+                                   n, cfg_.embedding_dim, cfg_.kmer_size);
+
+    auto records = sketch_store.fetch_ordered(accessions);
+
+    embeddings_.resize(n);
+    store_.resize(n, cfg_.embedding_dim);
+    buf_cache_.assign(n, {});
+    buf_cache_bytes_.store(0);
+
+    std::vector<std::string> path_strs(n);
+    for (size_t i = 0; i < n; ++i) path_strs[i] = genomes[i].string();
+
+    size_t cache_hits = 0, cache_misses = 0;
+
+    for (size_t i = 0; i < n; ++i) {
+        const auto& rec = records[i];
+
+        if (rec.oph_sig.empty()) {
+            ++cache_misses;
+            if (require_sketches) {
+                std::lock_guard lock(failed_reads_mutex_);
+                failed_reads_.emplace_back(genomes[i].string(), "not in sketch cache");
+                embeddings_[i].genome_id = i;
+                embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+                embeddings_[i].quality_score = 0.0f;
+                embeddings_[i].path = genomes[i];
+            } else {
+                embeddings_[i] = embed_genome(genomes[i], i);
+            }
+        } else {
+            ++cache_hits;
+            embeddings_[i].genome_id = i;
+            embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+            embeddings_[i].oph_sig  = rec.oph_sig;
+            embeddings_[i].oph_sig2 = rec.oph_sig2;  // empty = lazy sig2 not yet computed
+            embeddings_[i].n_real_bins  = rec.n_real_bins;
+            embeddings_[i].genome_size  = rec.genome_length;
+            embeddings_[i].path         = genomes[i];
+            embeddings_[i].isolation_score = 0.0f;
+            embeddings_[i].quality_score   = 50.0f;
+            // real_bins_mask not stored in SketchStore; containment arm falls back to Jaccard-only
+        }
+
+        auto it = quality_scores.find(path_strs[i]);
+        if (it != quality_scores.end())
+            embeddings_[i].quality_score = static_cast<float>(it->second);
+        else if (embeddings_[i].quality_score != 0.0f)
+            embeddings_[i].quality_score = 50.0f;
+    }
+
+    if (is_verbose()) spdlog::info("GEODESIC: sketch cache: {} hits, {} {} from NFS",
+                                   cache_hits, cache_misses,
+                                   require_sketches ? "misses recorded as failures (not re-read)"
+                                                    : "misses re-read");
+
+    finalize_embeddings_(emb_store, taxonomy);
 }
 
 GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
@@ -1893,13 +1966,11 @@ void GeodesicDerep::apply_nystrom_embeddings() {
         for (size_t i = 0; i < n; ++i) {
             int32_t ap = anchor_pos[i];
             if (ap >= 0) {
-                // Anchor: k_G is already degree-normalized (read from K after Step 2+3).
-                // Do NOT re-normalize below.
                 k_G = K.row(ap).transpose();
             } else {
-                // Non-anchor: anchor slab + AVX2 Jaccard (see OMP path for rationale).
-                if (embeddings_[i].oph_sig.empty()) continue;  // genome failed to sketch
+                if (embeddings_[i].oph_sig.empty()) continue;
                 const uint16_t* sig_i_ptr = embeddings_[i].oph_sig.data();
+
                 for (size_t a = 0; a < n_anchors; ++a) {
                     float jac;
                     if (!anchor_slab.empty()) {
@@ -1913,8 +1984,6 @@ void GeodesicDerep::apply_nystrom_embeddings() {
                     k_G(static_cast<int>(a)) = jac;
                 }
             }
-            // Apply matching degree normalization only for non-anchors.
-            // Anchor k_G is read from K which is already degree-normalized.
             if (cfg_.nystrom_degree_normalize && ap < 0) {
                 float d_i = k_G.sum();
                 if (d_i < 1e-10f) d_i = 1.0f;
