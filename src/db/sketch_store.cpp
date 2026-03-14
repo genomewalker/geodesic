@@ -30,6 +30,21 @@ static duckdb::Value sig_to_blob(const std::vector<uint16_t>& sig) {
     return duckdb::Value::BLOB_RAW(bytes);
 }
 
+static std::vector<uint64_t> blob_to_mask(const duckdb::Value& v) {
+    if (v.IsNull()) return {};
+    auto blob = v.GetValueUnsafe<duckdb::string_t>();
+    const auto* ptr = reinterpret_cast<const uint64_t*>(blob.GetDataUnsafe());
+    size_t n = blob.GetSize() / sizeof(uint64_t);
+    return {ptr, ptr + n};
+}
+
+static duckdb::Value mask_to_blob(const std::vector<uint64_t>& mask) {
+    if (mask.empty()) return duckdb::Value(duckdb::LogicalType::BLOB);
+    std::string bytes(reinterpret_cast<const char*>(mask.data()),
+                      mask.size() * sizeof(uint64_t));
+    return duckdb::Value::BLOB_RAW(bytes);
+}
+
 // ---------------------------------------------------------------------------
 // SketchStore
 // ---------------------------------------------------------------------------
@@ -80,15 +95,21 @@ void SketchStore::create_schema() {
 
     auto r1 = conn->Query(R"(
         CREATE TABLE IF NOT EXISTS sketches (
-            accession     VARCHAR PRIMARY KEY,
-            taxonomy      VARCHAR,
-            oph_sig       BLOB    NOT NULL,
-            oph_sig2      BLOB,
-            n_real_bins   UINTEGER NOT NULL,
-            genome_length UBIGINT  NOT NULL
+            accession      VARCHAR PRIMARY KEY,
+            taxonomy       VARCHAR,
+            oph_sig        BLOB     NOT NULL,
+            oph_sig2       BLOB,
+            real_bins_mask BLOB,
+            n_real_bins    UINTEGER NOT NULL,
+            genome_length  UBIGINT  NOT NULL
         )
     )");
     check(r1, "create sketches");
+
+    // Migration: add real_bins_mask to pre-v2 stores (existing rows get NULL → no containment arm)
+    auto r1m = conn->Query(
+        "ALTER TABLE sketches ADD COLUMN IF NOT EXISTS real_bins_mask BLOB");
+    (void)r1m;  // ignore error if column already exists
 
     auto r2 = conn->Query(
         "CREATE INDEX IF NOT EXISTS idx_sketches_taxonomy ON sketches(taxonomy)");
@@ -153,10 +174,30 @@ void SketchStore::validate_or_init_meta(const Meta& expected) {
         }
     };
 
+    auto check_uint64 = [&](const std::string& key, uint64_t expected_val) {
+        std::string val = get_meta(key);
+        if (val.empty() || std::stoull(val) != expected_val) {
+            throw std::runtime_error(
+                "SketchStore meta mismatch for '" + key +
+                "': stored=" + (val.empty() ? "<missing>" : val) +
+                " expected=" + std::to_string(expected_val) +
+                ". Seeds changed — use a different --sketch-db path or rebuild the cache.");
+        }
+    };
+
+    // Migrate v1 → v2: real_bins_mask column added (existing rows get NULL)
+    std::string stored_fv = get_meta("format_version");
+    if (!stored_fv.empty() && std::stoi(stored_fv) == 1) {
+        spdlog::info("SketchStore: migrating format v1 → v2 (adding real_bins_mask column)");
+        set_meta("format_version", "2");
+    }
+
     check_int("format_version", expected.format_version);
     check_int("kmer_size",      expected.kmer_size);
     check_int("sketch_size",    expected.sketch_size);
     check_int("syncmer_s",      expected.syncmer_s);
+    check_uint64("seed1",       expected.seed1);
+    check_uint64("seed2",       expected.seed2);
 }
 
 std::unordered_set<std::string> SketchStore::load_completed_accessions() {
@@ -204,7 +245,8 @@ void SketchStore::insert_batch(const std::vector<SketchRecord>& batch) {
             app.Append(duckdb::Value(rec.accession));
             app.Append(rec.taxonomy.empty() ? duckdb::Value() : duckdb::Value(rec.taxonomy));
             app.Append(sig_to_blob(rec.oph_sig));
-            app.Append(sig_to_blob(rec.oph_sig2));  // NULL if empty
+            app.Append(sig_to_blob(rec.oph_sig2));       // NULL if empty
+            app.Append(mask_to_blob(rec.real_bins_mask)); // NULL if empty
             app.Append(static_cast<uint32_t>(rec.n_real_bins));
             app.Append(static_cast<uint64_t>(rec.genome_length));
             app.EndRow();
@@ -293,7 +335,7 @@ SketchStore::fetch_ordered(const std::vector<std::string>& accessions) {
 
     auto res = conn.Query(R"(
         SELECT a.ord, s.accession, s.taxonomy,
-               s.oph_sig, s.oph_sig2, s.n_real_bins, s.genome_length
+               s.oph_sig, s.oph_sig2, s.real_bins_mask, s.n_real_bins, s.genome_length
         FROM _fetch_acc a
         LEFT JOIN sketches s USING (accession)
         ORDER BY a.ord
@@ -315,10 +357,11 @@ SketchStore::fetch_ordered(const std::vector<std::string>& accessions) {
             if (!chunk->GetValue(1, row).IsNull()) {
                 if (!chunk->GetValue(2, row).IsNull())
                     rec.taxonomy = chunk->GetValue(2, row).GetValue<std::string>();
-                rec.oph_sig     = blob_to_sig(chunk->GetValue(3, row));
-                rec.oph_sig2    = blob_to_sig(chunk->GetValue(4, row));
-                rec.n_real_bins = chunk->GetValue(5, row).GetValue<uint32_t>();
-                rec.genome_length = chunk->GetValue(6, row).GetValue<uint64_t>();
+                rec.oph_sig        = blob_to_sig(chunk->GetValue(3, row));
+                rec.oph_sig2       = blob_to_sig(chunk->GetValue(4, row));
+                rec.real_bins_mask = blob_to_mask(chunk->GetValue(5, row));
+                rec.n_real_bins    = chunk->GetValue(6, row).GetValue<uint32_t>();
+                rec.genome_length  = chunk->GetValue(7, row).GetValue<uint64_t>();
             }
         }
     }

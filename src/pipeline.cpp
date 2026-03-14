@@ -689,8 +689,9 @@ int run_sketch(Config& cfg) {
                     rec.oph_sig.resize(m);
                     for (int b = 0; b < m; ++b)
                         rec.oph_sig[b] = static_cast<uint16_t>(oph.signature[b]);
-                    rec.n_real_bins   = static_cast<uint32_t>(oph.n_real_bins);
-                    rec.genome_length = static_cast<uint64_t>(oph.genome_length);
+                    rec.real_bins_mask = std::move(oph.real_bins_bitmask);
+                    rec.n_real_bins    = static_cast<uint32_t>(oph.n_real_bins);
+                    rec.genome_length  = static_cast<uint64_t>(oph.genome_length);
                 } catch (const std::exception& e) {
                     errors[ci] = e.what();
                 }

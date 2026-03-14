@@ -1129,14 +1129,14 @@ void GeodesicDerep::build_index_from_sketches(
             ++cache_hits;
             embeddings_[i].genome_id = i;
             embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
-            embeddings_[i].oph_sig  = rec.oph_sig;
-            embeddings_[i].oph_sig2 = rec.oph_sig2;  // empty = lazy sig2 not yet computed
-            embeddings_[i].n_real_bins  = rec.n_real_bins;
-            embeddings_[i].genome_size  = rec.genome_length;
-            embeddings_[i].path         = genomes[i];
+            embeddings_[i].oph_sig        = rec.oph_sig;
+            embeddings_[i].oph_sig2       = rec.oph_sig2;  // empty = lazy sig2 not yet computed
+            embeddings_[i].real_bins_mask = rec.real_bins_mask;  // enables containment arm
+            embeddings_[i].n_real_bins    = rec.n_real_bins;
+            embeddings_[i].genome_size    = rec.genome_length;
+            embeddings_[i].path           = genomes[i];
             embeddings_[i].isolation_score = 0.0f;
             embeddings_[i].quality_score   = 50.0f;
-            // real_bins_mask not stored in SketchStore; containment arm falls back to Jaccard-only
         }
 
         auto it = quality_scores.find(path_strs[i]);

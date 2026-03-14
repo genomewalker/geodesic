@@ -20,7 +20,7 @@ public:
     // Parameters that identify the sketch format.
     // Opening an existing store with mismatched params throws.
     struct Meta {
-        int format_version = 1;
+        int format_version = 2;
         int kmer_size = 21;
         int sketch_size = 10000;
         int syncmer_s = 0;
@@ -37,8 +37,9 @@ public:
     struct SketchRecord {
         std::string accession;
         std::string taxonomy;
-        std::vector<uint16_t> oph_sig;   // empty = not present
-        std::vector<uint16_t> oph_sig2;  // empty = not materialized
+        std::vector<uint16_t> oph_sig;        // empty = not present
+        std::vector<uint16_t> oph_sig2;       // empty = not materialized
+        std::vector<uint64_t> real_bins_mask; // bitmask: bit t=1 iff bin t has a real k-mer
         uint32_t n_real_bins = 0;
         uint64_t genome_length = 0;
     };
