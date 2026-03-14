@@ -2,10 +2,14 @@
 #include "parallel/taxon_processor.hpp"
 #include "core/logging.hpp"
 #include "core/types.hpp"
+#include "core/sketch/minhash.hpp"
+#include "db/async_writer.hpp"
 #include "db/db_manager.hpp"
 #include "db/embedding_store.hpp"
 #include "db/operations.hpp"
 #include "db/schema.hpp"
+#include "db/sketch_store.hpp"
+#include "io/gz_reader.hpp"
 #include "io/report_writer.hpp"
 #include "io/results_writer.hpp"
 #include "io/tsv_reader.hpp"
@@ -325,6 +329,11 @@ int run_pipeline(Config& cfg) {
         }
     }
 
+    // Async DB writer: background thread batches and flushes taxon results.
+    // Workers push TaxonWritePayload and return immediately; writer handles all DB I/O.
+    db::AsyncDBWriter async_writer(db);
+    db::AsyncDBWriter* async_writer_ptr = &async_writer;
+
     // Create shared embedding store for incremental updates
     std::unique_ptr<db::EmbeddingStore> emb_store;
     if (cfg.embedding_db.has_value()) {
@@ -391,10 +400,11 @@ int run_pipeline(Config& cfg) {
             int desired  = taxon_threads[i];
             int acquired = budget_acquire(desired);
             pool.detach_task(
-                [&taxa, i, &cfg, &db, emb_store_ptr, gunc_scores_ptr,
+                [&taxa, i, &cfg, &db, emb_store_ptr, gunc_scores_ptr, async_writer_ptr,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release, acquired] {
-                    auto result = process_taxon(taxa[i], cfg, acquired, db, emb_store_ptr, gunc_scores_ptr);
+                    auto result = process_taxon(taxa[i], cfg, acquired, db, emb_store_ptr,
+                                               gunc_scores_ptr, false, async_writer_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         done_queue.push(std::move(result));
@@ -411,10 +421,10 @@ int run_pipeline(Config& cfg) {
             for (size_t i : batch_indices)
                 batch_taxa.push_back(&taxa[i]);
             pool.detach_task(
-                [batch_taxa, &cfg, &db,
+                [batch_taxa, &cfg, &db, async_writer_ptr,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release] {
-                    auto results = process_tiny_batch(batch_taxa, cfg, db);
+                    auto results = process_tiny_batch(batch_taxa, cfg, db, async_writer_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         for (auto& r : results)
@@ -512,6 +522,12 @@ int run_pipeline(Config& cfg) {
 
     scheduler.join();
 
+    // Flush all pending DB writes before writing results files
+    spdlog::info("Flushing async DB writer ({} pending)...", async_writer.pending());
+    async_writer.shutdown();
+    spdlog::info("Async writer flushed ({} taxa, {} rows written)",
+                 async_writer.total_taxa_written(), async_writer.total_rows_written());
+
     // 11. Summary and output
     spdlog::info("Done: {} success, {} failed, {} singleton, {} fixed, {} skipped",
                  success, failed, singleton, fixed, skipped);
@@ -533,6 +549,148 @@ int run_pipeline(Config& cfg) {
     if (ec) spdlog::warn("Failed to remove temp dir {}: {}", temp_dir.string(), ec.message());
 
     return failed > 0 ? 1 : 0;
+}
+
+// ============================================================================
+// run_sketch: pre-compute OPH sketches for all genomes and persist to DuckDB.
+// Processes genomes in chunks: parallel I/O+OPH per chunk, then batch write.
+// Chunk size bounds peak memory to CHUNK × ~20 KB = ~1 GB.
+// ============================================================================
+int run_sketch(Config& cfg) {
+    // 1. Setup logging (console-only for sketch subcommand)
+    {
+        int verbosity = cfg.verbosity;
+        auto sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        sink->set_level(verbosity == 0 ? spdlog::level::warn :
+                        verbosity >= 2 ? spdlog::level::debug :
+                                        spdlog::level::info);
+        auto logger = std::make_shared<spdlog::logger>("geodesic", sink);
+        logger->set_level(spdlog::level::info);
+        logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
+        spdlog::set_default_logger(logger);
+        spdlog::flush_on(spdlog::level::info);
+    }
+
+    spdlog::info("geodesic sketch: kmer={} sketch={} syncmer={} threads={}",
+                 cfg.kmer_size, cfg.sketch_size, cfg.syncmer_s, cfg.threads);
+
+    // 2. Parse TSV
+    spdlog::info("Parsing taxonomy file: {}", cfg.tax_file.string());
+    auto rows = read_genomes_tsv(cfg.tax_file);
+    spdlog::info("{} genomes in taxonomy file", rows.size());
+
+    // 3. Open SketchStore
+    db::SketchStore store;
+    db::SketchStore::Meta meta{
+        .kmer_size   = cfg.kmer_size,
+        .sketch_size = cfg.sketch_size,
+        .syncmer_s   = cfg.syncmer_s,
+    };
+    store.open(*cfg.sketch_db, meta);
+
+    // 4. Load already-completed and failed accessions
+    auto completed = store.load_completed_accessions();
+    auto failed    = store.load_failed_accessions();
+
+    // Build work list: skip completed; skip failed (can add --retry flag later)
+    struct WorkItem { std::string accession; std::string taxonomy; std::string path; };
+    std::vector<WorkItem> work;
+    work.reserve(rows.size());
+    for (const auto& row : rows) {
+        if (completed.count(row.accession) || failed.count(row.accession)) continue;
+        work.push_back({row.accession, row.taxonomy, row.file_path.string()});
+    }
+    spdlog::info("{} genomes to sketch ({} already done, {} previously failed)",
+                 work.size(), completed.size(), failed.size());
+
+    if (work.empty()) {
+        spdlog::info("All genomes already sketched. Done.");
+        store.checkpoint();
+        return 0;
+    }
+
+    // 5. Chunk-based parallel I/O+OPH → batch write
+    // Each chunk: submit all tasks, wait, then write results.
+    // Bounds peak memory to CHUNK × ~20 KB = ~1 GB.
+    const size_t CHUNK = 50000;
+    const size_t total = work.size();
+
+    MinHasher::Config hasher_cfg{
+        .kmer_size   = cfg.kmer_size,
+        .sketch_size = cfg.sketch_size,
+        .syncmer_s   = cfg.syncmer_s,
+    };
+
+    BS::thread_pool pool(cfg.threads);
+    size_t n_done = 0;
+    size_t n_failed = 0;
+
+    for (size_t chunk_start = 0; chunk_start < total; chunk_start += CHUNK) {
+        const size_t chunk_end = std::min(chunk_start + CHUNK, total);
+        const size_t chunk_sz  = chunk_end - chunk_start;
+
+        // Per-chunk result storage (pre-allocated, indexed by position in chunk)
+        std::vector<db::SketchStore::SketchRecord> results(chunk_sz);
+        std::vector<std::string> errors(chunk_sz);
+
+        // Submit one task per genome in the chunk
+        for (size_t ci = 0; ci < chunk_sz; ++ci) {
+            pool.detach_task([&, ci] {
+                const auto& item = work[chunk_start + ci];
+                auto& rec = results[ci];
+                rec.accession = item.accession;
+                rec.taxonomy  = item.taxonomy;
+                try {
+                    auto buf = GzReader::decompress_file(item.path);
+                    // Thread-local hasher: constructed once per thread
+                    static thread_local MinHasher tl_hasher(hasher_cfg);
+                    auto oph = tl_hasher.sketch_oph_with_positions_from_buffer(
+                        buf.data(), buf.size(), cfg.sketch_size);
+                    const int m = cfg.sketch_size;
+                    rec.oph_sig.resize(m);
+                    for (int b = 0; b < m; ++b)
+                        rec.oph_sig[b] = static_cast<uint16_t>(oph.signature[b]);
+                    rec.n_real_bins   = static_cast<uint32_t>(oph.n_real_bins);
+                    rec.genome_length = static_cast<uint64_t>(oph.genome_length);
+                } catch (const std::exception& e) {
+                    errors[ci] = e.what();
+                }
+            });
+        }
+        pool.wait();
+
+        // Partition results and write
+        std::vector<db::SketchStore::SketchRecord> write_batch;
+        std::vector<db::SketchStore::SketchFailure> fail_batch;
+        write_batch.reserve(chunk_sz);
+
+        for (size_t ci = 0; ci < chunk_sz; ++ci) {
+            if (!errors[ci].empty()) {
+                db::SketchStore::SketchFailure f;
+                f.accession     = results[ci].accession;
+                f.taxonomy      = results[ci].taxonomy;
+                f.file_path     = work[chunk_start + ci].path;
+                f.error_message = errors[ci];
+                fail_batch.push_back(std::move(f));
+                ++n_failed;
+            } else {
+                write_batch.push_back(std::move(results[ci]));
+            }
+        }
+
+        if (!write_batch.empty()) store.insert_batch(write_batch);
+        if (!fail_batch.empty()) store.record_failures(fail_batch);
+        n_done += write_batch.size();
+
+        spdlog::info("Sketch progress: {}/{} ({:.1f}%) | {} failed",
+                     n_done + n_failed, total,
+                     100.0 * (n_done + n_failed) / total,
+                     n_failed);
+    }
+
+    spdlog::info("Sketch complete: {} succeeded, {} failed", n_done, n_failed);
+    store.checkpoint();
+    return n_failed > 0 ? 1 : 0;
 }
 
 } // namespace derep

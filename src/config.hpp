@@ -5,7 +5,11 @@
 
 namespace derep {
 
+enum class Command { Derep, Report, Sketch };
+
 struct Config {
+    Command command = Command::Derep;
+
     // I/O
     std::filesystem::path tax_file;
     std::filesystem::path db_path{"geodesic.db"};
@@ -51,11 +55,15 @@ struct Config {
     std::optional<std::filesystem::path> embedding_db;
     bool incremental = false;
 
+    // Sketch cache (DuckDB on /scratch)
+    std::optional<std::filesystem::path> sketch_db;
+    bool require_sketches = false;  // fail hard if any genome missing from sketch cache
+
     // Flags
     bool copy_reps = false;
     bool debug = false;
     bool keep_intermediates = false;
-    bool report_only = false;
+    bool report_only = false;  // kept for backward compat; prefer command == Report
 
     // Logging verbosity: 0=quiet, 1=normal (default), 2=verbose, 3=debug
     int verbosity = 1;

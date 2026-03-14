@@ -64,7 +64,6 @@ Config parse_args(int argc, char** argv) {
     derep->add_option("-z,--z-threshold", cfg.z_threshold, "Z-score threshold for filtering")
         ->default_val(2.0);
 
-
     derep->add_option("--ani-threshold", cfg.ani_threshold, "ANI threshold for clustering")
         ->default_val(95.0);
 
@@ -94,11 +93,15 @@ Config parse_args(int argc, char** argv) {
     derep->add_flag("--no-nystrom-degree-normalize{false},--nystrom-degree-normalize{true}",
         cfg.nystrom_degree_normalize,
         "Symmetric Laplacian normalization of Nyström Gram matrix (default: on)");
-
     derep->add_option("--embedding-db", cfg.embedding_db,
         "Path to persistent embedding store (DuckDB). Enables incremental updates.");
     derep->add_flag("--incremental", cfg.incremental,
         "Enable incremental mode: reuse existing embeddings, only embed new genomes");
+
+    derep->add_option("--sketch-db", cfg.sketch_db,
+        "Path to sketch cache DuckDB (built by 'geodesic sketch'). Skips NFS re-reads.");
+    derep->add_flag("--require-sketches", cfg.require_sketches,
+        "Fail if any genome is missing from sketch cache (no NFS fallback)");
 
     derep->add_flag("--copy-reps", cfg.copy_reps, "Copy representative genomes to output directory");
     derep->add_flag("-v,--verbose", [&cfg](int64_t) { cfg.verbosity = 2; },
@@ -107,6 +110,37 @@ Config parse_args(int argc, char** argv) {
         "Quiet output (only errors and summary)");
     derep->add_flag("--debug", cfg.debug, "Enable debug logging (sets verbosity=3)");
     derep->add_flag("--keep-intermediates", cfg.keep_intermediates, "Keep intermediate files");
+
+    // ── sketch subcommand ───────────────────────────────────────────────────
+    auto* sketch_cmd = app.add_subcommand("sketch",
+        "Pre-compute OPH sketches for all genomes and cache to DuckDB on /scratch");
+
+    sketch_cmd->add_option("-t,--tax-file", cfg.tax_file, "Taxonomy file (TSV: accession, taxonomy, file_path)")
+        ->required()
+        ->check(CLI::ExistingFile);
+
+    sketch_cmd->add_option("-s,--sketch-db", cfg.sketch_db,
+        "Output sketch cache DuckDB path (on fast local storage, e.g. /scratch/...)")
+        ->required();
+
+    sketch_cmd->add_option("--threads", cfg.threads, "Total CPU threads to use")
+        ->default_val(1);
+
+    sketch_cmd->add_option("--io-threads", cfg.io_threads,
+        "Max concurrent NFS file readers (0=auto)")
+        ->default_val(0);
+
+    sketch_cmd->add_option("--geodesic-kmer-size", cfg.kmer_size,
+        "k-mer size (must match derep run)")->default_val(21);
+    sketch_cmd->add_option("--geodesic-sketch-size", cfg.sketch_size,
+        "Sketch size / OPH bins (must match derep run)")->default_val(10000);
+    sketch_cmd->add_option("--geodesic-syncmer-s", cfg.syncmer_s,
+        "Open-syncmer submer length (0=disabled, must match derep run)")->default_val(0);
+
+    sketch_cmd->add_flag("-v,--verbose", [&cfg](int64_t) { cfg.verbosity = 2; },
+        "Verbose output");
+    sketch_cmd->add_flag("-q,--quiet", [&cfg](int64_t) { cfg.verbosity = 0; },
+        "Quiet output");
 
     // ── report subcommand ───────────────────────────────────────────────────
     auto* report_cmd = app.add_subcommand("report", "Generate HTML report from existing database");
@@ -127,14 +161,21 @@ Config parse_args(int argc, char** argv) {
         std::exit(app.exit(e));
     }
 
-    cfg.report_only = report_cmd->parsed();
+    if (report_cmd->parsed()) {
+        cfg.command = Command::Report;
+        cfg.report_only = true;
+    } else if (sketch_cmd->parsed()) {
+        cfg.command = Command::Sketch;
+    } else {
+        cfg.command = Command::Derep;
+    }
 
     auto now = std::time(nullptr);
     char buf[64];
     std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", std::localtime(&now));
     cfg.timestamp = buf;
 
-    if (!cfg.report_only) {
+    if (cfg.command == Command::Derep) {
         if (cfg.copy_reps && !cfg.out_dir)
             throw std::runtime_error("--copy-reps requires --out-dir");
         if (cfg.out_dir && !cfg.copy_reps)
