@@ -238,36 +238,129 @@ TaxonResult process_taxon(
                 .seed        = 42
             });
 
-            // Sketch all n genomes with OPH
-            std::vector<std::vector<uint32_t>> sigs(n);
-            for (size_t i = 0; i < n; ++i)
-                sigs[i] = hasher.sketch_oph(file_paths[i], cfg.sketch_size).signature;
+            // Sketch all n genomes.
+            // If sketch_store is available, load cached uint16_t sigs; fall back to NFS.
+            // If no sketch_store, sketch from NFS directly.
+            // sketch_oph_with_positions tracks real_bins_mask for containment (MAG support).
+            std::vector<std::vector<uint16_t>> sigs(n);
+            std::vector<std::vector<uint64_t>> real_masks(n);
+            std::vector<uint32_t> n_real_vec(n, 0);
+            std::unordered_set<size_t> failed_indices;
 
-            // Compute all pairwise Jaccard
+            auto sketch_from_nfs = [&](size_t i) {
+                try {
+                    auto oph = hasher.sketch_oph_with_positions(file_paths[i], cfg.sketch_size);
+                    sigs[i].resize(oph.signature.size());
+                    for (size_t b = 0; b < oph.signature.size(); ++b)
+                        sigs[i][b] = static_cast<uint16_t>(oph.signature[b]);
+                    real_masks[i] = std::move(oph.real_bins_bitmask);
+                    n_real_vec[i] = static_cast<uint32_t>(oph.n_real_bins);
+                } catch (...) {
+                    failed_indices.insert(i);
+                }
+            };
+
+            if (sketch_store) {
+                auto recs = sketch_store->fetch_ordered(all_accessions);
+                for (size_t i = 0; i < n; ++i) {
+                    if (!recs[i].oph_sig.empty()) {
+                        sigs[i]       = recs[i].oph_sig;
+                        real_masks[i] = recs[i].real_bins_mask;
+                        n_real_vec[i] = recs[i].n_real_bins;
+                    } else {
+                        sketch_from_nfs(i);
+                    }
+                }
+            } else {
+                for (size_t i = 0; i < n; ++i)
+                    sketch_from_nfs(i);
+            }
+
+            // Record permanently failed genome reads (NFS errors, corrupt files).
+            for (size_t i : failed_indices) {
+                auto it = path_to_accession.find(file_paths[i].string());
+                const std::string acc = (it != path_to_accession.end())
+                    ? it->second : file_paths[i].string();
+                auto& conn = db.thread_connection();
+                auto stmt = conn.Prepare(
+                    "INSERT OR IGNORE INTO jobs_failed (accession, taxonomy, file, reason) "
+                    "VALUES ($1, $2, $3, $4)");
+                stmt->Execute(acc, taxon.taxonomy, file_paths[i].string(),
+                              std::string("sketch_oph failed"));
+            }
+
+            // GUNC exclusion: genomes failing GUNC are excluded from rep selection.
+            std::unordered_set<size_t> excluded_indices = failed_indices;
+            std::vector<db::ops::ContaminationRecord> gunc_contam_records;
+            if (gunc_scores && !gunc_scores->empty()) {
+                for (size_t i = 0; i < n; ++i) {
+                    auto acc = canonical_accession(all_accessions[i]);
+                    auto git = gunc_scores->find(acc);
+                    if (git == gunc_scores->end() || git->second.pass_gunc) continue;
+                    excluded_indices.insert(i);
+                    if (is_verbose())
+                        spdlog::warn("[{}] GUNC fail: {} (CSS={:.3f})", taxon.taxonomy, acc,
+                                     git->second.clade_separation_score);
+                    db::ops::ContaminationRecord rec;
+                    rec.accession       = acc;
+                    rec.kmer_div_zscore = static_cast<double>(git->second.clade_separation_score);
+                    rec.nn_outlier      = false;
+                    gunc_contam_records.push_back(std::move(rec));
+                }
+            }
+
+            // Coverage score: Jaccard for WGS; containment for MAGs (n_real_bins < sketch/2).
+            // Containment = matches in query's real bins / n_real_bins_query.
+            auto coverage_score = [&](size_t query, size_t target) -> double {
+                if (sigs[query].empty() || sigs[target].empty()) return 0.0;
+                const uint32_t nr = n_real_vec[query];
+                const bool is_mag = (nr > 0 && nr < static_cast<uint32_t>(cfg.sketch_size) / 2);
+                if (is_mag && !real_masks[query].empty()) {
+                    const auto& qs = sigs[query];
+                    const auto& ts = sigs[target];
+                    const auto& mask = real_masks[query];
+                    size_t m = std::min(qs.size(), ts.size());
+                    size_t matches = 0;
+                    for (size_t t = 0; t < m; ++t) {
+                        size_t word = t / 64, bit = t % 64;
+                        if (word < mask.size() && (mask[word] >> bit) & 1ULL)
+                            if (qs[t] == ts[t]) ++matches;
+                    }
+                    return static_cast<double>(matches) / static_cast<double>(nr);
+                }
+                return GeodesicDerep::refine_jaccard(sigs[query], sigs[target]);
+            };
+
+            // Compute all pairwise Jaccard (between non-failed genomes)
             std::vector<std::vector<double>> jac(n, std::vector<double>(n, 1.0));
-            for (size_t i = 0; i < n; ++i)
-                for (size_t j = i + 1; j < n; ++j)
+            for (size_t i = 0; i < n; ++i) {
+                if (failed_indices.count(i)) continue;
+                for (size_t j = i + 1; j < n; ++j) {
+                    if (failed_indices.count(j)) { jac[i][j] = jac[j][i] = 0.0; continue; }
                     jac[i][j] = jac[j][i] = GeodesicDerep::refine_jaccard(sigs[i], sigs[j]);
+                }
+            }
 
             // Convert ANI threshold to Jaccard threshold
             double ani_threshold_frac = cfg.ani_threshold / 100.0;
             double q = std::pow(ani_threshold_frac, cfg.kmer_size);
             double jaccard_threshold = q / (2.0 - q);
 
-            // Sort genome indices by quality descending
+            // Sort genome indices by quality descending (excluded genomes sorted last)
             std::vector<size_t> order(n);
             std::iota(order.begin(), order.end(), 0);
             std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
                 return taxon.genomes[a].quality_score() > taxon.genomes[b].quality_score();
             });
 
-            // Greedy quality-sorted cover
+            // Greedy quality-sorted cover: excluded genomes cannot be reps
             std::vector<size_t> rep_indices;
             std::vector<bool> is_rep(n, false);
             for (size_t idx : order) {
+                if (excluded_indices.count(idx)) continue;  // never a rep
                 bool covered = false;
                 for (size_t ri : rep_indices) {
-                    if (jac[idx][ri] >= jaccard_threshold) { covered = true; break; }
+                    if (coverage_score(idx, ri) >= jaccard_threshold) { covered = true; break; }
                 }
                 if (!covered) {
                     rep_indices.push_back(idx);
@@ -281,14 +374,12 @@ TaxonResult process_taxon(
             for (size_t ri : rep_indices)
                 representatives.push_back(all_accessions[ri]);
 
-            // Build ani_to_rep_map (non-reps) and coverage stats in a single pass
+            // Build ani_to_rep_map and coverage stats; use Jaccard for ANI estimation
             std::unordered_map<std::string, double> ani_to_rep_map;
             std::vector<double> genome_to_rep_ani(n);
             for (size_t i = 0; i < n; ++i) {
-                if (is_rep[i]) {
-                    genome_to_rep_ani[i] = 100.0;
-                    continue;
-                }
+                if (is_rep[i]) { genome_to_rep_ani[i] = 100.0; continue; }
+                if (failed_indices.count(i)) { genome_to_rep_ani[i] = 0.0; continue; }
                 double best_j = 0.0;
                 for (size_t ri : rep_indices)
                     best_j = std::max(best_j, jac[i][ri]);
@@ -296,13 +387,16 @@ TaxonResult process_taxon(
                 ani_to_rep_map[all_accessions[i]] = ani;
                 genome_to_rep_ani[i] = ani;
             }
+            // Coverage stats over non-failed genomes
+            size_t n_valid = n - failed_indices.size();
             double cov_sum = 0.0, cov_min = 100.0, cov_max = 0.0;
-            for (double v : genome_to_rep_ani) {
-                cov_sum += v;
-                cov_min = std::min(cov_min, v);
-                cov_max = std::max(cov_max, v);
+            for (size_t i = 0; i < n; ++i) {
+                if (failed_indices.count(i)) continue;
+                cov_sum += genome_to_rep_ani[i];
+                cov_min = std::min(cov_min, genome_to_rep_ani[i]);
+                cov_max = std::max(cov_max, genome_to_rep_ani[i]);
             }
-            double cov_mean = cov_sum / static_cast<double>(n);
+            double cov_mean = (n_valid > 0) ? cov_sum / static_cast<double>(n_valid) : 0.0;
 
             // Diversity stats: pairwise ANI among reps only
             double div_sum = 0.0, div_min = 100.0, div_max = 0.0;
@@ -323,9 +417,15 @@ TaxonResult process_taxon(
             double runtime = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - t0).count();
 
-            if (is_verbose() || (!is_quiet() && n >= 10))
-                spdlog::info("[{}] {} → {} reps ({:.2f}s) [tiny]", taxon.taxonomy,
-                             n, representatives.size(), runtime);
+            const size_t n_gunc = gunc_contam_records.size();
+            if (is_verbose() || (!is_quiet() && n >= 10)) {
+                if (n_gunc > 0)
+                    spdlog::info("[{}] {} → {} reps, {} GUNC ({:.2f}s) [tiny]",
+                                 taxon.taxonomy, n, representatives.size(), n_gunc, runtime);
+                else
+                    spdlog::info("[{}] {} → {} reps ({:.2f}s) [tiny]",
+                                 taxon.taxonomy, n, representatives.size(), runtime);
+            }
 
             TaxonResult r;
             r.taxonomy          = taxon.taxonomy;
@@ -335,32 +435,36 @@ TaxonResult process_taxon(
             r.method            = "geodesic-tiny";
 
             TaxonDiversityStats div_stats;
-            div_stats.taxonomy          = taxon.taxonomy;
-            div_stats.method            = "geodesic-tiny";
-            div_stats.n_genomes         = static_cast<int>(n);
-            div_stats.n_representatives = static_cast<int>(representatives.size());
-            div_stats.reduction_ratio   = 1.0 - static_cast<double>(representatives.size()) /
-                                                static_cast<double>(n);
-            div_stats.runtime_seconds   = runtime;
-            div_stats.coverage_mean_ani = cov_mean;
-            div_stats.coverage_min_ani  = cov_min;
-            div_stats.coverage_max_ani  = cov_max;
+            div_stats.taxonomy           = taxon.taxonomy;
+            div_stats.method             = "geodesic-tiny";
+            div_stats.n_genomes          = static_cast<int>(n);
+            div_stats.n_representatives  = static_cast<int>(representatives.size());
+            div_stats.reduction_ratio    = 1.0 - static_cast<double>(representatives.size()) /
+                                                 static_cast<double>(n);
+            div_stats.runtime_seconds    = runtime;
+            div_stats.coverage_mean_ani  = cov_mean;
+            div_stats.coverage_min_ani   = cov_min;
+            div_stats.coverage_max_ani   = cov_max;
             div_stats.diversity_mean_ani = div_mean;
             div_stats.diversity_min_ani  = div_min;
             div_stats.diversity_max_ani  = div_max;
             div_stats.diversity_n_pairs  = div_pairs;
+            div_stats.n_contaminated     = static_cast<int>(n_gunc);
 
             if (async_writer) {
                 db::TaxonWritePayload p;
-                p.result = r;
+                p.result          = r;
                 p.diversity_stats = div_stats;
-                p.all_accessions = all_accessions;
+                p.all_accessions  = all_accessions;
                 p.representatives = representatives;
-                p.ani_map = ani_to_rep_map;
+                p.ani_map         = ani_to_rep_map;
+                p.contamination   = std::move(gunc_contam_records);
                 async_writer->push(std::move(p));
             } else {
                 auto& conn = db.thread_connection();
                 if (!in_batch_txn) conn.Query("BEGIN TRANSACTION");
+                if (!gunc_contam_records.empty())
+                    db::ops::insert_contamination_candidates(db, taxon.taxonomy, gunc_contam_records);
                 db::ops::insert_result(db, r);
                 db::ops::insert_genomes_derep(db, taxon.taxonomy, all_accessions,
                                               representatives, ani_to_rep_map);
@@ -810,13 +914,14 @@ std::vector<TaxonResult> process_tiny_batch(
     db::DBManager& db,
     db::AsyncDBWriter* async_writer,
     db::SketchStore* sketch_store,
-    db::GenomePack* genome_pack) {
+    db::GenomePack* genome_pack,
+    const std::unordered_map<std::string, GuncQuality>* gunc_scores) {
     std::vector<TaxonResult> results;
     results.reserve(taxa.size());
     if (async_writer) {
         // Async path: each taxon pushes its payload; no batch transaction needed
         for (const Taxon* t : taxa)
-            results.push_back(process_taxon(*t, cfg, 1, db, nullptr, nullptr,
+            results.push_back(process_taxon(*t, cfg, 1, db, nullptr, gunc_scores,
                                             /*in_batch_txn=*/false, async_writer, sketch_store,
                                             genome_pack));
     } else {
@@ -824,7 +929,7 @@ std::vector<TaxonResult> process_tiny_batch(
         conn.Query("BEGIN TRANSACTION");
         try {
             for (const Taxon* t : taxa)
-                results.push_back(process_taxon(*t, cfg, 1, db, nullptr, nullptr,
+                results.push_back(process_taxon(*t, cfg, 1, db, nullptr, gunc_scores,
                                                 /*in_batch_txn=*/true, nullptr, sketch_store,
                                                 genome_pack));
             conn.Query("COMMIT");

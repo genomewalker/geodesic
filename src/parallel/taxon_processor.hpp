@@ -39,6 +39,7 @@ std::vector<TaxonResult> process_tiny_batch(
     db::DBManager& db,
     db::AsyncDBWriter* async_writer = nullptr,
     db::SketchStore* sketch_store = nullptr,
-    db::GenomePack* genome_pack = nullptr);
+    db::GenomePack* genome_pack = nullptr,
+    const std::unordered_map<std::string, GuncQuality>* gunc_scores = nullptr);
 
 } // namespace derep

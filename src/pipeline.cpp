@@ -460,10 +460,11 @@ int run_pipeline(Config& cfg) {
                 batch_taxa.push_back(&taxa[i]);
             pool.detach_task(
                 [batch_taxa, &cfg, &db, async_writer_ptr, sketch_store_ptr, genome_pack_ptr,
-                 &done_queue, &done_mutex, &done_cv,
+                 gunc_scores_ptr, &done_queue, &done_mutex, &done_cv,
                  &budget_release] {
                     auto results = process_tiny_batch(batch_taxa, cfg, db, async_writer_ptr,
-                                                      sketch_store_ptr, genome_pack_ptr);
+                                                      sketch_store_ptr, genome_pack_ptr,
+                                                      gunc_scores_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         for (auto& r : results)
