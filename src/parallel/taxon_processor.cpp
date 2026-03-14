@@ -437,18 +437,20 @@ TaxonResult process_taxon(
 
         GeodesicDerep geodesic(gcfg);
 
-        // Build index: genome pack > sketch cache > incremental embedding store > full NFS read
+        // Build index: sketch cache > genome pack > incremental embedding store > full NFS read
+        // Sketch cache preferred for same-parameter re-runs (DuckDB BLOB lookup, ~20 KB/genome).
+        // Genome pack used when sketch cache misses or absent (avoids 5.2M NFS opens for re-sketch).
         size_t newly_embedded = 0;
-        if (genome_pack) {
-            auto accessions = collect_accessions(taxon);
-            geodesic.build_index_from_pack(accessions, file_paths, *genome_pack, taxon.taxonomy,
-                                           quality_scores, emb_store);
-            newly_embedded = file_paths.size();
-        } else if (sketch_store) {
+        if (sketch_store) {
             auto accessions = collect_accessions(taxon);
             geodesic.build_index_from_sketches(accessions, file_paths, *sketch_store,
                                                quality_scores, cfg.require_sketches,
                                                emb_store, taxon.taxonomy);
+            newly_embedded = file_paths.size();
+        } else if (genome_pack) {
+            auto accessions = collect_accessions(taxon);
+            geodesic.build_index_from_pack(accessions, file_paths, *genome_pack, taxon.taxonomy,
+                                           quality_scores, emb_store);
             newly_embedded = file_paths.size();
         } else if (emb_store && cfg.incremental) {
             newly_embedded = geodesic.build_index_incremental(

@@ -1166,7 +1166,9 @@ void GeodesicDerep::build_index_from_pack(
     if (is_verbose()) spdlog::info("GEODESIC: loading {} genomes from pack (dim={}, k={})",
                                    n, cfg_.embedding_dim, cfg_.kmer_size);
 
+    auto t0 = std::chrono::steady_clock::now();
     auto td = pack.has_taxon(taxonomy) ? pack.fetch_taxon(taxonomy) : db::GenomePack::TaxonData{};
+    auto t1 = std::chrono::steady_clock::now();
 
     std::unordered_map<std::string, size_t> acc_to_pack;
     acc_to_pack.reserve(td.genomes.size());
@@ -1252,8 +1254,11 @@ void GeodesicDerep::build_index_from_pack(
     }
 #endif
 
-    if (is_verbose()) spdlog::info("GEODESIC: pack: {} hits, {} NFS fallback",
-                                   pack_hits, pack_misses);
+    auto t2 = std::chrono::steady_clock::now();
+    auto ms_fetch = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    auto ms_embed = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+    spdlog::info("GEODESIC: pack timing: fetch={}ms embed={}ms ({} hits, {} NFS fallback)",
+                 ms_fetch, ms_embed, pack_hits, pack_misses);
 
     finalize_embeddings_(emb_store, taxonomy);
 }

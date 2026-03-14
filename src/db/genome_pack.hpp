@@ -41,11 +41,14 @@ public:
         uint64_t    length = 0;
     };
 
-    // Decompressed taxon: FASTA payload + per-genome slices into it
+    // Decompressed taxon: full decompressed buffer (header + FASTA) + per-genome slices.
+    // payload_start marks the byte offset where FASTA payload begins inside payload.
+    // Avoids copying the payload out of the decompressed buffer.
     struct TaxonData {
         std::vector<char>        payload;
+        size_t                   payload_start = 0;
         std::vector<GenomeSlice> genomes;
-        const char* data(size_t i) const { return payload.data() + genomes[i].offset; }
+        const char* data(size_t i) const { return payload.data() + payload_start + genomes[i].offset; }
         size_t      size(size_t i) const { return static_cast<size_t>(genomes[i].length); }
         bool        empty()        const { return genomes.empty(); }
     };

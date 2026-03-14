@@ -305,11 +305,9 @@ GenomePack::TaxonData GenomePack::fetch_taxon(const std::string& taxonomy) const
         std::memcpy(&td.genomes[i].length, p, 8); p += 8;
     }
 
-    // 5. Payload is everything after the header
-    size_t header_consumed = static_cast<size_t>(p - raw.data());
-    size_t payload_size = raw.size() - header_consumed;
-    td.payload.resize(payload_size);
-    std::memcpy(td.payload.data(), p, payload_size);
+    // 5. Move raw buffer into payload — no copy. payload_start marks where FASTA begins.
+    td.payload_start = static_cast<size_t>(p - raw.data());
+    td.payload = std::move(raw);
 
     return td;
 #endif
