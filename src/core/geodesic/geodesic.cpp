@@ -2790,24 +2790,28 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         // Using n_small_real as denominator (not co-occupied bins n_both_real) avoids
         // inflating the score when the large genome has many empty bins that reduce
         // n_both_real but do not represent missing k-mer content in the small genome.
-        auto oph_certified = [&](size_t i, size_t ri) -> bool {
+        // oph_cert_jac: two-arm certification + Jaccard in one pass.
+        // Returns {certified, jaccard} — eliminates the double refine_jaccard_ptr call
+        // that the previous separate oph_certified + outer refine call required.
+        // Arm 1: Jaccard >= J_cert. Arm 2: containment for MAG-vs-complete pairs.
+        auto oph_cert_jac = [&](size_t i, size_t ri) -> std::pair<bool, double> {
             const auto& sig_i = embeddings_[i].oph_sig;
             const auto& sig_r = embeddings_[ri].oph_sig;
-            if (sig_i.size() != m_oph || sig_r.size() != m_oph) return false;
+            if (sig_i.size() != m_oph || sig_r.size() != m_oph) return {false, 0.0};
             // Arm 1: symmetric Jaccard.
             const double jac = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
-            if (static_cast<float>(jac) >= J_cert) return true;
+            if (static_cast<float>(jac) >= J_cert) return {true, jac};
             // Arm 2: directional containment for sketch-asymmetric pairs.
             // Trigger on n_real_bins ratio (not genome_size): a fragmented MAG may have
             // similar genome_size to a complete genome but far fewer occupied OPH bins.
             // n_real_bins directly measures sketch coverage, matching containment semantics.
             const uint32_t bins_i = embeddings_[i].n_real_bins;
             const uint32_t bins_r = embeddings_[ri].n_real_bins;
-            if (bins_i == 0 || bins_r == 0) return false;
+            if (bins_i == 0 || bins_r == 0) return {false, jac};
             const double bins_ratio = (bins_i < bins_r)
                 ? static_cast<double>(bins_i) / static_cast<double>(bins_r)
                 : static_cast<double>(bins_r) / static_cast<double>(bins_i);
-            if (bins_ratio > 0.5) return false;
+            if (bins_ratio > 0.5) return {false, jac};
             // Identify small and large by n_real_bins (sketch coverage).
             const bool i_is_small = (bins_i <= bins_r);
             const auto& mask_small = i_is_small
@@ -2816,7 +2820,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                 ? embeddings_[ri].real_bins_mask : embeddings_[i].real_bins_mask;
             const uint16_t* sig_small = i_is_small ? sig_i.data() : sig_r.data();
             const uint16_t* sig_large = i_is_small ? sig_r.data() : sig_i.data();
-            if (mask_small.empty() || mask_large.empty()) return false;
+            if (mask_small.empty() || mask_large.empty()) return {false, jac};
             int n_match = 0, n_small_real = 0;
             const size_t n_words = std::min(mask_small.size(), mask_large.size());
             for (size_t w = 0; w < n_words; ++w) {
@@ -2829,11 +2833,75 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                     both_real &= both_real - 1;
                 }
             }
-            if (n_small_real == 0) return false;
+            if (n_small_real == 0) return {false, jac};
             // Containment threshold is q_cert = ANI^k (raw probability), not J_cert.
             // J_cert = q/(2-q) is derived for symmetric Jaccard; at 95% ANI / k=21,
             // q_cert ≈ 0.34 vs J_cert ≈ 0.21. Using J_cert here would be too permissive.
-            return static_cast<double>(n_match) / n_small_real >= q_cert;
+            return {static_cast<double>(n_match) / n_small_real >= q_cert, jac};
+        };
+
+        // Pre-build compact rep embedding pointer array for dot-product ranking.
+        // Embedding similarity ≈ OPH Jaccard, so ranking reps by embedding dot product
+        // before the exhaustive OPH scan dramatically reduces calls for large rep sets.
+        // Threshold: only worth ranking when n_reps > CERT_TOP_K.
+        static constexpr size_t CERT_TOP_K = 64;
+        const size_t n_cert_reps = cert_rep_idx.size();
+        const size_t embed_d = (!embeddings_.empty() && !embeddings_[0].vector.empty())
+            ? embeddings_[0].vector.size() : 0;
+        const bool use_embed_rank = (embed_d > 0 && n_cert_reps > CERT_TOP_K);
+
+        // Gather rep embedding pointers once (pointer-stable since embeddings_ isn't modified here).
+        std::vector<const float*> cert_rep_vecs;
+        if (use_embed_rank) {
+            cert_rep_vecs.resize(n_cert_reps);
+            for (size_t k = 0; k < n_cert_reps; ++k)
+                cert_rep_vecs[k] = embeddings_[cert_rep_idx[k]].vector.data();
+        }
+
+        // Embedding-ranked exhaustive scan: computes dot products with all n_reps rep
+        // embeddings (O(n_reps * d)), partial-sorts top-K, then checks oph_cert_jac for
+        // top-K first. Falls back to the remaining reps only if no certified rep found in top-K.
+        // For n_reps <= CERT_TOP_K or when embeddings are absent, falls through to a plain scan.
+        // Correctness: always falls back to full scan → identical result in the worst case.
+        auto cert_scan = [&](size_t i,
+                             double& best_cert_jac, size_t& best_rep_row) {
+            if (use_embed_rank) {
+                const float* vec_i = embeddings_[i].vector.data();
+                // Compute dot products: O(n_reps * d), fast (d=256 floats per rep)
+                std::vector<std::pair<float, size_t>> ranked(n_cert_reps);
+                for (size_t k = 0; k < n_cert_reps; ++k) {
+                    const float* vr = cert_rep_vecs[k];
+                    float dot = 0.0f;
+                    for (size_t dj = 0; dj < embed_d; ++dj) dot += vec_i[dj] * vr[dj];
+                    ranked[k] = {dot, cert_rep_idx[k]};
+                }
+                std::partial_sort(ranked.begin(), ranked.begin() + CERT_TOP_K,
+                                  ranked.end(),
+                                  [](const auto& a, const auto& b) { return a.first > b.first; });
+                // Phase 1: check top-K candidates (high embedding similarity → likely certified)
+                for (size_t k = 0; k < CERT_TOP_K; ++k) {
+                    size_t ri = ranked[k].second;
+                    auto [cert, jac] = oph_cert_jac(i, ri);
+                    if (!cert) continue;
+                    if (jac > best_cert_jac) { best_cert_jac = jac; best_rep_row = ri; }
+                }
+                // Phase 2: if not certified in top-K, scan remaining (correctness fallback)
+                if (best_rep_row == SIZE_MAX) {
+                    for (size_t k = CERT_TOP_K; k < n_cert_reps; ++k) {
+                        size_t ri = ranked[k].second;
+                        auto [cert, jac] = oph_cert_jac(i, ri);
+                        if (!cert) continue;
+                        if (jac > best_cert_jac) { best_cert_jac = jac; best_rep_row = ri; }
+                    }
+                }
+            } else {
+                // Plain scan: small n_reps or no embedding vectors
+                for (size_t ri : cert_rep_idx) {
+                    auto [cert, jac] = oph_cert_jac(i, ri);
+                    if (!cert) continue;
+                    if (jac > best_cert_jac) { best_cert_jac = jac; best_rep_row = ri; }
+                }
+            }
         };
 
         std::vector<size_t> repair_queue;
@@ -2850,25 +2918,20 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                     const auto& sig_i = embeddings_[i].oph_sig;
                     if (sig_i.size() != m_oph) continue;
 
-                    // Fast path: check assigned rep first.
+                    // Fast path: check assigned rep first (single O(m) check).
                     auto rep_it = gid_to_row_.find(nearest_rep[i]);
                     if (rep_it != gid_to_row_.end()) {
-                        if (oph_certified(i, rep_it->second)) continue;
+                        auto [cert, jac] = oph_cert_jac(i, rep_it->second);
+                        if (cert) {
+                            max_sim_to_rep[i] = static_cast<float>(jac);
+                            continue;
+                        }
                     }
 
-                    // Exhaustive scan: find best certified rep (highest Jaccard among certified).
-                    // Check oph_certified for every rep — not just max-Jaccard — because a
-                    // size-asymmetric rep with lower Jaccard may pass the containment arm while
-                    // a higher-Jaccard rep fails both arms.
+                    // Exhaustive fallback: embedding-ranked scan with early phase-1 termination.
                     double best_cert_jac = -1.0;
                     size_t best_rep_row = SIZE_MAX;
-                    for (size_t ri : cert_rep_idx) {
-                        if (!oph_certified(i, ri)) continue;
-                        const auto& sig_r = embeddings_[ri].oph_sig;
-                        if (sig_r.size() != m_oph) continue;
-                        double j = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
-                        if (j > best_cert_jac) { best_cert_jac = j; best_rep_row = ri; }
-                    }
+                    cert_scan(i, best_cert_jac, best_rep_row);
 
                     if (best_rep_row != SIZE_MAX) {
                         nearest_rep[i]    = store_.genome_ids[best_rep_row];
@@ -2892,21 +2955,17 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             // Fast path: check assigned rep first.
             auto rep_it = gid_to_row_.find(nearest_rep[i]);
             if (rep_it != gid_to_row_.end()) {
-                if (oph_certified(i, rep_it->second)) continue;
+                auto [cert, jac] = oph_cert_jac(i, rep_it->second);
+                if (cert) {
+                    max_sim_to_rep[i] = static_cast<float>(jac);
+                    continue;
+                }
             }
 
-            // Assigned rep failed: exhaustive scan over all reps.
-            // Check oph_certified for every rep (not just max-Jaccard) to catch
-            // size-asymmetric pairs where containment arm certifies at lower Jaccard.
+            // Exhaustive fallback: embedding-ranked scan.
             double best_cert_jac = -1.0;
             size_t best_rep_row = SIZE_MAX;
-            for (size_t ri : cert_rep_idx) {
-                if (!oph_certified(i, ri)) continue;
-                const auto& sig_r = embeddings_[ri].oph_sig;
-                if (sig_r.size() != m_oph) continue;
-                double j = refine_jaccard_ptr(sig_i.data(), sig_r.data(), m_oph);
-                if (j > best_cert_jac) { best_cert_jac = j; best_rep_row = ri; }
-            }
+            cert_scan(i, best_cert_jac, best_rep_row);
 
             if (best_rep_row != SIZE_MAX) {
                 nearest_rep[i]    = store_.genome_ids[best_rep_row];
