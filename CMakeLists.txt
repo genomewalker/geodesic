@@ -93,6 +93,7 @@ add_executable(geodesic
     src/db/db_manager.cpp
     src/db/operations.cpp
     src/db/embedding_store.cpp
+    src/db/genome_pack.cpp
     src/db/sketch_store.cpp
     src/core/subprocess.cpp
     src/core/genome_cache.cpp

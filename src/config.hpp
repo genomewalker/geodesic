@@ -5,7 +5,7 @@
 
 namespace derep {
 
-enum class Command { Derep, Report, Sketch };
+enum class Command { Derep, Report, Sketch, Pack };
 
 struct Config {
     Command command = Command::Derep;
@@ -58,6 +58,10 @@ struct Config {
     // Sketch cache (DuckDB on /scratch)
     std::optional<std::filesystem::path> sketch_db;
     bool require_sketches = false;  // fail hard if any genome missing from sketch cache
+
+    // Genome pack (taxonomy-indexed zstd store on fast local storage)
+    std::optional<std::filesystem::path> pack_dir;
+    int pack_zstd_level = 15;
 
     // Flags
     bool copy_reps = false;

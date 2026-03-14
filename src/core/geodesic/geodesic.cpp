@@ -4,6 +4,7 @@
 #include "core/logging.hpp"
 #include "db/embedding_store.hpp"
 #include "db/sketch_store.hpp"
+#include "db/genome_pack.hpp"
 #include "io/gz_reader.hpp"
 #include <hnswlib/hnswlib.h>
 #include <spdlog/spdlog.h>
@@ -1149,6 +1150,110 @@ void GeodesicDerep::build_index_from_sketches(
                                    cache_hits, cache_misses,
                                    require_sketches ? "misses recorded as failures (not re-read)"
                                                     : "misses re-read");
+
+    finalize_embeddings_(emb_store, taxonomy);
+}
+
+void GeodesicDerep::build_index_from_pack(
+    const std::vector<std::string>& accessions,
+    const std::vector<std::filesystem::path>& genomes,
+    db::GenomePack& pack,
+    const std::string& taxonomy,
+    const std::unordered_map<std::string, double>& quality_scores,
+    db::EmbeddingStore* emb_store)
+{
+    const size_t n = accessions.size();
+    if (is_verbose()) spdlog::info("GEODESIC: loading {} genomes from pack (dim={}, k={})",
+                                   n, cfg_.embedding_dim, cfg_.kmer_size);
+
+    auto td = pack.has_taxon(taxonomy) ? pack.fetch_taxon(taxonomy) : db::GenomePack::TaxonData{};
+
+    std::unordered_map<std::string, size_t> acc_to_pack;
+    acc_to_pack.reserve(td.genomes.size());
+    for (size_t i = 0; i < td.genomes.size(); ++i)
+        acc_to_pack[td.genomes[i].accession] = i;
+
+    embeddings_.resize(n);
+    store_.resize(n, cfg_.embedding_dim);
+    buf_cache_.assign(n, {});
+    buf_cache_bytes_.store(0);
+
+    std::vector<std::string> path_strs(n);
+    for (size_t i = 0; i < n; ++i) path_strs[i] = genomes[i].string();
+
+    size_t pack_hits = 0, pack_misses = 0;
+
+    const int io_threads = (cfg_.io_threads > 0) ? cfg_.io_threads : cfg_.threads;
+
+#if GEODESIC_USE_OMP
+    {
+    std::counting_semaphore<> io_sem(io_threads);
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (size_t i = 0; i < n; ++i) {
+        auto pit = acc_to_pack.find(accessions[i]);
+        if (pit != acc_to_pack.end()) {
+            const char* data = td.data(pit->second);
+            const size_t len = td.size(pit->second);
+            try {
+                embeddings_[i] = embed_genome_from_buffer(data, len, i, genomes[i]);
+                #pragma omp atomic
+                ++pack_hits;
+            } catch (const std::exception& e) {
+                spdlog::error("GEODESIC: embed from pack failed for {}: {}", accessions[i], e.what());
+                embeddings_[i].genome_id = i;
+                embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+                embeddings_[i].quality_score = 0.0f;
+                embeddings_[i].path = genomes[i];
+            }
+        } else {
+            io_sem.acquire();
+            try {
+                embeddings_[i] = embed_genome(genomes[i], i);
+            } catch (...) {
+                embeddings_[i].genome_id = i;
+                embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+                embeddings_[i].quality_score = 0.0f;
+                embeddings_[i].path = genomes[i];
+            }
+            io_sem.release();
+            #pragma omp atomic
+            ++pack_misses;
+        }
+        auto it = quality_scores.find(path_strs[i]);
+        if (it != quality_scores.end())
+            embeddings_[i].quality_score = static_cast<float>(it->second);
+        else if (embeddings_[i].quality_score != 0.0f)
+            embeddings_[i].quality_score = 50.0f;
+    }
+    }
+#else
+    for (size_t i = 0; i < n; ++i) {
+        auto pit = acc_to_pack.find(accessions[i]);
+        if (pit != acc_to_pack.end()) {
+            try {
+                embeddings_[i] = embed_genome_from_buffer(td.data(pit->second), td.size(pit->second), i, genomes[i]);
+                ++pack_hits;
+            } catch (const std::exception& e) {
+                spdlog::error("GEODESIC: embed from pack failed for {}: {}", accessions[i], e.what());
+                embeddings_[i].genome_id = i;
+                embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+                embeddings_[i].quality_score = 0.0f;
+                embeddings_[i].path = genomes[i];
+            }
+        } else {
+            embeddings_[i] = embed_genome(genomes[i], i);
+            ++pack_misses;
+        }
+        auto it = quality_scores.find(path_strs[i]);
+        if (it != quality_scores.end())
+            embeddings_[i].quality_score = static_cast<float>(it->second);
+        else if (embeddings_[i].quality_score != 0.0f)
+            embeddings_[i].quality_score = 50.0f;
+    }
+#endif
+
+    if (is_verbose()) spdlog::info("GEODESIC: pack: {} hits, {} NFS fallback",
+                                   pack_hits, pack_misses);
 
     finalize_embeddings_(emb_store, taxonomy);
 }

@@ -15,6 +15,7 @@ namespace derep {
 
 namespace db { class EmbeddingStore; }  // Forward declaration
 namespace db { class SketchStore; }     // Forward declaration
+namespace db { class GenomePack; }      // Forward declaration
 
 // Aligned allocator for SIMD-friendly memory layout
 template <typename T, size_t Alignment = 64>
@@ -226,6 +227,16 @@ public:
         bool require_sketches = false,
         db::EmbeddingStore* emb_store = nullptr,
         const std::string& taxonomy = "");
+
+    // Pack-based build: load raw FASTA from GenomePack instead of NFS.
+    // Falls back to embed_genome() for genomes not in pack.
+    void build_index_from_pack(
+        const std::vector<std::string>& accessions,
+        const std::vector<std::filesystem::path>& genomes,
+        db::GenomePack& pack,
+        const std::string& taxonomy,
+        const std::unordered_map<std::string, double>& quality_scores = {},
+        db::EmbeddingStore* emb_store = nullptr);
 
     // Async variant: uses pre-Nyström float snapshot, streams in batches to cap RAM overhead.
     void save_embeddings_async(db::EmbeddingStore& store, const std::string& taxonomy,

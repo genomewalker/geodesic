@@ -6,6 +6,7 @@
 #include "db/async_writer.hpp"
 #include "db/db_manager.hpp"
 #include "db/embedding_store.hpp"
+#include "db/genome_pack.hpp"
 #include "db/operations.hpp"
 #include "db/schema.hpp"
 #include "db/sketch_store.hpp"
@@ -366,6 +367,21 @@ int run_pipeline(Config& cfg) {
     }
     db::SketchStore* sketch_store_ptr = sketch_store.get();
 
+    // Open genome pack if --pack was provided
+    std::unique_ptr<db::GenomePack> genome_pack;
+    if (cfg.pack_dir.has_value()) {
+        genome_pack = std::make_unique<db::GenomePack>();
+        try {
+            genome_pack->open_read(*cfg.pack_dir);
+            spdlog::info("Genome pack opened: {}", cfg.pack_dir->string());
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to open genome pack at {}: {} — proceeding without",
+                         cfg.pack_dir->string(), e.what());
+            genome_pack.reset();
+        }
+    }
+    db::GenomePack* genome_pack_ptr = genome_pack.get();
+
     // Adaptive thread budget: acquire as many slots as available (up to desired),
     // minimum 1 to guarantee forward progress.
     int budget_avail = total_budget;
@@ -421,12 +437,12 @@ int run_pipeline(Config& cfg) {
             int acquired = budget_acquire(desired);
             pool.detach_task(
                 [&taxa, i, &cfg, &db, emb_store_ptr, gunc_scores_ptr, async_writer_ptr,
-                 sketch_store_ptr,
+                 sketch_store_ptr, genome_pack_ptr,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release, acquired] {
                     auto result = process_taxon(taxa[i], cfg, acquired, db, emb_store_ptr,
                                                gunc_scores_ptr, false, async_writer_ptr,
-                                               sketch_store_ptr);
+                                               sketch_store_ptr, genome_pack_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         done_queue.push(std::move(result));
@@ -443,11 +459,11 @@ int run_pipeline(Config& cfg) {
             for (size_t i : batch_indices)
                 batch_taxa.push_back(&taxa[i]);
             pool.detach_task(
-                [batch_taxa, &cfg, &db, async_writer_ptr, sketch_store_ptr,
+                [batch_taxa, &cfg, &db, async_writer_ptr, sketch_store_ptr, genome_pack_ptr,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release] {
                     auto results = process_tiny_batch(batch_taxa, cfg, db, async_writer_ptr,
-                                                      sketch_store_ptr);
+                                                      sketch_store_ptr, genome_pack_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         for (auto& r : results)
@@ -714,6 +730,128 @@ int run_sketch(Config& cfg) {
     spdlog::info("Sketch complete: {} succeeded, {} failed", n_done, n_failed);
     store.checkpoint();
     return n_failed > 0 ? 1 : 0;
+}
+
+// ============================================================================
+// run_pack: pre-convert scattered gzipped FASTA files into taxonomy-grouped,
+// zstd-compressed pack files on fast local storage.
+// ============================================================================
+int run_pack(Config& cfg) {
+    // 1. Setup logging
+    {
+        int verbosity = cfg.verbosity;
+        auto sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        sink->set_level(verbosity == 0 ? spdlog::level::warn :
+                        verbosity >= 2 ? spdlog::level::debug :
+                                        spdlog::level::info);
+        auto logger = std::make_shared<spdlog::logger>("geodesic", sink);
+        logger->set_level(spdlog::level::info);
+        logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
+        spdlog::set_default_logger(logger);
+        spdlog::flush_on(spdlog::level::info);
+    }
+
+    spdlog::info("geodesic pack: threads={} io_threads={} zstd_level={}",
+                 cfg.threads, cfg.io_threads, cfg.pack_zstd_level);
+
+    // 2. Parse TSV
+    spdlog::info("Parsing taxonomy file: {}", cfg.tax_file.string());
+    auto rows = read_genomes_tsv(cfg.tax_file);
+    spdlog::info("{} genomes in taxonomy file", rows.size());
+
+    // 3. Group by taxonomy
+    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> taxa_map;
+    // taxa_map: taxonomy -> [(accession, file_path)]
+    taxa_map.reserve(rows.size() / 10);
+    for (const auto& row : rows)
+        taxa_map[row.taxonomy].emplace_back(row.accession, row.file_path.string());
+
+    spdlog::info("{} unique taxa", taxa_map.size());
+
+    // 4. Open GenomePack for writing
+    db::GenomePack::Config pack_cfg;
+    pack_cfg.zstd_level = cfg.pack_zstd_level;
+    db::GenomePack pack(pack_cfg);
+    pack.open_write(*cfg.pack_dir);
+
+    // 5. Resume: load completed taxa and erase from map
+    auto completed = pack.load_completed_taxa();
+    if (!completed.empty()) {
+        spdlog::info("Resuming: {} taxa already packed", completed.size());
+        for (const auto& tax : completed)
+            taxa_map.erase(tax);
+    }
+    spdlog::info("{} taxa to pack", taxa_map.size());
+
+    if (taxa_map.empty()) {
+        spdlog::info("All taxa already packed. Done.");
+        pack.checkpoint();
+        return 0;
+    }
+
+    // 6. Process taxa with thread pool
+    const int io_threads = (cfg.io_threads > 0) ? cfg.io_threads : cfg.threads;
+    BS::thread_pool pool(static_cast<BS::concurrency_t>(cfg.threads));
+
+    // Semaphore to bound concurrent NFS readers
+    std::counting_semaphore<> io_sem(io_threads);
+
+    std::atomic<size_t> n_taxa_done{0};
+    std::atomic<size_t> n_taxa_failed{0};
+    const size_t total_taxa = taxa_map.size();
+
+    // Convert to vector for indexed iteration
+    std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>> taxa_vec(
+        taxa_map.begin(), taxa_map.end());
+
+    std::mutex result_mutex;
+
+    for (const auto& [taxonomy, genomes] : taxa_vec) {
+        pool.detach_task([&, taxonomy = taxonomy, genomes = genomes] {
+            try {
+                std::vector<std::pair<std::string, std::vector<char>>> genome_bufs;
+                genome_bufs.reserve(genomes.size());
+
+                for (const auto& [accession, path] : genomes) {
+                    io_sem.acquire();
+                    std::vector<char> buf;
+                    std::string err;
+                    try {
+                        buf = GzReader::decompress_file(path);
+                    } catch (const std::exception& e) {
+                        err = e.what();
+                    }
+                    io_sem.release();
+
+                    if (!err.empty()) {
+                        spdlog::warn("pack: failed to read {} ({}): {}", accession, path, err);
+                        continue;
+                    }
+                    genome_bufs.emplace_back(accession, std::move(buf));
+                }
+
+                if (!genome_bufs.empty())
+                    pack.write_taxon(taxonomy, genome_bufs);
+
+                size_t done = ++n_taxa_done;
+                if (done % 1000 == 0 || done == total_taxa) {
+                    spdlog::info("Pack progress: {}/{} taxa ({:.1f}%) | {} failed",
+                                 done, total_taxa, 100.0 * done / total_taxa,
+                                 n_taxa_failed.load());
+                }
+            } catch (const std::exception& e) {
+                ++n_taxa_failed;
+                spdlog::error("pack: failed taxon {}: {}", taxonomy, e.what());
+            }
+        });
+    }
+
+    pool.wait();
+
+    spdlog::info("Pack complete: {}/{} taxa done, {} failed",
+                 n_taxa_done.load(), total_taxa, n_taxa_failed.load());
+    pack.checkpoint();
+    return n_taxa_failed.load() > 0 ? 1 : 0;
 }
 
 } // namespace derep

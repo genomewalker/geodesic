@@ -102,6 +102,8 @@ Config parse_args(int argc, char** argv) {
         "Path to sketch cache DuckDB (built by 'geodesic sketch'). Skips NFS re-reads.");
     derep->add_flag("--require-sketches", cfg.require_sketches,
         "Fail if any genome is missing from sketch cache (no NFS fallback)");
+    derep->add_option("--pack", cfg.pack_dir,
+        "Path to genome pack directory (built by 'geodesic pack'). Reads sequences from local pack instead of NFS.");
 
     derep->add_flag("--copy-reps", cfg.copy_reps, "Copy representative genomes to output directory");
     derep->add_flag("-v,--verbose", [&cfg](int64_t) { cfg.verbosity = 2; },
@@ -136,11 +138,33 @@ Config parse_args(int argc, char** argv) {
         "Sketch size / OPH bins (must match derep run)")->default_val(10000);
     sketch_cmd->add_option("--geodesic-syncmer-s", cfg.syncmer_s,
         "Open-syncmer submer length (0=disabled, must match derep run)")->default_val(0);
+    sketch_cmd->add_option("--pack", cfg.pack_dir,
+        "Path to genome pack directory. Reads sequences from local pack instead of NFS.");
 
     sketch_cmd->add_flag("-v,--verbose", [&cfg](int64_t) { cfg.verbosity = 2; },
         "Verbose output");
     sketch_cmd->add_flag("-q,--quiet", [&cfg](int64_t) { cfg.verbosity = 0; },
         "Quiet output");
+
+    // ── pack subcommand ─────────────────────────────────────────────────────
+    auto* pack_cmd = app.add_subcommand("pack",
+        "Pre-pack all genome FASTA files into taxonomy-indexed zstd archives for fast local access");
+
+    pack_cmd->add_option("-t,--tax-file", cfg.tax_file, "Taxonomy file (TSV: accession, taxonomy, file_path)")
+        ->required()
+        ->check(CLI::ExistingFile);
+
+    pack_cmd->add_option("-o,--out", cfg.pack_dir,
+        "Output directory for genome pack (e.g. /projects/caeg/scratch/kbd606/gtdb-pack/)")
+        ->required();
+
+    pack_cmd->add_option("--threads", cfg.threads, "Total CPU threads")->default_val(4);
+    pack_cmd->add_option("--io-threads", cfg.io_threads,
+        "Max concurrent NFS file readers (0=auto: threads)")->default_val(0);
+    pack_cmd->add_option("--zstd-level", cfg.pack_zstd_level,
+        "zstd compression level (1-22, higher=smaller/slower)")->default_val(15);
+    pack_cmd->add_flag("-v,--verbose", [&cfg](int64_t) { cfg.verbosity = 2; }, "Verbose output");
+    pack_cmd->add_flag("-q,--quiet",   [&cfg](int64_t) { cfg.verbosity = 0; }, "Quiet output");
 
     // ── report subcommand ───────────────────────────────────────────────────
     auto* report_cmd = app.add_subcommand("report", "Generate HTML report from existing database");
@@ -166,6 +190,8 @@ Config parse_args(int argc, char** argv) {
         cfg.report_only = true;
     } else if (sketch_cmd->parsed()) {
         cfg.command = Command::Sketch;
+    } else if (pack_cmd->parsed()) {
+        cfg.command = Command::Pack;
     } else {
         cfg.command = Command::Derep;
     }

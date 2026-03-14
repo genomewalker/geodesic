@@ -5,6 +5,7 @@
 #include "core/sketch/minhash.hpp"
 #include "db/embedding_store.hpp"
 #include "db/sketch_store.hpp"
+#include "db/genome_pack.hpp"
 #include "db/operations.hpp"
 
 #include <algorithm>
@@ -131,7 +132,8 @@ TaxonResult process_taxon(
     const std::unordered_map<std::string, GuncQuality>* gunc_scores,
     bool in_batch_txn,
     db::AsyncDBWriter* async_writer,
-    db::SketchStore* sketch_store) {
+    db::SketchStore* sketch_store,
+    db::GenomePack* genome_pack) {
     try {
         const int threads = (thread_budget > 0) ? thread_budget : cfg.threads;
         // -----------------------------------------------------------
@@ -435,9 +437,14 @@ TaxonResult process_taxon(
 
         GeodesicDerep geodesic(gcfg);
 
-        // Build index: sketch cache > incremental embedding store > full NFS read
+        // Build index: genome pack > sketch cache > incremental embedding store > full NFS read
         size_t newly_embedded = 0;
-        if (sketch_store) {
+        if (genome_pack) {
+            auto accessions = collect_accessions(taxon);
+            geodesic.build_index_from_pack(accessions, file_paths, *genome_pack, taxon.taxonomy,
+                                           quality_scores, emb_store);
+            newly_embedded = file_paths.size();
+        } else if (sketch_store) {
             auto accessions = collect_accessions(taxon);
             geodesic.build_index_from_sketches(accessions, file_paths, *sketch_store,
                                                quality_scores, cfg.require_sketches,
@@ -800,21 +807,24 @@ std::vector<TaxonResult> process_tiny_batch(
     const Config& cfg,
     db::DBManager& db,
     db::AsyncDBWriter* async_writer,
-    db::SketchStore* sketch_store) {
+    db::SketchStore* sketch_store,
+    db::GenomePack* genome_pack) {
     std::vector<TaxonResult> results;
     results.reserve(taxa.size());
     if (async_writer) {
         // Async path: each taxon pushes its payload; no batch transaction needed
         for (const Taxon* t : taxa)
             results.push_back(process_taxon(*t, cfg, 1, db, nullptr, nullptr,
-                                            /*in_batch_txn=*/false, async_writer, sketch_store));
+                                            /*in_batch_txn=*/false, async_writer, sketch_store,
+                                            genome_pack));
     } else {
         auto& conn = db.thread_connection();
         conn.Query("BEGIN TRANSACTION");
         try {
             for (const Taxon* t : taxa)
                 results.push_back(process_taxon(*t, cfg, 1, db, nullptr, nullptr,
-                                                /*in_batch_txn=*/true, nullptr, sketch_store));
+                                                /*in_batch_txn=*/true, nullptr, sketch_store,
+                                                genome_pack));
             conn.Query("COMMIT");
         } catch (...) {
             conn.Query("ROLLBACK");
