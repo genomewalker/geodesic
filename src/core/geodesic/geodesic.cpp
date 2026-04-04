@@ -2,9 +2,8 @@
 #include "core/sketch/minhash.hpp"
 #include "core/progress.hpp"
 #include "core/logging.hpp"
-#include "db/embedding_store.hpp"
-#include "db/sketch_store.hpp"
-#include "db/genome_pack.hpp"
+#include "core/pack_reader.hpp"
+#include <genopack/archive.hpp>
 #include "io/gz_reader.hpp"
 #include <hnswlib/hnswlib.h>
 #include <spdlog/spdlog.h>
@@ -166,7 +165,7 @@ struct GeodesicDerep::HNSWIndex {
         index = std::make_unique<hnswlib::HierarchicalNSW<float>>(
             space.get(), embs.size(), M, ef_construction, /*seed=*/42);
         index->setEf(ef_search);
-        index->addPoint(embs[0].vector.data(), 0);  // seed point inserted first
+        index->addPoint(embs[0].vector.data(), 0);
         #pragma omp parallel for schedule(static) num_threads(n_threads)
         for (size_t i = 1; i < embs.size(); ++i)
             index->addPoint(embs[i].vector.data(), i);
@@ -581,13 +580,7 @@ GeodesicDerep::GeodesicDerep(Config cfg)
     , index_(std::make_unique<HNSWIndex>()) {
 }
 
-GeodesicDerep::~GeodesicDerep() {
-    if (async_save_future_.valid()) {
-        try { async_save_future_.get(); } catch (const std::exception& e) {
-            spdlog::error("GEODESIC: async save failed: {}", e.what());
-        }
-    }
-}
+GeodesicDerep::~GeodesicDerep() = default;
 
 float GeodesicDerep::angular_distance(const std::vector<float>& a,
                                        const std::vector<float>& b) {
@@ -847,8 +840,6 @@ void GeodesicDerep::materialize_sig2_for_indices(const std::vector<size_t>& indi
         for (size_t i : need)
             if (i < buf_cache_.size() && !buf_cache_[i].empty()) ++cache_hits;
     }
-    if (is_verbose()) spdlog::info("GEODESIC: loading dense k-mer signatures for {} genomes ({} cached, {} re-read)",
-                                   need.size(), cache_hits, need.size() - cache_hits);
 
     const MinHasher::Config cfg2{
         .kmer_size  = cfg_.kmer_size,
@@ -856,6 +847,56 @@ void GeodesicDerep::materialize_sig2_for_indices(const std::vector<size_t>& indi
         .syncmer_s  = cfg_.syncmer_s,
         .seed       = 1337
     };
+
+    // GPK path: shard-batched fetch + parallel sketch — zero NFS reads.
+    if (gpk_reader_ && !gpk_accessions_.empty()) {
+        const size_t n_need = need.size();
+        if (is_verbose()) spdlog::info("GEODESIC: loading dense k-mer signatures for {} genomes (GPK shard-batch)",
+                                       n_need);
+
+        // Collect accessions for the needed indices.
+        std::vector<std::string> acc_batch;
+        acc_batch.reserve(n_need);
+        std::unordered_map<size_t, size_t> out_to_emb;  // batch output idx → embeddings_ idx
+        for (size_t k = 0; k < n_need; ++k) {
+            const size_t i = need[k];
+            if (i < gpk_accessions_.size()) {
+                out_to_emb[acc_batch.size()] = i;
+                acc_batch.push_back(gpk_accessions_[i]);
+            }
+        }
+
+        gpk_reader_->visit_shard_batches(acc_batch,
+            [&](genopack::ArchiveReader::ShardBatch& batch) {
+                const int bsz = static_cast<int>(batch.size());
+                #pragma omp parallel for schedule(dynamic, 1) num_threads(cfg_.threads)
+                for (int j = 0; j < bsz; ++j) {
+                    const size_t out_idx = batch[j].first;
+                    const auto& eg = batch[j].second;
+                    auto it = out_to_emb.find(out_idx);
+                    if (it == out_to_emb.end()) continue;
+                    const size_t i = it->second;
+                    try {
+                        MinHasher hasher2(cfg2);
+                        auto oph2 = hasher2.sketch_oph_with_positions_from_buffer(
+                            eg.fasta.data(), eg.fasta.size(), cfg_.sketch_size);
+                        const size_t m2 = oph2.signature.size();
+                        std::vector<uint16_t> sig2(m2);
+                        for (size_t t = 0; t < m2; ++t)
+                            sig2[t] = static_cast<uint16_t>(oph2.signature[t]);
+                        embeddings_[i].oph_sig2 = std::move(sig2);
+                    } catch (const std::exception& e) {
+                        spdlog::warn("GEODESIC: sig2 GPK materialization failed for {}: {}",
+                                     embeddings_[i].path.filename().string(), e.what());
+                    }
+                }
+            });
+        return;
+    }
+
+    // Fallback: buf_cache or NFS read.
+    if (is_verbose()) spdlog::info("GEODESIC: loading dense k-mer signatures for {} genomes ({} cached, {} re-read)",
+                                   need.size(), cache_hits, need.size() - cache_hits);
 
 #if GEODESIC_USE_OMP
     #pragma omp parallel for schedule(dynamic, 4) num_threads(cfg_.threads)
@@ -914,9 +955,7 @@ void GeodesicDerep::materialize_sig2_for_indices(const std::vector<size_t>& indi
 }
 
 void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genomes,
-                                 const std::unordered_map<std::string, double>& quality_scores,
-                                 db::EmbeddingStore* emb_store,
-                                 const std::string& taxonomy) {
+                                 const std::unordered_map<std::string, double>& quality_scores) {
     if (is_verbose()) spdlog::info("GEODESIC: embedding {} genomes (dim={}, k={}, threads={})",
                                    genomes.size(), cfg_.embedding_dim, cfg_.kmer_size, cfg_.threads);
     auto t_build_start = std::chrono::steady_clock::now();
@@ -932,7 +971,8 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
 #endif
 #if GEODESIC_USE_OMP
     if (is_verbose()) spdlog::info("GEODESIC: OpenMP parallel enabled ({} threads)", cfg_.threads);
-    omp_set_num_threads(cfg_.threads);
+    // NOTE: omp_set_num_threads() removed — process-global, unsafe with concurrent taxa.
+    // All OMP regions use explicit num_threads(cfg_.threads) clauses.
 #endif
 
     size_t n = genomes.size();
@@ -962,7 +1002,7 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
 #if GEODESIC_USE_OMP
     {
     std::counting_semaphore<> io_sem(io_threads);
-    #pragma omp parallel for schedule(dynamic, 1)
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(cfg_.threads)
     for (size_t i = 0; i < n; ++i) {
         io_sem.acquire();
         try {
@@ -1032,11 +1072,11 @@ void GeodesicDerep::build_index(const std::vector<std::filesystem::path>& genome
     }
     t_phase("OPH sketch (embed_genome)");
 
-    finalize_embeddings_(emb_store, taxonomy);
+    finalize_embeddings_();
     t_phase("finalize (SoA+Nyström+HNSW)");
 }
 
-void GeodesicDerep::finalize_embeddings_(db::EmbeddingStore* emb_store, const std::string& taxonomy) {
+void GeodesicDerep::finalize_embeddings_() {
     const size_t n = embeddings_.size();
 
     // Build canonical ID → row map (identity at this point, but needed after future sorts)
@@ -1065,18 +1105,6 @@ void GeodesicDerep::finalize_embeddings_(db::EmbeddingStore* emb_store, const st
     buf_cache_ = {};
     buf_cache_bytes_.store(0);
 
-    // Snapshot finalised (post-Nyström) float vectors and launch async save.
-    // The background thread reads oph_sig directly from embeddings_ (Nyström never modifies it).
-    // The future is joined in ~GeodesicDerep(), so it always finishes before embeddings_ dies.
-    if (emb_store && !taxonomy.empty()) {
-        std::vector<std::vector<float>> vec_snap(n);
-        for (size_t i = 0; i < n; ++i) vec_snap[i] = embeddings_[i].vector;
-        async_save_future_ = std::async(std::launch::async,
-            [this, emb_store, taxonomy, snap = std::move(vec_snap)]() mutable {
-                save_embeddings_async(*emb_store, taxonomy, std::move(snap));
-            });
-    }
-
     // Build HNSW index — skip for small n (brute-force pairwise is faster)
     if (n > SMALL_N_THRESHOLD) {
         index_->build(embeddings_, cfg_.hnsw_m, cfg_.hnsw_ef_construction, cfg_.hnsw_ef_search, cfg_.threads);
@@ -1085,20 +1113,18 @@ void GeodesicDerep::finalize_embeddings_(db::EmbeddingStore* emb_store, const st
     }
 }
 
-void GeodesicDerep::build_index_from_sketches(
+void GeodesicDerep::build_index_from_gpk(
     const std::vector<std::string>& accessions,
     const std::vector<std::filesystem::path>& genomes,
-    db::SketchStore& sketch_store,
-    const std::unordered_map<std::string, double>& quality_scores,
-    bool require_sketches,
-    db::EmbeddingStore* emb_store,
-    const std::string& taxonomy)
+    IPackReader& gpk,
+    const std::unordered_map<std::string, double>& quality_scores)
 {
     const size_t n = accessions.size();
-    if (is_verbose()) spdlog::info("GEODESIC: loading {} genomes from sketch cache (dim={}, k={})",
-                                   n, cfg_.embedding_dim, cfg_.kmer_size);
+    if (is_verbose()) spdlog::info("GEODESIC: gpk: loading {} genomes by accession", n);
 
-    auto records = sketch_store.fetch_ordered(accessions);
+    // Store GPK reader + accessions for sig2 materialization (avoids NFS fallback).
+    gpk_reader_ = &gpk;
+    gpk_accessions_ = accessions;
 
     embeddings_.resize(n);
     store_.resize(n, cfg_.embedding_dim);
@@ -1108,159 +1134,142 @@ void GeodesicDerep::build_index_from_sketches(
     std::vector<std::string> path_strs(n);
     for (size_t i = 0; i < n; ++i) path_strs[i] = genomes[i].string();
 
-    size_t cache_hits = 0, cache_misses = 0;
-
-    for (size_t i = 0; i < n; ++i) {
-        const auto& rec = records[i];
-
-        if (rec.oph_sig.empty()) {
-            ++cache_misses;
-            if (require_sketches) {
-                std::lock_guard lock(failed_reads_mutex_);
-                failed_reads_.emplace_back(genomes[i].string(), "not in sketch cache");
-                embeddings_[i].genome_id = i;
-                embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
-                embeddings_[i].quality_score = 0.0f;
-                embeddings_[i].path = genomes[i];
-            } else {
-                embeddings_[i] = embed_genome(genomes[i], i);
-            }
-        } else {
-            ++cache_hits;
-            embeddings_[i].genome_id = i;
-            embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
-            embeddings_[i].oph_sig        = rec.oph_sig;
-            embeddings_[i].oph_sig2       = rec.oph_sig2;  // empty = lazy sig2 not yet computed
-            embeddings_[i].real_bins_mask = rec.real_bins_mask;  // enables containment arm
-            embeddings_[i].n_real_bins    = rec.n_real_bins;
-            embeddings_[i].genome_size    = rec.genome_length;
-            embeddings_[i].path           = genomes[i];
-            embeddings_[i].isolation_score = 0.0f;
-            embeddings_[i].quality_score   = 50.0f;
-        }
-
-        auto it = quality_scores.find(path_strs[i]);
-        if (it != quality_scores.end())
-            embeddings_[i].quality_score = static_cast<float>(it->second);
-        else if (embeddings_[i].quality_score != 0.0f)
-            embeddings_[i].quality_score = 50.0f;
-    }
-
-    if (is_verbose()) spdlog::info("GEODESIC: sketch cache: {} hits, {} {} from NFS",
-                                   cache_hits, cache_misses,
-                                   require_sketches ? "misses recorded as failures (not re-read)"
-                                                    : "misses re-read");
-
-    finalize_embeddings_(emb_store, taxonomy);
-}
-
-void GeodesicDerep::build_index_from_pack(
-    const std::vector<std::string>& accessions,
-    const std::vector<std::filesystem::path>& genomes,
-    db::GenomePack& pack,
-    const std::string& taxonomy,
-    const std::unordered_map<std::string, double>& quality_scores,
-    db::EmbeddingStore* emb_store)
-{
-    const size_t n = accessions.size();
-    if (is_verbose()) spdlog::info("GEODESIC: loading {} genomes from pack (dim={}, k={})",
-                                   n, cfg_.embedding_dim, cfg_.kmer_size);
+    size_t gpk_hits = 0, gpk_misses = 0;
 
     auto t0 = std::chrono::steady_clock::now();
-    auto td = pack.has_taxon(taxonomy) ? pack.fetch_taxon(taxonomy) : db::GenomePack::TaxonData{};
-    auto t1 = std::chrono::steady_clock::now();
 
-    std::unordered_map<std::string, size_t> acc_to_pack;
-    acc_to_pack.reserve(td.genomes.size());
-    for (size_t i = 0; i < td.genomes.size(); ++i)
-        acc_to_pack[td.genomes[i].accession] = i;
+    // Shard-batch fetch: delivers one shard at a time (~200 genomes),
+    // embeds the batch in parallel (OMP), releases shard pages, moves to next.
+    // Peak memory: O(genomes_per_shard × fasta_size) ≈ 200MB vs 224GB for all-at-once.
+    // Parallelism: OMP over genomes within each shard batch.
+    std::vector<bool> gpk_found(n, false);
+
+    gpk.visit_shard_batches(accessions,
+        [&](genopack::ArchiveReader::ShardBatch& batch) {
+            const int bsz = static_cast<int>(batch.size());
+            #pragma omp parallel for schedule(dynamic, 1) num_threads(cfg_.threads)
+            for (int j = 0; j < bsz; ++j) {
+                size_t i = batch[j].first;
+                const auto& eg = batch[j].second;
+                gpk_found[i] = true;
+                try {
+                    embeddings_[i] = embed_genome_from_buffer(eg.fasta.data(), eg.fasta.size(),
+                                                              i, genomes[i]);
+                } catch (const std::exception& e) {
+                    spdlog::error("GEODESIC: gpk embed failed for {}: {}", accessions[i], e.what());
+                    embeddings_[i].genome_id = i;
+                    embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+                    embeddings_[i].quality_score = 0.0f;
+                    embeddings_[i].path = genomes[i];
+                }
+            }
+        });
+
+    for (size_t i = 0; i < n; ++i) {
+        if (gpk_found[i]) {
+            ++gpk_hits;
+            auto it = quality_scores.find(path_strs[i]);
+            if (it != quality_scores.end())
+                embeddings_[i].quality_score = static_cast<float>(it->second);
+            else if (embeddings_[i].quality_score == 0.0f)
+                embeddings_[i].quality_score = 50.0f;
+        } else {
+            ++gpk_misses;
+            spdlog::warn("GEODESIC: {} not found in pack — skipping (no NFS fallback)",
+                         accessions[i]);
+            {
+                std::lock_guard<std::mutex> lock(failed_reads_mutex_);
+                failed_reads_.emplace_back(genomes[i].string(),
+                                           "not found in genopack archive");
+            }
+            embeddings_[i].genome_id = i;
+            embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+            embeddings_[i].quality_score = 0.0f;
+            embeddings_[i].path = genomes[i];
+        }
+    }
+
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    spdlog::info("GEODESIC: gpk timing: {}ms ({} hits, {} not found in pack)", ms, gpk_hits, gpk_misses);
+
+    finalize_embeddings_();
+}
+
+void GeodesicDerep::build_index_from_gpk_sketches(
+    const std::vector<std::string>& accessions,
+    const std::vector<std::filesystem::path>& genomes,
+    IPackReader& gpk,
+    const std::unordered_map<std::string, double>& quality_scores)
+{
+    const size_t n = accessions.size();
+    if (is_verbose()) spdlog::info("GEODESIC: gpk-sketch: loading {} genomes from SKCH section", n);
+
+    gpk_reader_ = &gpk;
+    gpk_accessions_ = accessions;
 
     embeddings_.resize(n);
     store_.resize(n, cfg_.embedding_dim);
     buf_cache_.assign(n, {});
     buf_cache_bytes_.store(0);
 
+    auto t0 = std::chrono::steady_clock::now();
+
+    // Resolve accessions to genome_ids, then fetch sketches from SKCH.
+    size_t hits = 0, misses = 0;
     std::vector<std::string> path_strs(n);
     for (size_t i = 0; i < n; ++i) path_strs[i] = genomes[i].string();
 
-    size_t pack_hits = 0, pack_misses = 0;
-
-    const int io_threads = (cfg_.io_threads > 0) ? cfg_.io_threads : cfg_.threads;
-
-#if GEODESIC_USE_OMP
-    {
-    std::counting_semaphore<> io_sem(io_threads);
-    #pragma omp parallel for schedule(dynamic, 1)
     for (size_t i = 0; i < n; ++i) {
-        auto pit = acc_to_pack.find(accessions[i]);
-        if (pit != acc_to_pack.end()) {
-            const char* data = td.data(pit->second);
-            const size_t len = td.size(pit->second);
-            try {
-                embeddings_[i] = embed_genome_from_buffer(data, len, i, genomes[i]);
-                #pragma omp atomic
-                ++pack_hits;
-            } catch (const std::exception& e) {
-                spdlog::error("GEODESIC: embed from pack failed for {}: {}", accessions[i], e.what());
-                embeddings_[i].genome_id = i;
-                embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
-                embeddings_[i].quality_score = 0.0f;
-                embeddings_[i].path = genomes[i];
-            }
-        } else {
-            io_sem.acquire();
-            try {
-                embeddings_[i] = embed_genome(genomes[i], i);
-            } catch (...) {
-                embeddings_[i].genome_id = i;
-                embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
-                embeddings_[i].quality_score = 0.0f;
-                embeddings_[i].path = genomes[i];
-            }
-            io_sem.release();
-            #pragma omp atomic
-            ++pack_misses;
+        auto meta = gpk.genome_meta_by_accession(accessions[i]);
+        if (!meta) {
+            ++misses;
+            embeddings_[i].genome_id = i;
+            embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+            embeddings_[i].quality_score = 0.0f;
+            embeddings_[i].path = genomes[i];
+            continue;
         }
+
+        auto sk = gpk.sketch_for(meta->genome_id);
+        if (!sk) {
+            ++misses;
+            embeddings_[i].genome_id = i;
+            embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
+            embeddings_[i].quality_score = 0.0f;
+            embeddings_[i].path = genomes[i];
+            continue;
+        }
+
+        // Use SKCH sketch_size for this run (overrides calibrated value on first hit).
+        if (hits == 0) cfg_.sketch_size = static_cast<int>(sk->sketch_size);
+
+        ++hits;
+        auto& emb = embeddings_[i];
+        emb.genome_id = i;
+        emb.vector.assign(cfg_.embedding_dim, 0.0f);
+        emb.oph_sig.assign(sk->sig, sk->sig + sk->sketch_size);
+        emb.n_real_bins = sk->n_real_bins;
+        emb.genome_size = sk->genome_length;
+        emb.real_bins_mask.assign(sk->mask, sk->mask + sk->mask_words);
+        emb.isolation_score = 0.0f;
+        emb.path = genomes[i];
+
         auto it = quality_scores.find(path_strs[i]);
         if (it != quality_scores.end())
-            embeddings_[i].quality_score = static_cast<float>(it->second);
-        else if (embeddings_[i].quality_score != 0.0f)
-            embeddings_[i].quality_score = 50.0f;
+            emb.quality_score = static_cast<float>(it->second);
+        else
+            emb.quality_score = 50.0f;
     }
-    }
-#else
-    for (size_t i = 0; i < n; ++i) {
-        auto pit = acc_to_pack.find(accessions[i]);
-        if (pit != acc_to_pack.end()) {
-            try {
-                embeddings_[i] = embed_genome_from_buffer(td.data(pit->second), td.size(pit->second), i, genomes[i]);
-                ++pack_hits;
-            } catch (const std::exception& e) {
-                spdlog::error("GEODESIC: embed from pack failed for {}: {}", accessions[i], e.what());
-                embeddings_[i].genome_id = i;
-                embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
-                embeddings_[i].quality_score = 0.0f;
-                embeddings_[i].path = genomes[i];
-            }
-        } else {
-            embeddings_[i] = embed_genome(genomes[i], i);
-            ++pack_misses;
-        }
-        auto it = quality_scores.find(path_strs[i]);
-        if (it != quality_scores.end())
-            embeddings_[i].quality_score = static_cast<float>(it->second);
-        else if (embeddings_[i].quality_score != 0.0f)
-            embeddings_[i].quality_score = 50.0f;
-    }
-#endif
 
-    auto t2 = std::chrono::steady_clock::now();
-    auto ms_fetch = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    auto ms_embed = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-    spdlog::info("GEODESIC: pack timing: fetch={}ms embed={}ms ({} hits, {} NFS fallback)",
-                 ms_fetch, ms_embed, pack_hits, pack_misses);
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    spdlog::info("GEODESIC: gpk-sketch timing: {}ms ({} hits, {} misses)", ms, hits, misses);
 
-    finalize_embeddings_(emb_store, taxonomy);
+    if (misses > 0)
+        spdlog::warn("GEODESIC: {} genomes not found in SKCH section — they will have zero embeddings", misses);
+
+    finalize_embeddings_();
 }
 
 GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
@@ -1352,6 +1361,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     // Phase B: probe ladder finds k_stable (smallest k within 3% of B(K_cap)).
     // Outlier genomes (isolation_score > mean+2σ) are excluded from the MST core.
     double mst_max_edge = 0.0;
+    double mst_true_max = 0.0;
     double mst_w2 = 0.0;
     uint32_t bridge_min_side = 0;
     std::vector<double> mst_weights;
@@ -1547,6 +1557,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             struct KNNEdge { uint32_t u, v; float dist; };
             struct MstResult {
                 double   max_edge  = 0.0;
+                double   p90_edge  = 0.0;
                 double   w2        = 0.0;
                 uint32_t bridge_min = 0;
                 std::vector<double>   weights;
@@ -1601,6 +1612,11 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
                         if (--res.components == 1) break;
                     }
                 }
+                if (!res.weights.empty()) {
+                    size_t p90_idx = static_cast<size_t>(res.weights.size() * 0.90);
+                    p90_idx = std::min(p90_idx, res.weights.size() - 1);
+                    res.p90_edge = res.weights[p90_idx];
+                }
                 res.labels.resize(n_main);
                 std::unordered_map<uint32_t, uint32_t> root_label;
                 uint32_t next_lbl = 0;
@@ -1646,7 +1662,8 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             }
             const MstResult& chosen = used_cap ? res_cap : chosen_storage;
 
-            mst_max_edge    = chosen.max_edge;
+            mst_true_max    = chosen.max_edge;
+            mst_max_edge    = chosen.p90_edge;
             mst_w2          = chosen.w2;
             bridge_min_side = chosen.bridge_min;
             mst_weights     = chosen.weights;
@@ -1661,9 +1678,9 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             if (is_verbose()) {
                 spdlog::info("GEODESIC: MST over {} non-outlier genomes "
                              "(k_conn={} k_stable={} K_cap={} components={} "
-                             "B_stable={:.5f} B_ref={:.5f})",
+                             "B_stable_P90={:.5f} B_stable_max={:.5f} B_ref={:.5f})",
                              n_main, k_conn_min, k_stable_val, K_cap,
-                             chosen.components, mst_max_edge, B_ref);
+                             chosen.components, mst_max_edge, mst_true_max, B_ref);
             } else if (disconnected) {
                 spdlog::info("GEODESIC: k-NN graph disconnected at K_cap={} (components={}); "
                              "per-component thresholds will be used", K_cap, chosen.components);
@@ -1741,6 +1758,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     stats.p50 = nn_dists[n * 50 / 100];
     stats.p95 = nn_dists[n * 95 / 100];
     stats.mst_max_edge    = mst_max_edge;
+    stats.mst_true_max    = mst_true_max;
     stats.mst_w2          = mst_w2;
     stats.bridge_min_side = bridge_min_side;
     stats.k_conn          = k_conn_min;
@@ -1753,23 +1771,23 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     // (no other MST edges exist near that scale). Genuine multi-scale population
     // structure (e.g. S. enterica serovars) has substantial components on both sides
     // and many inter-group MST edges near the same scale → stays silent.
-    if (mst_max_edge > 0.0 && mst_n_main >= 2) {
+    if (mst_true_max > 0.0 && mst_n_main >= 2) {
         const int tail_count = static_cast<int>(std::count_if(
             mst_weights.begin(), mst_weights.end(),
-            [w1 = mst_max_edge](double w) { return w >= 0.8 * w1; }));
+            [w1 = mst_true_max](double w) { return w >= 0.8 * w1; }));
         const bool is_tiny_side = (bridge_min_side <= 10)
                                && (static_cast<double>(bridge_min_side) / mst_n_main <= 0.005);
         const bool is_isolated  = (tail_count <= 2)
-                               || (mst_w2 > 1e-9 && mst_max_edge / mst_w2 >= 1.8);
+                               || (mst_w2 > 1e-9 && mst_true_max / mst_w2 >= 1.8);
         stats.pathological_bridge = is_tiny_side && is_isolated;
     }
     // Log multiscale separation as a diagnostic (not a warning — high ratio is expected
     // for species with genuine serovar/pathotype structure).
-    if (mst_max_edge > 0.0 && stats.p95 > 1e-9) {
-        if (is_verbose() || mst_max_edge / stats.p95 > 5.0)
+    if (mst_true_max > 0.0 && stats.p95 > 1e-9) {
+        if (is_verbose() || mst_true_max / stats.p95 > 5.0)
             spdlog::info("GEODESIC: multiscale diagnostic: mst_max/P95={:.1f} "
-                         "(mst={:.4f} P95={:.4f} w2={:.4f} bridge_min_side={})",
-                         mst_max_edge / stats.p95, mst_max_edge, stats.p95,
+                         "(mst_max={:.4f} mst_P90={:.4f} P95={:.4f} w2={:.4f} bridge_min_side={})",
+                         mst_true_max / stats.p95, mst_true_max, mst_max_edge, stats.p95,
                          mst_w2, bridge_min_side);
     }
     return stats;
@@ -1885,12 +1903,16 @@ void GeodesicDerep::apply_nystrom_embeddings() {
         for (int j = i + 1; j < static_cast<int>(n_anchors); ++j) {
             size_t ai = anchor_idx[static_cast<size_t>(i)];
             size_t aj = anchor_idx[static_cast<size_t>(j)];
+            const auto& sa = embeddings_[ai].oph_sig;
+            const auto& sb = embeddings_[aj].oph_sig;
             float jac = static_cast<float>(
-                refine_jaccard(embeddings_[ai].oph_sig, embeddings_[aj].oph_sig));
+                refine_jaccard_ptr(sa.data(), sb.data(), sa.size()));
             // Improvement 5: average two sketches for variance reduction
             if (!embeddings_[ai].oph_sig2.empty() && !embeddings_[aj].oph_sig2.empty()) {
+                const auto& s2a = embeddings_[ai].oph_sig2;
+                const auto& s2b = embeddings_[aj].oph_sig2;
                 float jac2 = static_cast<float>(
-                    refine_jaccard(embeddings_[ai].oph_sig2, embeddings_[aj].oph_sig2));
+                    refine_jaccard_ptr(s2a.data(), s2b.data(), s2a.size()));
                 jac = (jac + jac2) * 0.5f;
             }
             K_rm(i, j) = jac;
@@ -1967,6 +1989,12 @@ void GeodesicDerep::apply_nystrom_embeddings() {
         actual_d = max_d;
     }
 
+    // Round up to multiple of 16 for hnswlib SIMD alignment.
+    // hnswlib's InnerProductSpace dispatches to SIMD16 when dim%16==0,
+    // avoiding the Residuals path whose prefetch reads one past the neighbor list.
+    actual_d = ((actual_d + 15) / 16) * 16;
+    actual_d = std::min(actual_d, max_d);
+
     Eigen::MatrixXf U = solver.eigenvectors().rightCols(actual_d); // [n_anchors × d]
     Eigen::VectorXf lam = eigenvalues_shifted.tail(actual_d);      // [d]
     lam = lam.cwiseMax(1e-10f);  // safety floor for inv-sqrt
@@ -2018,93 +2046,123 @@ void GeodesicDerep::apply_nystrom_embeddings() {
     for (size_t i = 0; i < n; ++i)
         embeddings_[i].vector.resize(actual_d);
 
+    // Batch size for GEMM: k_mat[BATCH×L] × W[L×D] = e_mat[BATCH×D].
+    // BLAS-3 reuses W (512×256 = 2 MB) across the batch; individual GEMV re-reads it per genome.
+    // At BATCH=64: k_mat(64KB) + e_mat(64KB) stay in L2, W tiles through L3 once per batch.
+    constexpr int kNysBatch = 64;
+    const int n_batches = static_cast<int>((n + kNysBatch - 1) / kNysBatch);
+    const Eigen::RowVectorXf d_anc_row = d_anchor_inv_sqrt.transpose();
+
+    using RowMajMat = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+
 #if GEODESIC_USE_OMP
     #pragma omp parallel num_threads(cfg_.threads)
     {
-        // Thread-local Eigen temporaries: one alloc per thread instead of per genome.
-        Eigen::VectorXf k_G(static_cast<int>(n_anchors));
-        Eigen::VectorXf e_raw(actual_d);
+        // Thread-local batch matrices: allocated once per thread, reused per batch.
+        RowMajMat k_mat(kNysBatch, static_cast<int>(n_anchors));
+        RowMajMat e_mat(kNysBatch, actual_d);
 
         #pragma omp for schedule(static)
-        for (size_t i = 0; i < n; ++i) {
-            int32_t ap = anchor_pos[i];
-            if (ap >= 0) {
-                // Anchor: k_G is already degree-normalized (read from K after Step 2+3).
-                // Do NOT re-normalize below.
-                k_G = K.row(ap).transpose();
-            } else {
-                // Non-anchor: sig1 only, via contiguous anchor slab + AVX2 equality count.
-                // Each Jaccard call compares 4096 uint16_t; AVX2 cuts that to 256 vector ops.
-                if (embeddings_[i].oph_sig.empty()) continue;  // genome failed to sketch
-                const uint16_t* sig_i_ptr = embeddings_[i].oph_sig.data();
-                for (size_t a = 0; a < n_anchors; ++a) {
-                    float jac;
-                    if (!anchor_slab.empty()) {
-                        jac = static_cast<float>(
-                            refine_jaccard_ptr(sig_i_ptr,
-                                              anchor_slab.data() + a * m_sig, m_sig));
-                    } else {
-                        jac = static_cast<float>(
-                            refine_jaccard(embeddings_[i].oph_sig, embeddings_[anchor_idx[a]].oph_sig));
+        for (int b = 0; b < n_batches; ++b) {
+            const size_t i0 = static_cast<size_t>(b) * kNysBatch;
+            const size_t i1 = std::min(i0 + static_cast<size_t>(kNysBatch), n);
+            const int bs = static_cast<int>(i1 - i0);
+
+            for (int bi = 0; bi < bs; ++bi) {
+                const size_t i = i0 + static_cast<size_t>(bi);
+                const int32_t ap = anchor_pos[i];
+                if (ap >= 0) {
+                    // Anchor: row already degree-normalized in K (Step 2+3).
+                    k_mat.row(bi) = K.row(ap);
+                } else {
+                    if (embeddings_[i].oph_sig.empty()) {
+                        k_mat.row(bi).setZero();
+                        continue;
                     }
-                    k_G(static_cast<int>(a)) = jac;
+                    const uint16_t* sig_i_ptr = embeddings_[i].oph_sig.data();
+                    for (size_t a = 0; a < n_anchors; ++a) {
+                        float jac;
+                        if (!anchor_slab.empty()) {
+                            jac = static_cast<float>(
+                                refine_jaccard_ptr(sig_i_ptr,
+                                                  anchor_slab.data() + a * m_sig, m_sig));
+                        } else {
+                            const auto& sig_a = embeddings_[anchor_idx[a]].oph_sig;
+                            jac = static_cast<float>(
+                                refine_jaccard_ptr(sig_i_ptr, sig_a.data(), m_sig));
+                        }
+                        k_mat(bi, static_cast<int>(a)) = jac;
+                    }
+                    if (cfg_.nystrom_degree_normalize) {
+                        float d_i = k_mat.row(bi).sum();
+                        if (d_i < 1e-10f) d_i = 1.0f;
+                        k_mat.row(bi) =
+                            k_mat.row(bi).cwiseProduct(d_anc_row) / std::sqrt(d_i);
+                    }
                 }
             }
 
-            // Apply matching degree normalization only for non-anchors.
-            // Anchor k_G is read from K which is already degree-normalized.
-            if (cfg_.nystrom_degree_normalize && ap < 0) {
-                float d_i = k_G.sum();
-                if (d_i < 1e-10f) d_i = 1.0f;
-                float inv_sqrt_di = 1.0f / std::sqrt(d_i);
-                k_G = k_G.cwiseProduct(d_anchor_inv_sqrt) * inv_sqrt_di;
+            // Batched GEMM: e_mat[bs×D] = k_mat[bs×L] × W[L×D]
+            e_mat.topRows(bs).noalias() = k_mat.topRows(bs) * W;
+
+            for (int bi = 0; bi < bs; ++bi) {
+                const size_t i = i0 + static_cast<size_t>(bi);
+                float norm = e_mat.row(bi).norm();
+                if (norm > 1e-10f) e_mat.row(bi) /= norm;
+                std::copy(e_mat.row(bi).data(), e_mat.row(bi).data() + actual_d,
+                          embeddings_[i].vector.data());
+                std::copy(e_mat.row(bi).data(), e_mat.row(bi).data() + actual_d,
+                          store_.row(i));
             }
-
-            // ẽ(G) = W^T × k_G, normalized to unit sphere
-            e_raw.noalias() = W.transpose() * k_G;
-            float norm = e_raw.norm();
-            if (norm > 1e-10f) e_raw /= norm;
-
-            std::copy(e_raw.data(), e_raw.data() + actual_d, embeddings_[i].vector.data());
-            std::copy(e_raw.data(), e_raw.data() + actual_d, store_.row(i));
         }
     }
 #else
     {
-        Eigen::VectorXf k_G(static_cast<int>(n_anchors));
-        Eigen::VectorXf e_raw(actual_d);
-        for (size_t i = 0; i < n; ++i) {
-            int32_t ap = anchor_pos[i];
-            if (ap >= 0) {
-                k_G = K.row(ap).transpose();
-            } else {
-                if (embeddings_[i].oph_sig.empty()) continue;
-                const uint16_t* sig_i_ptr = embeddings_[i].oph_sig.data();
-
-                for (size_t a = 0; a < n_anchors; ++a) {
-                    float jac;
-                    if (!anchor_slab.empty()) {
-                        jac = static_cast<float>(
-                            refine_jaccard_ptr(sig_i_ptr,
-                                              anchor_slab.data() + a * m_sig, m_sig));
-                    } else {
-                        jac = static_cast<float>(
-                            refine_jaccard(embeddings_[i].oph_sig, embeddings_[anchor_idx[a]].oph_sig));
+        RowMajMat k_mat(kNysBatch, static_cast<int>(n_anchors));
+        RowMajMat e_mat(kNysBatch, actual_d);
+        for (int b = 0; b < n_batches; ++b) {
+            const size_t i0 = static_cast<size_t>(b) * kNysBatch;
+            const size_t i1 = std::min(i0 + static_cast<size_t>(kNysBatch), n);
+            const int bs = static_cast<int>(i1 - i0);
+            for (int bi = 0; bi < bs; ++bi) {
+                const size_t i = i0 + static_cast<size_t>(bi);
+                const int32_t ap = anchor_pos[i];
+                if (ap >= 0) {
+                    k_mat.row(bi) = K.row(ap);
+                } else {
+                    if (embeddings_[i].oph_sig.empty()) { k_mat.row(bi).setZero(); continue; }
+                    const uint16_t* sig_i_ptr = embeddings_[i].oph_sig.data();
+                    for (size_t a = 0; a < n_anchors; ++a) {
+                        float jac;
+                        if (!anchor_slab.empty()) {
+                            jac = static_cast<float>(
+                                refine_jaccard_ptr(sig_i_ptr,
+                                                  anchor_slab.data() + a * m_sig, m_sig));
+                        } else {
+                            const auto& sig_a = embeddings_[anchor_idx[a]].oph_sig;
+                            jac = static_cast<float>(
+                                refine_jaccard_ptr(sig_i_ptr, sig_a.data(), m_sig));
+                        }
+                        k_mat(bi, static_cast<int>(a)) = jac;
                     }
-                    k_G(static_cast<int>(a)) = jac;
+                    if (cfg_.nystrom_degree_normalize) {
+                        float d_i = k_mat.row(bi).sum();
+                        if (d_i < 1e-10f) d_i = 1.0f;
+                        k_mat.row(bi) =
+                            k_mat.row(bi).cwiseProduct(d_anc_row) / std::sqrt(d_i);
+                    }
                 }
             }
-            if (cfg_.nystrom_degree_normalize && ap < 0) {
-                float d_i = k_G.sum();
-                if (d_i < 1e-10f) d_i = 1.0f;
-                float inv_sqrt_di = 1.0f / std::sqrt(d_i);
-                k_G = k_G.cwiseProduct(d_anchor_inv_sqrt) * inv_sqrt_di;
+            e_mat.topRows(bs).noalias() = k_mat.topRows(bs) * W;
+            for (int bi = 0; bi < bs; ++bi) {
+                const size_t i = i0 + static_cast<size_t>(bi);
+                float norm = e_mat.row(bi).norm();
+                if (norm > 1e-10f) e_mat.row(bi) /= norm;
+                std::copy(e_mat.row(bi).data(), e_mat.row(bi).data() + actual_d,
+                          embeddings_[i].vector.data());
+                std::copy(e_mat.row(bi).data(), e_mat.row(bi).data() + actual_d,
+                          store_.row(i));
             }
-            e_raw.noalias() = W.transpose() * k_G;
-            float norm = e_raw.norm();
-            if (norm > 1e-10f) e_raw /= norm;
-            std::copy(e_raw.data(), e_raw.data() + actual_d, embeddings_[i].vector.data());
-            std::copy(e_raw.data(), e_raw.data() + actual_d, store_.row(i));
         }
     }
 #endif
@@ -2254,12 +2312,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     size_t n = store_.n;
     edges.reserve(n);
     size_t dim = store_.dim;
-#if GEODESIC_USE_OMP
-    // Always enforce thread count — omp_set_num_threads() may not have been called
-    // when build_index_incremental runs with zero missing genomes (fully-warm run).
-    // Without this, OMP defaults to all system CPUs causing massive per-region overhead.
-    omp_set_num_threads(cfg_.threads);
-#endif
+    // NOTE: do NOT call omp_set_num_threads() here — it is process-global and
+    // corrupts libgomp state when multiple taxa run concurrently. All OMP regions
+    // below use explicit num_threads(cfg_.threads) clauses instead.
 
     // Track max similarity to any representative (higher = closer = more redundant)
     // Using similarity instead of distance avoids acos in the hot loop
@@ -2269,8 +2324,11 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
     // Similarity function: exact Jaccard for small n (no Nyström), dot product otherwise.
     auto sim_fn = [&](size_t i, size_t j) -> float {
-        if (!nystrom_applied_)
-            return static_cast<float>(refine_jaccard(embeddings_[i].oph_sig, embeddings_[j].oph_sig));
+        if (!nystrom_applied_) {
+            const auto& sa = embeddings_[i].oph_sig;
+            const auto& sb = embeddings_[j].oph_sig;
+            return static_cast<float>(refine_jaccard_ptr(sa.data(), sb.data(), sa.size()));
+        }
         return dot_product_simd(store_.row(i), store_.row(j), dim);
     };
 
@@ -2300,7 +2358,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             is_rep_row[i] = true;
             const size_t rep_store_i = i;
 #if GEODESIC_USE_OMP
-            #pragma omp parallel for
+            #pragma omp parallel for num_threads(cfg_.threads)
 #endif
             for (size_t j = 0; j < n; ++j) {
                 float sim = sim_fn(rep_store_i, j);
@@ -2350,7 +2408,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
         // Update similarities to first rep
 #if GEODESIC_USE_OMP
-        #pragma omp parallel for
+        #pragma omp parallel for num_threads(cfg_.threads)
 #endif
         for (size_t i = 0; i < n; ++i) {
             max_sim_to_rep[i] = sim_fn(first_idx, i);
@@ -2403,7 +2461,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         struct FitEntry { float dist_fit; float quality; size_t idx; };
         std::vector<FitEntry> fit_active(active.size());
 #if GEODESIC_USE_OMP
-        #pragma omp parallel for
+        #pragma omp parallel for num_threads(cfg_.threads)
 #endif
         for (size_t ai = 0; ai < active.size(); ++ai) {
             size_t i = active[ai];
@@ -2459,7 +2517,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         const size_t nb = batch_idx.size();
         const size_t n_active = active.size();
 #if GEODESIC_USE_OMP
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) num_threads(cfg_.threads)
 #endif
         for (size_t ai = 0; ai < n_active; ++ai) {
             size_t j = active[ai];
@@ -2536,16 +2594,22 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             std::partial_sort(top_reps.begin(), top_reps.begin() + k_check, top_reps.end(),
                               [](const auto& a, const auto& b) { return a.first > b.first; });
 
-            // Verify each top-K rep with dual-sketch averaged OPH Jaccard.
+            // Verify each top-K rep with sig1 pre-filter + dual-sketch OPH Jaccard.
+            // sig1 is cheap (already in memory); skip sig2 when sig1 clearly shows
+            // the pair is distant — saves ~60-70% of sig2 materializations.
             bool covered = false;
             for (int ki = 0; ki < k_check && !covered; ++ki) {
                 size_t rep_emb_i = top_reps[ki].second;
                 const auto& sig_a  = embeddings_[i].oph_sig;
                 const auto& sig_b  = embeddings_[rep_emb_i].oph_sig;
                 if (sig_a.empty() || sig_b.empty()) continue;
-                double jac_exact = refine_jaccard(sig_a, sig_b);
+                double jac_exact = refine_jaccard_ptr(sig_a.data(), sig_b.data(), sig_a.size());
+                // Pre-filter: if sig1 alone is well below threshold, skip sig2
+                if (static_cast<float>(jac_exact) < cos_diversity * 0.9f) continue;
                 if (!embeddings_[i].oph_sig2.empty() && !embeddings_[rep_emb_i].oph_sig2.empty()) {
-                    double jac2 = refine_jaccard(embeddings_[i].oph_sig2, embeddings_[rep_emb_i].oph_sig2);
+                    const auto& s2a = embeddings_[i].oph_sig2;
+                    const auto& s2b = embeddings_[rep_emb_i].oph_sig2;
+                    double jac2 = refine_jaccard_ptr(s2a.data(), s2b.data(), s2a.size());
                     jac_exact = (jac_exact + jac2) * 0.5;
                 }
                 // dist_exact < diversity_threshold ↔ jac_exact > cos_diversity
@@ -2632,7 +2696,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             size_t ri = gid_to_idx[representatives[i]];
             for (size_t j = i + 1; j < representatives.size(); ++j) {
                 size_t rj = gid_to_idx[representatives[j]];
-                double jac = refine_jaccard(embeddings_[ri].oph_sig, embeddings_[rj].oph_sig);
+                const auto& sa = embeddings_[ri].oph_sig;
+                const auto& sb = embeddings_[rj].oph_sig;
+                double jac = refine_jaccard_ptr(sa.data(), sb.data(), sa.size());
                 // dist < min_rep_distance ↔ jac > cos_min_rep
                 if (static_cast<float>(jac) > cos_min_rep) {
                     unite(i, j);
@@ -2647,7 +2713,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
 #if GEODESIC_USE_OMP
         std::mutex merge_mutex;
-        #pragma omp parallel
+        #pragma omp parallel num_threads(cfg_.threads)
         {
             std::vector<std::pair<size_t, size_t>> local_pairs;
             #pragma omp for nowait
@@ -2726,7 +2792,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         // Selective recompute: only genomes whose nearest_rep was merged away.
         // Genomes assigned to surviving reps keep their current assignment.
 #if GEODESIC_USE_OMP
-        #pragma omp parallel for
+        #pragma omp parallel for num_threads(cfg_.threads)
 #endif
         for (size_t i = 0; i < n; ++i) {
             if (is_rep_row[i]) {
@@ -2870,10 +2936,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                 // Compute dot products: O(n_reps * d), fast (d=256 floats per rep)
                 std::vector<std::pair<float, size_t>> ranked(n_cert_reps);
                 for (size_t k = 0; k < n_cert_reps; ++k) {
-                    const float* vr = cert_rep_vecs[k];
-                    float dot = 0.0f;
-                    for (size_t dj = 0; dj < embed_d; ++dj) dot += vec_i[dj] * vr[dj];
-                    ranked[k] = {dot, cert_rep_idx[k]};
+                    ranked[k] = {dot_product_simd(vec_i, cert_rep_vecs[k], embed_d),
+                                 cert_rep_idx[k]};
                 }
                 std::partial_sort(ranked.begin(), ranked.begin() + CERT_TOP_K,
                                   ranked.end(),
@@ -2907,8 +2971,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         std::vector<size_t> repair_queue;
 #if GEODESIC_USE_OMP
         {
-            std::vector<std::vector<size_t>> tl_repair(static_cast<size_t>(omp_get_max_threads()));
-            #pragma omp parallel
+            std::vector<std::vector<size_t>> tl_repair(static_cast<size_t>(cfg_.threads));
+            #pragma omp parallel num_threads(cfg_.threads)
             {
                 auto& local_repair = tl_repair[static_cast<size_t>(omp_get_thread_num())];
                 #pragma omp for schedule(dynamic, 256)
@@ -2996,7 +3060,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             }
             const size_t n_repair = repair_queue.size();
 #if GEODESIC_USE_OMP
-            #pragma omp parallel for schedule(static)
+            #pragma omp parallel for schedule(static) num_threads(cfg_.threads)
 #endif
             for (size_t j = 0; j < n; ++j) {
                 if (is_rep_row[j]) continue;
@@ -3056,7 +3120,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
         // Refine borderline pairs with exact OPH bin-counting
         if (has_oph && std::abs(J_est - J_threshold) <= J_margin) {
-            J_est = refine_jaccard(embeddings_[i].oph_sig, embeddings_[rep_idx].oph_sig);
+            const auto& sa = embeddings_[i].oph_sig;
+            const auto& sb = embeddings_[rep_idx].oph_sig;
+            J_est = refine_jaccard_ptr(sa.data(), sb.data(), sa.size());
         }
         J_est = std::clamp(J_est, 0.0, 1.0);
 
@@ -3072,14 +3138,6 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
     if (is_verbose()) spdlog::info("GEODESIC: DONE - {} diverse representatives from {} genomes (SIMD+parallel, NO skani!)",
                  representatives.size(), n);
 
-    // Join async DB save (launched in build_index after Nyström). The save does not read
-    // oph_sig2 (lazy design: sig2 is not persisted), so there is no sig2 race. Joining
-    // ensures the DB write completes before we return and is safe to do here.
-    if (async_save_future_.valid()) {
-        try { async_save_future_.get(); } catch (const std::exception& e) {
-            spdlog::error("GEODESIC: async save failed in select_representatives: {}", e.what());
-        }
-    }
     // Free sig2 for the few genomes that had it materialized (anchors + borderline candidates).
     for (auto& emb : embeddings_) {
         std::vector<uint16_t>().swap(emb.oph_sig2);
@@ -3198,8 +3256,8 @@ struct IForest {
     }
 };
 
-std::vector<GeodesicDerep::ContaminationCandidate>
-GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
+std::vector<GeodesicDerep::OutlierCandidate>
+GeodesicDerep::detect_outlier_candidates(float z_threshold) const {
     if (embeddings_.size() <= SMALL_N_THRESHOLD) return {};
 
     size_t n   = embeddings_.size();
@@ -3334,7 +3392,7 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
     // isolation_score > median + z_threshold * 1.4826 * MAD → statistically anomalous k-NN distance
     // → likely misassigned taxonomy.
 
-    std::vector<ContaminationCandidate> candidates;
+    std::vector<OutlierCandidate> candidates;
     for (size_t i = 0; i < n; ++i) {
         const int comp_id = (n_comps > 0) ? component_ids_[i] : -1;
         // Per-component threshold: use max(comp_thr, global_thr).
@@ -3369,7 +3427,7 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
         if (sz_z < -2.0f) reason += ":small_genome";
         if (embeddings_[i].n_contigs > 100) reason += ":fragmented";
 
-        ContaminationCandidate c;
+        OutlierCandidate c;
         c.genome_id            = embeddings_[i].genome_id;
         c.centroid_distance    = angular_distance(embeddings_[i].vector, centroid);
         c.isolation_score      = embeddings_[i].isolation_score;
@@ -3380,6 +3438,8 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
         c.margin_to_threshold  = embeddings_[i].isolation_score - thr;
         c.flag_reason          = std::move(reason);
         c.path                 = embeddings_[i].path;
+        c.n_contigs            = embeddings_[i].n_contigs;
+        c.genome_length_bp     = embeddings_[i].genome_size;
         candidates.push_back(c);
     }
 
@@ -3389,7 +3449,7 @@ GeodesicDerep::detect_contamination_candidates(float z_threshold) const {
     const size_t n_misassigned = std::count_if(candidates.begin(), candidates.end(),
                                                 [](const auto& c) { return c.nn_outlier; });
     if (!candidates.empty())
-        spdlog::info("GEODESIC: {} contamination candidates ({} misassigned, "
+        spdlog::info("GEODESIC: {} outlier candidates ({} misassigned, "
                      "{} components, global_thr={:.4f}, median={:.3f}, MAD={:.4f})",
                      candidates.size(), n_misassigned,
                      n_comps, nn_threshold, iso_median, iso_mad);
@@ -3454,7 +3514,7 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
     size_t n_valid = 0;
 
 #if GEODESIC_USE_OMP
-    #pragma omp parallel for reduction(+:coverage_sum,n_valid) reduction(min:coverage_min) reduction(max:coverage_max)
+    #pragma omp parallel for reduction(+:coverage_sum,n_valid) reduction(min:coverage_min) reduction(max:coverage_max) num_threads(cfg_.threads)
 #endif
     for (size_t i = 0; i < embeddings_.size(); ++i) {
         const float* query = store_.row(i);
@@ -3520,7 +3580,7 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
 
         int cnt99 = 0, cnt98 = 0, cnt97 = 0, cnt95 = 0;
 #if GEODESIC_USE_OMP
-        #pragma omp parallel for reduction(+:cnt99,cnt98,cnt97,cnt95)
+        #pragma omp parallel for reduction(+:cnt99,cnt98,cnt97,cnt95) num_threads(cfg_.threads)
 #endif
         for (size_t i = 0; i < embeddings_.size(); ++i) {
             if (!std::isfinite(coverage_dists[i])) continue;
@@ -3604,221 +3664,6 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
     }
 
     return metrics;
-}
-
-// ============================================================================
-// Incremental embedding support
-// ============================================================================
-
-size_t GeodesicDerep::build_index_incremental(
-    const std::vector<std::filesystem::path>& genomes,
-    db::EmbeddingStore& store,
-    const std::string& taxonomy,
-    const std::unordered_map<std::string, double>& quality_scores) {
-
-    if (genomes.empty()) return 0;
-
-    // Clear reuse-sensitive state from prior invocations
-    embeddings_.clear();
-    embeddings_.reserve(genomes.size());
-    failed_reads_.clear();
-    last_representative_ids_.clear();
-    nystrom_applied_ = false;
-
-    // Build path → accession map (stem-based extraction)
-    path_to_accession_.clear();
-    std::vector<std::string> all_accessions;
-    all_accessions.reserve(genomes.size());
-    for (const auto& p : genomes) {
-        std::string acc = p.stem().string();
-        if (acc.size() > 8 && acc.substr(acc.size() - 8) == "_genomic")
-            acc = acc.substr(0, acc.size() - 8);
-        path_to_accession_[p.string()] = acc;
-        all_accessions.push_back(acc);
-    }
-
-    // Find which genomes are already embedded
-    auto embedded_set = store.get_embedded_set(taxonomy);
-    std::vector<std::filesystem::path> missing_genomes;
-    missing_genomes.reserve(genomes.size());
-    for (const auto& p : genomes) {
-        if (embedded_set.find(path_to_accession_[p.string()]) == embedded_set.end())
-            missing_genomes.push_back(p);
-    }
-
-    // Load cached embeddings (includes OPH signatures for Nyström reconstruction)
-    auto existing = store.load_embeddings(taxonomy);
-
-    spdlog::info("GEODESIC: {} genomes total, {} already embedded, {} to embed",
-                 genomes.size(), existing.size(), missing_genomes.size());
-
-    // Embed missing genomes from NFS
-    size_t newly_embedded = 0;
-    if (!missing_genomes.empty()) {
-        if (is_verbose()) spdlog::info("GEODESIC: embedding {} new genomes (dim={}, k={}, threads={})",
-                     missing_genomes.size(), cfg_.embedding_dim, cfg_.kmer_size, cfg_.threads);
-
-        std::vector<GenomeEmbedding> new_embeddings(missing_genomes.size());
-        ProgressCounter embed_progress(missing_genomes.size(), "GEODESIC: embedding");
-
-        const int io_threads = (cfg_.io_threads > 0) ? cfg_.io_threads
-                                                       : cfg_.threads;
-#if GEODESIC_USE_OMP
-        omp_set_num_threads(cfg_.threads);
-        {
-        std::counting_semaphore<> io_sem(io_threads);
-        #pragma omp parallel for schedule(dynamic, 1)
-        for (size_t i = 0; i < missing_genomes.size(); ++i) {
-            io_sem.acquire();
-            new_embeddings[i] = embed_genome(missing_genomes[i], existing.size() + i);
-            io_sem.release();
-            auto qit = quality_scores.find(missing_genomes[i].string());
-            if (qit != quality_scores.end())
-                new_embeddings[i].quality_score = static_cast<float>(qit->second);
-            embed_progress.increment();
-        }
-        }
-#else
-        for (size_t i = 0; i < missing_genomes.size(); ++i) {
-            new_embeddings[i] = embed_genome(missing_genomes[i], existing.size() + i);
-            auto qit = quality_scores.find(missing_genomes[i].string());
-            if (qit != quality_scores.end())
-                new_embeddings[i].quality_score = static_cast<float>(qit->second);
-            embed_progress.increment();
-        }
-#endif
-        embed_progress.finish();
-
-        // Save new embeddings to store (with OPH signatures for future warm runs)
-        std::vector<db::GenomeEmbedding> store_embeddings;
-        store_embeddings.reserve(new_embeddings.size());
-        for (const auto& emb : new_embeddings) {
-            db::GenomeEmbedding se;
-            se.accession = path_to_accession_[emb.path.string()];
-            se.taxonomy = taxonomy;
-            se.file_path = emb.path;
-            se.embedding = emb.vector;   // zeros (placeholder)
-            se.oph_sig = emb.oph_sig;    // raw OPH hashes
-            // oph_sig2 not persisted (lazy; re-materialized for anchors/borderline on each run)
-            se.real_bins_mask = emb.real_bins_mask;
-            se.n_real_bins = emb.n_real_bins;
-            se.isolation_score = emb.isolation_score;
-            se.quality_score = emb.quality_score;
-            se.genome_size = emb.genome_size;
-            store_embeddings.push_back(std::move(se));
-        }
-        if (!store.insert_embeddings(store_embeddings))
-            spdlog::error("GEODESIC: Failed to insert {} embeddings in incremental build",
-                          store_embeddings.size());
-        newly_embedded = new_embeddings.size();
-
-        for (auto& emb : new_embeddings)
-            embeddings_.push_back(std::move(emb));
-    }
-
-    // Convert cached embeddings to internal format (oph_sig loaded from BLOB)
-    for (const auto& se : existing) {
-        GenomeEmbedding emb;
-        emb.genome_id = embeddings_.size();
-        emb.vector.assign(cfg_.embedding_dim, 0.0f);  // placeholder, Nyström will replace
-        emb.oph_sig = se.oph_sig;                      // loaded from DB — no NFS read needed
-        // oph_sig2 not loaded (lazy; will be re-materialized by apply_nystrom_embeddings)
-        emb.real_bins_mask = se.real_bins_mask;        // bitmask for coverage metrics
-        emb.n_real_bins = se.n_real_bins;
-        emb.isolation_score = se.isolation_score;
-        emb.quality_score = se.quality_score;
-        emb.genome_size = se.genome_size;
-        emb.path = se.file_path;
-        embeddings_.push_back(std::move(emb));
-    }
-
-    // Reassign genome_ids sequentially so genome_id == index
-    for (size_t i = 0; i < embeddings_.size(); ++i)
-        embeddings_[i].genome_id = static_cast<uint64_t>(i);
-
-    size_t n = embeddings_.size();
-    if (n == 0) return 0;
-
-    // Build canonical ID → row map
-    gid_to_row_.clear();
-    gid_to_row_.reserve(n);
-    for (size_t i = 0; i < n; ++i)
-        gid_to_row_[embeddings_[i].genome_id] = i;
-
-    // Copy metadata to SoA store (data already zeroed by resize → value-init)
-    store_.resize(n, cfg_.embedding_dim);
-    for (size_t i = 0; i < n; ++i) {
-        store_.genome_ids[i] = embeddings_[i].genome_id;
-        store_.isolation_scores[i] = embeddings_[i].isolation_score;
-        store_.quality_scores[i] = embeddings_[i].quality_score;
-        store_.genome_sizes[i] = embeddings_[i].genome_size;
-        store_.paths[i] = embeddings_[i].path;
-    }
-
-    // Run Nyström on all embeddings (new + cached), using OPH signatures.
-    // This reconstructs proper spectral embeddings without any NFS genome reads.
-    nystrom_applied_ = false;
-    if (n > SMALL_N_THRESHOLD) {
-        apply_nystrom_embeddings();  // sets nystrom_applied_ = true, updates store_.data
-    } else {
-        // Small n: use exact OPH Jaccard (do NOT set nystrom_applied_ = true)
-        nystrom_applied_ = false;
-    }
-
-    // Build HNSW index from Nyström (or placeholder) vectors
-    if (n > SMALL_N_THRESHOLD) {
-        index_->build(embeddings_, cfg_.hnsw_m, cfg_.hnsw_ef_construction, cfg_.hnsw_ef_search, cfg_.threads);
-        if (is_verbose()) spdlog::info("GEODESIC: HNSW index built ({} embeddings, M={}, ef={})",
-                     n, cfg_.hnsw_m, cfg_.hnsw_ef_construction);
-    }
-
-    return newly_embedded;
-}
-
-void GeodesicDerep::save_embeddings_async(db::EmbeddingStore& store, const std::string& taxonomy,
-                                           std::vector<std::vector<float>>&& vec_snap) {
-    if (embeddings_.empty()) return;
-    const size_t n = embeddings_.size();
-    // Stream in batches of 1000: ~80 MB intermediate per batch instead of copying all 29 GB.
-    static constexpr size_t BATCH = 1000;
-    std::vector<db::GenomeEmbedding> batch;
-    batch.reserve(BATCH);
-
-    auto flush = [&]() {
-        if (batch.empty()) return;
-        if (!store.insert_embeddings(batch))
-            spdlog::error("GEODESIC: async save batch failed ({} embeddings)", batch.size());
-        batch.clear();
-    };
-
-    for (size_t i = 0; i < n; ++i) {
-        const auto& emb = embeddings_[i];
-        db::GenomeEmbedding se;
-        auto it = path_to_accession_.find(emb.path.string());
-        if (it != path_to_accession_.end()) {
-            se.accession = it->second;
-        } else {
-            se.accession = emb.path.stem().string();
-            if (se.accession.size() > 8 &&
-                se.accession.substr(se.accession.size() - 8) == "_genomic")
-                se.accession = se.accession.substr(0, se.accession.size() - 8);
-        }
-        se.taxonomy        = taxonomy;
-        se.file_path       = emb.path;
-        se.embedding       = std::move(vec_snap[i]);  // move: no copy of float vec
-        se.oph_sig         = emb.oph_sig;             // copy: oph_sig not modified by Nyström
-        // oph_sig2 is NOT persisted: it is lazily re-materialized for anchors/borderline
-        // on each run, so there is no need to store it and no risk of async read/write races.
-        se.real_bins_mask  = emb.real_bins_mask;
-        se.n_real_bins     = emb.n_real_bins;
-        se.isolation_score = emb.isolation_score;
-        se.quality_score   = emb.quality_score;
-        se.genome_size     = emb.genome_size;
-        batch.push_back(std::move(se));
-        if (batch.size() == BATCH) flush();
-    }
-    flush();
-    if (is_verbose()) spdlog::info("GEODESIC: Saved {} embeddings to store (async)", n);
 }
 
 } // namespace derep

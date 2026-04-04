@@ -5,14 +5,13 @@
 
 namespace derep {
 
-enum class Command { Derep, Report, Sketch, Pack };
+enum class Command { Derep, Update };
 
 struct Config {
     Command command = Command::Derep;
 
     // I/O
     std::filesystem::path tax_file;
-    std::filesystem::path db_path{"geodesic.db"};
     std::optional<std::filesystem::path> selected_taxa_file;
     std::optional<std::filesystem::path> checkm2_file;
     std::optional<std::filesystem::path> gunc_file;
@@ -51,23 +50,27 @@ struct Config {
     float nystrom_diagonal_loading = 0.01f;
     bool nystrom_degree_normalize = true;
 
-    // Incremental embedding store (DuckDB-VSS)
-    std::optional<std::filesystem::path> embedding_db;
-    bool incremental = false;
+    // NCBI taxdump directory for Eukaryote/Virus taxonomy resolution.
+    // If set and the dump is absent/stale, it will be downloaded automatically.
+    // If not set, non-prokaryote genomes are normalized from their input taxonomy string.
+    std::optional<std::filesystem::path> ncbi_taxdump_dir;
 
-    // Sketch cache (DuckDB on /scratch)
-    std::optional<std::filesystem::path> sketch_db;
-    bool require_sketches = false;  // fail hard if any genome missing from sketch cache
-
-    // Genome pack (taxonomy-indexed zstd store on fast local storage)
+    // Genome pack (.gpk archive built by genopack)
     std::optional<std::filesystem::path> pack_dir;
-    int pack_zstd_level = 15;
+
+    // GEODF output (optional; empty = disabled)
+    std::filesystem::path geodf_output;
+
+    // Lock file input (for 'geodesic update' — path to prior run's lock file)
+    std::filesystem::path lock_input;
+
+    // Lock file output (optional; empty = disabled)
+    std::filesystem::path lock_output;
 
     // Flags
     bool copy_reps = false;
     bool debug = false;
     bool keep_intermediates = false;
-    bool report_only = false;  // kept for backward compat; prefer command == Report
 
     // Logging verbosity: 0=quiet, 1=normal (default), 2=verbose, 3=debug
     int verbosity = 1;

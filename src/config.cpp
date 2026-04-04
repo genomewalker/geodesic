@@ -20,9 +20,6 @@ Config parse_args(int argc, char** argv) {
         ->required()
         ->check(CLI::ExistingFile);
 
-    derep->add_option("-d,--db-path", cfg.db_path, "DuckDB database path")
-        ->default_val("geodesic.db");
-
     derep->add_option("--selected-taxa", cfg.selected_taxa_file, "File with selected taxa to process")
         ->check(CLI::ExistingFile);
 
@@ -93,17 +90,19 @@ Config parse_args(int argc, char** argv) {
     derep->add_flag("--no-nystrom-degree-normalize{false},--nystrom-degree-normalize{true}",
         cfg.nystrom_degree_normalize,
         "Symmetric Laplacian normalization of Nyström Gram matrix (default: on)");
-    derep->add_option("--embedding-db", cfg.embedding_db,
-        "Path to persistent embedding store (DuckDB). Enables incremental updates.");
-    derep->add_flag("--incremental", cfg.incremental,
-        "Enable incremental mode: reuse existing embeddings, only embed new genomes");
+    derep->add_option("--ncbi-taxdump", cfg.ncbi_taxdump_dir,
+        "Directory for NCBI taxdump (nodes.dmp + names.dmp). "
+        "Downloaded automatically if absent or older than 30 days. "
+        "Used for Eukaryote/Virus 10-rank taxonomy resolution.");
 
-    derep->add_option("--sketch-db", cfg.sketch_db,
-        "Path to sketch cache DuckDB (built by 'geodesic sketch'). Skips NFS re-reads.");
-    derep->add_flag("--require-sketches", cfg.require_sketches,
-        "Fail if any genome is missing from sketch cache (no NFS fallback)");
     derep->add_option("--pack", cfg.pack_dir,
-        "Path to genome pack directory (built by 'geodesic pack'). Reads sequences from local pack instead of NFS.");
+        "Path to genopack archive (.gpk). Reads sequences from local pack instead of NFS.");
+
+    derep->add_option("--geodf-output", cfg.geodf_output,
+        "Path to write GEODF results file (binary format; empty = disabled)");
+
+    derep->add_option("--lock-output", cfg.lock_output,
+        "Write a geodesic.lock provenance file (JSON) alongside the run outputs");
 
     derep->add_flag("--copy-reps", cfg.copy_reps, "Copy representative genomes to output directory");
     derep->add_flag("-v,--verbose", [&cfg](int64_t) { cfg.verbosity = 2; },
@@ -113,70 +112,53 @@ Config parse_args(int argc, char** argv) {
     derep->add_flag("--debug", cfg.debug, "Enable debug logging (sets verbosity=3)");
     derep->add_flag("--keep-intermediates", cfg.keep_intermediates, "Keep intermediate files");
 
-    // ── sketch subcommand ───────────────────────────────────────────────────
-    auto* sketch_cmd = app.add_subcommand("sketch",
-        "Pre-compute OPH sketches for all genomes and cache to DuckDB on /scratch");
+    // ── update subcommand ───────────────────────────────────────────────────
+    auto* update_cmd = app.add_subcommand("update",
+        "Incrementally re-dereplicate: sketch new genomes, re-run only affected taxa");
 
-    sketch_cmd->add_option("-t,--tax-file", cfg.tax_file, "Taxonomy file (TSV: accession, taxonomy, file_path)")
+    update_cmd->add_option("-t,--tax-file", cfg.tax_file,
+        "New taxonomy file (TSV: accession, taxonomy, file_path)")
         ->required()
         ->check(CLI::ExistingFile);
 
-    sketch_cmd->add_option("-s,--sketch-db", cfg.sketch_db,
-        "Output sketch cache DuckDB path (on fast local storage, e.g. /scratch/...)")
-        ->required();
+    update_cmd->add_option("--lock", cfg.lock_input,
+        "Path to prior run's lock file (geodesic.lock)")
+        ->required()
+        ->check(CLI::ExistingFile);
 
-    sketch_cmd->add_option("--threads", cfg.threads, "Total CPU threads to use")
+    update_cmd->add_option("--pack", cfg.pack_dir,
+        "Path to genome pack (.gpk archive). Reads sequences from local pack instead of NFS.");
+
+    update_cmd->add_option("--geodf-output", cfg.geodf_output,
+        "Path to write updated GEODF results file");
+
+    update_cmd->add_option("--lock-output", cfg.lock_output,
+        "Write updated geodesic.lock provenance file");
+
+    update_cmd->add_option("--threads", cfg.threads, "Total CPU threads to use")
         ->default_val(1);
 
-    sketch_cmd->add_option("--io-threads", cfg.io_threads,
-        "Max concurrent NFS file readers (0=auto)")
-        ->default_val(0);
+    bool update_user_set_workers = false;
+    update_cmd->add_option("-w,--workers", cfg.workers,
+        "Workers (advanced: overrides total_budget = workers * threads)")
+        ->default_val(1)
+        ->group("")
+        ->each([&update_user_set_workers](const std::string&) { update_user_set_workers = true; });
 
-    sketch_cmd->add_option("--geodesic-kmer-size", cfg.kmer_size,
-        "k-mer size (must match derep run)")->default_val(21);
-    sketch_cmd->add_option("--geodesic-sketch-size", cfg.sketch_size,
-        "Sketch size / OPH bins (must match derep run)")->default_val(10000);
-    sketch_cmd->add_option("--geodesic-syncmer-s", cfg.syncmer_s,
-        "Open-syncmer submer length (0=disabled, must match derep run)")->default_val(0);
-    sketch_cmd->add_option("--pack", cfg.pack_dir,
-        "Path to genome pack directory. Reads sequences from local pack instead of NFS.");
+    update_cmd->add_option("--ani-threshold", cfg.ani_threshold, "ANI threshold for clustering")
+        ->default_val(95.0);
 
-    sketch_cmd->add_flag("-v,--verbose", [&cfg](int64_t) { cfg.verbosity = 2; },
+    update_cmd->add_option("--geodesic-kmer-size", cfg.kmer_size,
+        "k-mer size (must match prior run)")->default_val(21);
+    update_cmd->add_option("--geodesic-sketch-size", cfg.sketch_size,
+        "Sketch size (must match prior run)")->default_val(10000);
+    update_cmd->add_option("--geodesic-syncmer-s", cfg.syncmer_s,
+        "Open-syncmer submer length (0=disabled, must match prior run)")->default_val(0);
+
+    update_cmd->add_flag("-v,--verbose", [&cfg](int64_t) { cfg.verbosity = 2; },
         "Verbose output");
-    sketch_cmd->add_flag("-q,--quiet", [&cfg](int64_t) { cfg.verbosity = 0; },
+    update_cmd->add_flag("-q,--quiet", [&cfg](int64_t) { cfg.verbosity = 0; },
         "Quiet output");
-
-    // ── pack subcommand ─────────────────────────────────────────────────────
-    auto* pack_cmd = app.add_subcommand("pack",
-        "Pre-pack all genome FASTA files into taxonomy-indexed zstd archives for fast local access");
-
-    pack_cmd->add_option("-t,--tax-file", cfg.tax_file, "Taxonomy file (TSV: accession, taxonomy, file_path)")
-        ->required()
-        ->check(CLI::ExistingFile);
-
-    pack_cmd->add_option("-o,--out", cfg.pack_dir,
-        "Output directory for genome pack (e.g. /projects/caeg/scratch/kbd606/gtdb-pack/)")
-        ->required();
-
-    pack_cmd->add_option("--threads", cfg.threads, "Total CPU threads")->default_val(4);
-    pack_cmd->add_option("--io-threads", cfg.io_threads,
-        "Max concurrent NFS file readers (0=auto: threads)")->default_val(0);
-    pack_cmd->add_option("--zstd-level", cfg.pack_zstd_level,
-        "zstd compression level (1-22, higher=smaller/slower)")->default_val(15);
-    pack_cmd->add_flag("-v,--verbose", [&cfg](int64_t) { cfg.verbosity = 2; }, "Verbose output");
-    pack_cmd->add_flag("-q,--quiet",   [&cfg](int64_t) { cfg.verbosity = 0; }, "Quiet output");
-
-    // ── report subcommand ───────────────────────────────────────────────────
-    auto* report_cmd = app.add_subcommand("report", "Generate HTML report from existing database");
-
-    report_cmd->add_option("-d,--db-path", cfg.db_path, "DuckDB database path")
-        ->required()
-        ->check(CLI::ExistingFile);
-
-    report_cmd->add_option("-p,--prefix", cfg.prefix, "Prefix used when running derep")
-        ->required();
-
-    report_cmd->add_option("-o,--out-dir", cfg.out_dir, "Output directory for report files");
 
     // ── parse ───────────────────────────────────────────────────────────────
     try {
@@ -185,13 +167,10 @@ Config parse_args(int argc, char** argv) {
         std::exit(app.exit(e));
     }
 
-    if (report_cmd->parsed()) {
-        cfg.command = Command::Report;
-        cfg.report_only = true;
-    } else if (sketch_cmd->parsed()) {
-        cfg.command = Command::Sketch;
-    } else if (pack_cmd->parsed()) {
-        cfg.command = Command::Pack;
+    if (update_cmd->parsed()) {
+        cfg.command = Command::Update;
+        if (!update_user_set_workers)
+            cfg.workers = 1;
     } else {
         cfg.command = Command::Derep;
     }

@@ -1,12 +1,11 @@
 #include "parallel/taxon_processor.hpp"
+#include "state/run_state.hpp"
 #include "core/logging.hpp"
 #include "core/geodesic/geodesic.hpp"
+#include "core/pack_reader.hpp"
 #include "core/similarity/skani.hpp"
 #include "core/sketch/minhash.hpp"
-#include "db/embedding_store.hpp"
-#include "db/sketch_store.hpp"
-#include "db/genome_pack.hpp"
-#include "db/operations.hpp"
+#include <genopack/archive.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -127,31 +126,11 @@ TaxonResult process_taxon(
     const Taxon& taxon,
     const Config& cfg,
     int thread_budget,
-    db::DBManager& db,
-    db::EmbeddingStore* emb_store,
     const std::unordered_map<std::string, GuncQuality>* gunc_scores,
-    bool in_batch_txn,
-    db::AsyncDBWriter* async_writer,
-    db::SketchStore* sketch_store,
-    db::GenomePack* genome_pack) {
+    IPackReader* gpk_reader,
+    RunState* run_state) {
     try {
         const int threads = (thread_budget > 0) ? thread_budget : cfg.threads;
-        // -----------------------------------------------------------
-        // 1. RESUME CHECK
-        // -----------------------------------------------------------
-        auto current_stage = db::ops::get_pipeline_stage(db, taxon.taxonomy);
-        if (current_stage == PipelineStage::COMPLETE) {
-            if (is_verbose()) spdlog::info("[{}] already complete, skipping", taxon.taxonomy);
-            TaxonResult r;
-            r.taxonomy = taxon.taxonomy;
-            r.status = TaxonStatus::SUCCESS;
-            r.n_genomes = taxon.size();
-            return r;
-        }
-        const bool embedding_cached = (current_stage >= PipelineStage::EMBEDDING_DONE)
-                                       && emb_store && cfg.incremental;
-        if (embedding_cached)
-            spdlog::info("[{}] resuming from EMBEDDING_DONE (loading cached OPH sigs)", taxon.taxonomy);
 
         auto all_accessions = collect_accessions(taxon);
 
@@ -169,17 +148,12 @@ TaxonResult process_taxon(
             r.n_representatives = 1;
             r.method = "fixed";
 
-            if (async_writer) {
-                db::TaxonWritePayload p;
-                p.result = r;
-                p.all_accessions = all_accessions;
-                p.representatives = {*taxon.forced_representative};
-                async_writer->push(std::move(p));
-            } else {
-                db::ops::insert_result(db, r);
-                db::ops::insert_genomes_derep(db, taxon.taxonomy, all_accessions,
-                                              {*taxon.forced_representative});
-                db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
+            if (run_state) {
+                TaxonOutput out;
+                out.result = r;
+                out.all_accessions = all_accessions;
+                out.representatives = {*taxon.forced_representative};
+                run_state->push(std::move(out));
             }
             return r;
         }
@@ -197,18 +171,12 @@ TaxonResult process_taxon(
             r.n_representatives = 1;
             r.method = "singleton";
 
-            if (async_writer) {
-                db::TaxonWritePayload p;
-                p.result = r;
-                p.all_accessions = {taxon.genomes[0].accession};
-                p.representatives = {taxon.genomes[0].accession};
-                async_writer->push(std::move(p));
-            } else {
-                db::ops::insert_result(db, r);
-                db::ops::insert_genomes_derep(db, taxon.taxonomy,
-                                              {taxon.genomes[0].accession},
-                                              {taxon.genomes[0].accession});
-                db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
+            if (run_state) {
+                TaxonOutput out;
+                out.result = r;
+                out.all_accessions = {taxon.genomes[0].accession};
+                out.representatives = {taxon.genomes[0].accession};
+                run_state->push(std::move(out));
             }
             return r;
         }
@@ -216,6 +184,12 @@ TaxonResult process_taxon(
         auto file_paths = collect_paths(taxon);
         auto quality_scores = build_quality_map(taxon);
         auto path_to_accession = build_path_to_accession(taxon);
+
+        // Completeness lookup: accession → completeness (%) for quality floor decisions.
+        std::unordered_map<std::string, double> acc_completeness;
+        acc_completeness.reserve(taxon.genomes.size());
+        for (const auto& g : taxon.genomes)
+            if (g.completeness) acc_completeness[g.accession] = *g.completeness;
 
         // Build path_to_idx once, reuse everywhere
         std::unordered_map<std::string, size_t> path_to_idx;
@@ -238,16 +212,14 @@ TaxonResult process_taxon(
                 .seed        = 42
             });
 
-            // Sketch all n genomes.
-            // If sketch_store is available, load cached uint16_t sigs; fall back to NFS.
-            // If no sketch_store, sketch from NFS directly.
+            // Sketch all n genomes from NFS (tiny taxa — not worth GPK lookup).
             // sketch_oph_with_positions tracks real_bins_mask for containment (MAG support).
             std::vector<std::vector<uint16_t>> sigs(n);
             std::vector<std::vector<uint64_t>> real_masks(n);
             std::vector<uint32_t> n_real_vec(n, 0);
             std::unordered_set<size_t> failed_indices;
 
-            auto sketch_from_nfs = [&](size_t i) {
+            for (size_t i = 0; i < n; ++i) {
                 try {
                     auto oph = hasher.sketch_oph_with_positions(file_paths[i], cfg.sketch_size);
                     sigs[i].resize(oph.signature.size());
@@ -258,40 +230,20 @@ TaxonResult process_taxon(
                 } catch (...) {
                     failed_indices.insert(i);
                 }
-            };
-
-            if (sketch_store) {
-                auto recs = sketch_store->fetch_ordered(all_accessions);
-                for (size_t i = 0; i < n; ++i) {
-                    if (!recs[i].oph_sig.empty()) {
-                        sigs[i]       = recs[i].oph_sig;
-                        real_masks[i] = recs[i].real_bins_mask;
-                        n_real_vec[i] = recs[i].n_real_bins;
-                    } else {
-                        sketch_from_nfs(i);
-                    }
-                }
-            } else {
-                for (size_t i = 0; i < n; ++i)
-                    sketch_from_nfs(i);
             }
 
             // Record permanently failed genome reads (NFS errors, corrupt files).
+            std::vector<FailedGenomeRecord> tiny_failed_records;
             for (size_t i : failed_indices) {
                 auto it = path_to_accession.find(file_paths[i].string());
                 const std::string acc = (it != path_to_accession.end())
                     ? it->second : file_paths[i].string();
-                auto& conn = db.thread_connection();
-                auto stmt = conn.Prepare(
-                    "INSERT OR IGNORE INTO jobs_failed (accession, taxonomy, file, reason) "
-                    "VALUES ($1, $2, $3, $4)");
-                stmt->Execute(acc, taxon.taxonomy, file_paths[i].string(),
-                              std::string("sketch_oph failed"));
+                tiny_failed_records.push_back({acc, taxon.taxonomy, file_paths[i].string(), "sketch_oph failed"});
             }
 
             // GUNC exclusion: genomes failing GUNC are excluded from rep selection.
             std::unordered_set<size_t> excluded_indices = failed_indices;
-            std::vector<db::ops::ContaminationRecord> gunc_contam_records;
+            std::vector<OutlierRecord> gunc_contam_records;
             if (gunc_scores && !gunc_scores->empty()) {
                 for (size_t i = 0; i < n; ++i) {
                     auto acc = canonical_accession(all_accessions[i]);
@@ -301,7 +253,7 @@ TaxonResult process_taxon(
                     if (is_verbose())
                         spdlog::warn("[{}] GUNC fail: {} (CSS={:.3f})", taxon.taxonomy, acc,
                                      git->second.clade_separation_score);
-                    db::ops::ContaminationRecord rec;
+                    OutlierRecord rec;
                     rec.accession       = acc;
                     rec.kmer_div_zscore = static_cast<double>(git->second.clade_separation_score);
                     rec.nn_outlier      = false;
@@ -448,29 +400,29 @@ TaxonResult process_taxon(
             div_stats.diversity_mean_ani = div_mean;
             div_stats.diversity_min_ani  = div_min;
             div_stats.diversity_max_ani  = div_max;
-            div_stats.diversity_n_pairs  = div_pairs;
-            div_stats.n_contaminated     = static_cast<int>(n_gunc);
+            div_stats.diversity_n_pairs   = div_pairs;
+            div_stats.n_outliers_excluded = static_cast<int>(n_gunc);
+            div_stats.n_outliers_retained = 0;
 
-            if (async_writer) {
-                db::TaxonWritePayload p;
-                p.result          = r;
-                p.diversity_stats = div_stats;
-                p.all_accessions  = all_accessions;
-                p.representatives = representatives;
-                p.ani_map         = ani_to_rep_map;
-                p.contamination   = std::move(gunc_contam_records);
-                async_writer->push(std::move(p));
-            } else {
-                auto& conn = db.thread_connection();
-                if (!in_batch_txn) conn.Query("BEGIN TRANSACTION");
-                if (!gunc_contam_records.empty())
-                    db::ops::insert_contamination_candidates(db, taxon.taxonomy, gunc_contam_records);
-                db::ops::insert_result(db, r);
-                db::ops::insert_genomes_derep(db, taxon.taxonomy, all_accessions,
-                                              representatives, ani_to_rep_map);
-                db::ops::insert_diversity_stats(db, div_stats);
-                db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
-                if (!in_batch_txn) conn.Query("COMMIT");
+            if (run_state) {
+                TaxonOutput out;
+                out.result          = r;
+                out.diversity_stats = div_stats;
+                out.all_accessions  = all_accessions;
+                out.representatives = representatives;
+                out.ani_map         = ani_to_rep_map;
+                out.outliers        = gunc_contam_records;
+                out.failed_genomes  = std::move(tiny_failed_records);
+                // Pipeline health
+                out.n_input                  = static_cast<int>(n);
+                out.n_preflight_excluded     = 0;
+                out.n_quality_floor_excluded = 0;
+                out.n_outliers_excluded      = static_cast<int>(n_gunc);
+                out.n_outliers_retained      = 0;
+                out.mst_p90_edge             = 0.0;
+                out.mst_true_max             = 0.0;
+                out.ani_threshold_used       = cfg.ani_threshold;
+                run_state->push(std::move(out));
             }
             return r;
         }
@@ -493,8 +445,7 @@ TaxonResult process_taxon(
         // but we derive all thresholds from actual data after embedding.
         // Skip on warm (incremental) runs — OPH sigs already encode the original params,
         // and auto_calibrate reads NFS genome files which defeats the caching purpose.
-        const bool is_warm_run = emb_store && cfg.incremental &&
-                                 emb_store->count_embeddings(taxon.taxonomy) > 0;
+        const bool is_warm_run = false;
         if (cfg.auto_calibrate && file_paths.size() >= 50 && !is_warm_run) {
             auto params = GeodesicDerep::auto_calibrate(
                 file_paths, cfg.calibration_pairs, threads);
@@ -541,57 +492,76 @@ TaxonResult process_taxon(
 
         GeodesicDerep geodesic(gcfg);
 
-        // Build index: sketch cache > genome pack > incremental embedding store > full NFS read
-        // Sketch cache preferred for same-parameter re-runs (DuckDB BLOB lookup, ~20 KB/genome).
-        // Genome pack used when sketch cache misses or absent (avoids 5.2M NFS opens for re-sketch).
+        // Stage 1: Pre-filter fragmented assemblies using archive metadata (no FASTA read).
+        // Fragmented MAGs (high n_contigs) pollute the geodesic embedding and account for
+        // 98.5% of "contamination" calls. Pre-filtering excludes them from embedding,
+        // improving both speed and embedding quality for the remaining genomes.
+        // Only applied when a .gpk archive is available (provides n_contigs without FASTA read).
+        static constexpr uint32_t FRAGMENTED_CONTIGS_THRESHOLD = 500;
+        std::vector<GeodesicDerep::OutlierCandidate> preflagged_fragmented;
+        if (gpk_reader && !taxon.genomes.empty()) {
+            std::vector<Genome> clean_genomes;
+            clean_genomes.reserve(taxon.genomes.size());
+            for (const auto& g : taxon.genomes) {
+                auto meta = gpk_reader->genome_meta_by_accession(g.accession);
+                if (meta && meta->n_contigs > FRAGMENTED_CONTIGS_THRESHOLD) {
+                    GeodesicDerep::OutlierCandidate c;
+                    c.genome_id            = 0;
+                    c.nn_outlier           = true;
+                    c.isolation_score      = 1.0f;
+                    c.kmer_div_zscore      = 0.0f;
+                    c.genome_size_zscore   = 0.0f;
+                    c.centroid_distance    = 1.0f;
+                    c.anomaly_score        = 1.0f;
+                    c.margin_to_threshold  = 0.5f;
+                    c.flag_reason          = "fragmented:pre_filter";
+                    c.path                 = g.file_path;
+                    c.n_contigs            = static_cast<uint32_t>(meta->n_contigs);
+                    c.genome_length_bp     = static_cast<uint64_t>(meta->genome_length);
+                    preflagged_fragmented.push_back(std::move(c));
+                } else {
+                    clean_genomes.push_back(g);
+                }
+            }
+            if (!preflagged_fragmented.empty()) {
+                spdlog::debug("[{}] Stage-1 pre-filter: {} fragmented ({} remain)",
+                              taxon.taxonomy, preflagged_fragmented.size(), clean_genomes.size());
+                // Rebuild file_paths for the clean subset only
+                file_paths.clear();
+                for (const auto& g : clean_genomes)
+                    file_paths.push_back(g.file_path);
+                const_cast<Taxon&>(taxon).genomes = std::move(clean_genomes);
+                // Rebuild path_to_idx — old indices are stale after file_paths shrink
+                path_to_idx.clear();
+                path_to_idx.reserve(file_paths.size());
+                for (size_t i = 0; i < file_paths.size(); ++i)
+                    path_to_idx[file_paths[i].string()] = i;
+            }
+        }
+
+        // Build index: GPK SKCH > GPK decompress > full NFS read
         size_t newly_embedded = 0;
-        if (sketch_store) {
+        if (gpk_reader && gpk_reader->has_sketches()) {
             auto accessions = collect_accessions(taxon);
-            geodesic.build_index_from_sketches(accessions, file_paths, *sketch_store,
-                                               quality_scores, cfg.require_sketches,
-                                               emb_store, taxon.taxonomy);
+            geodesic.build_index_from_gpk_sketches(accessions, file_paths, *gpk_reader,
+                                                    quality_scores);
             newly_embedded = file_paths.size();
-        } else if (genome_pack) {
+        } else if (gpk_reader) {
             auto accessions = collect_accessions(taxon);
-            geodesic.build_index_from_pack(accessions, file_paths, *genome_pack, taxon.taxonomy,
-                                           quality_scores, emb_store);
+            geodesic.build_index_from_gpk(accessions, file_paths, *gpk_reader,
+                                           quality_scores);
             newly_embedded = file_paths.size();
-        } else if (emb_store && cfg.incremental) {
-            newly_embedded = geodesic.build_index_incremental(
-                file_paths, *emb_store, taxon.taxonomy, quality_scores);
-            if (is_verbose()) spdlog::info("[{}] Incremental: {} new embeddings (reused {})",
-                                           taxon.taxonomy, newly_embedded,
-                                           file_paths.size() - newly_embedded);
         } else {
-            geodesic.build_index(file_paths, quality_scores, emb_store, taxon.taxonomy);
+            geodesic.build_index(file_paths, quality_scores);
             newly_embedded = file_paths.size();
         }
-        // Record permanently failed genome reads in jobs_failed (NFS errors, corrupt files).
+        // Record permanently failed genome reads (NFS errors, corrupt files).
+        std::vector<FailedGenomeRecord> geodesic_failed_records;
         for (const auto& [file_path, reason] : geodesic.failed_reads()) {
             auto it = path_to_accession.find(file_path);
             const std::string accession = (it != path_to_accession.end()) ? it->second : file_path;
-            auto& conn = db.thread_connection();
-            auto stmt = conn.Prepare(
-                "INSERT OR IGNORE INTO jobs_failed (accession, taxonomy, file, reason) "
-                "VALUES ($1, $2, $3, $4)");
-            stmt->Execute(accession, taxon.taxonomy, file_path, reason);
+            geodesic_failed_records.push_back({accession, taxon.taxonomy, file_path, reason});
         }
-
-        // Persist genome_length + n_contigs from OPH sketch (input TSV doesn't have them).
-        {
-            std::unordered_map<std::string, std::pair<uint64_t, uint32_t>> sizes;
-            for (const auto& emb : geodesic.embeddings()) {
-                if (emb.genome_size == 0) continue;
-                auto it = path_to_accession.find(emb.path.string());
-                if (it != path_to_accession.end())
-                    sizes[it->second] = std::make_pair(emb.genome_size, emb.n_contigs);
-            }
-            db::ops::update_genome_sizes(db, sizes);
-        }
-
-        // Checkpoint: embedding complete — NFS I/O for OPH sketching is done.
-        // On restart, build_index_incremental will load cached sigs without re-reading NFS.
-        db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::EMBEDDING_DONE);
 
         // Phase 3: single HNSW pass — isolation scores + 1-NN distribution fused.
         auto nn = geodesic.compute_isolation_scores();
@@ -642,22 +612,85 @@ TaxonResult process_taxon(
                          nn.k_conn, nn.k_stable, nn.k_cap);
         }
 
+        // Stage 3: Adaptive z-threshold — scale by log2(n) so large clonal species
+        // get a stricter threshold (fewer false positives) while rare diverse species
+        // get a looser one (fewer false negatives on genuine rare lineages).
+        // base_z=2 at n=10, grows to ~4 at n=50k. User's --z-threshold is the base.
+        const float adaptive_z = [&]() -> float {
+            const size_t n = taxon.size();
+            if (n < 10) return static_cast<float>(cfg.z_threshold);
+            return static_cast<float>(cfg.z_threshold) *
+                   (1.0f + std::log2(static_cast<float>(n) / 10.0f) * 0.25f);
+        }();
+
         // Detect potential contamination before selection
-        auto contamination = geodesic.detect_contamination_candidates(cfg.z_threshold);
+        auto contamination = geodesic.detect_outlier_candidates(adaptive_z);
+
+        // Merge Stage-1 pre-flagged fragmented genomes into contamination candidate list
+        for (auto& c : preflagged_fragmented)
+            contamination.push_back(std::move(c));
+
+        // Build accession lookup for completeness checks on outlier candidates.
+        // path → accession is already in path_to_accession.
         std::unordered_set<std::string> contaminated_paths;
-        for (const auto& c : contamination) {
+        for (auto& c : contamination) {
+            // Fragmented genomes (101–500 contigs) with completeness >= 50% are flagged
+            // but retained for rep selection (excluded = false).
+            const bool is_fragmented_flagged_only =
+                (c.n_contigs >= 101 && c.n_contigs <= 500) && [&]() -> bool {
+                    auto it = path_to_accession.find(c.path.string());
+                    if (it == path_to_accession.end()) return false;
+                    auto cit = acc_completeness.find(it->second);
+                    return (cit != acc_completeness.end() && cit->second >= 50.0);
+                }();
+            c.excluded = !is_fragmented_flagged_only;
+
             if (is_verbose()) spdlog::warn("[{}] Potential contamination: {} (centroid_dist={:.3f}, "
-                         "isolation={:.3f}, kmer_div_z={:.2f}, nn_outlier={})",
+                         "isolation={:.3f}, kmer_div_z={:.2f}, nn_outlier={}, excluded={})",
                          taxon.taxonomy, c.path.filename().string(),
-                         c.centroid_distance, c.isolation_score, c.kmer_div_zscore, c.nn_outlier);
-            contaminated_paths.insert(c.path.string());
+                         c.centroid_distance, c.isolation_score, c.kmer_div_zscore, c.nn_outlier,
+                         c.excluded);
+            if (c.excluded)
+                contaminated_paths.insert(c.path.string());
+        }
+
+        // Pre-FPS quality floor: silently exclude genomes with n_contigs > 500 OR
+        // completeness < 50% that were not already caught by outlier detection.
+        // These are excluded from rep selection but do NOT generate an OutlierRecord.
+        int n_quality_floor = 0;
+        {
+            std::unordered_set<std::string> already_in_contamination;
+            for (const auto& c : contamination)
+                already_in_contamination.insert(c.path.string());
+
+            for (const auto& emb : geodesic.embeddings()) {
+                const std::string path_str = emb.path.string();
+                if (already_in_contamination.count(path_str)) continue;
+
+                auto acc_it = path_to_accession.find(path_str);
+                if (acc_it == path_to_accession.end()) continue;
+                const std::string& acc = acc_it->second;
+
+                const bool high_contigs = emb.n_contigs > 500;
+                const auto cit = acc_completeness.find(acc);
+                // Missing completeness → conservative: exclude if n_contigs > 500.
+                // If completeness is known, also exclude if < 50%.
+                const bool low_completeness = (cit != acc_completeness.end())
+                    ? cit->second < 50.0
+                    : false;
+
+                if (high_contigs || low_completeness) {
+                    contaminated_paths.insert(path_str);
+                    ++n_quality_floor;
+                }
+            }
         }
 
         // Apply GUNC flags: genomes failing GUNC are excluded from reps.
         // GUNC-only failures (not already in embedding candidates) are collected
         // into gunc_contam_records and merged into contam_records before the single
         // batch insert — never inserted individually to avoid DELETE-per-genome.
-        std::vector<db::ops::ContaminationRecord> gunc_contam_records;
+        std::vector<OutlierRecord> gunc_contam_records;
         if (gunc_scores && !gunc_scores->empty()) {
             std::unordered_set<std::string> already_flagged;
             for (const auto& c : contamination) {
@@ -676,7 +709,7 @@ TaxonResult process_taxon(
                                  git->second.clade_separation_score);
                 if (already_flagged.count(acc)) continue;
                 // kmer_div_zscore stores CSS; nn_outlier=false (embedding not the source)
-                db::ops::ContaminationRecord rec;
+                OutlierRecord rec;
                 rec.accession          = acc;
                 rec.centroid_distance  = 0.0;
                 rec.isolation_score    = 0.0;
@@ -753,12 +786,12 @@ TaxonResult process_taxon(
                 rep_set.insert(file_paths[i].string());
         }
 
-        std::vector<db::ops::ContaminationRecord> contam_records;
+        std::vector<OutlierRecord> contam_records;
         contam_records.reserve(contamination.size() + gunc_contam_records.size());
         for (const auto& c : contamination) {
             auto it = path_to_accession.find(c.path.string());
             if (it != path_to_accession.end()) {
-                db::ops::ContaminationRecord rec;
+                OutlierRecord rec;
                 rec.accession          = it->second;
                 rec.centroid_distance  = static_cast<double>(c.centroid_distance);
                 rec.isolation_score    = static_cast<double>(c.isolation_score);
@@ -768,6 +801,9 @@ TaxonResult process_taxon(
                 rec.kmer_div_zscore    = static_cast<double>(c.kmer_div_zscore);
                 rec.margin_to_threshold = static_cast<double>(c.margin_to_threshold);
                 rec.flag_reason        = c.flag_reason;
+                rec.n_contigs          = c.n_contigs;
+                rec.genome_length_bp   = c.genome_length_bp;
+                rec.excluded           = (contaminated_paths.count(c.path.string()) > 0);
                 contam_records.push_back(std::move(rec));
             }
         }
@@ -782,13 +818,6 @@ TaxonResult process_taxon(
             if (it != path_to_accession.end()) {
                 all_representatives.push_back(it->second);
             }
-        }
-
-        // Save representatives to embedding store if available
-        if (emb_store) {
-            emb_store->set_representatives(taxon.taxonomy, all_representatives);
-            if (is_verbose()) spdlog::info("[{}] Marked {} representatives in embedding store",
-                         taxon.taxonomy, all_representatives.size());
         }
 
         auto geodesic_end = std::chrono::steady_clock::now();
@@ -851,7 +880,13 @@ TaxonResult process_taxon(
         div_stats.diversity_max_ani   = dist_to_ani(div_metrics.diversity_p5_dist);   // p5 dist = most similar reps
         div_stats.diversity_ani_range = div_stats.diversity_max_ani - div_stats.diversity_min_ani;
         div_stats.diversity_n_pairs = div_metrics.diversity_n_pairs;
-        div_stats.n_contaminated = static_cast<int>(contamination.size());
+
+        int n_olr_excl = 0, n_olr_ret = 0;
+        for (const auto& r : contam_records) {
+            if (r.excluded) ++n_olr_excl; else ++n_olr_ret;
+        }
+        div_stats.n_outliers_excluded = n_olr_excl;
+        div_stats.n_outliers_retained = n_olr_ret;
 
         TaxonResult r;
         r.taxonomy = taxon.taxonomy;
@@ -870,35 +905,31 @@ TaxonResult process_taxon(
             best = std::max(best, ani);
         }
 
-        if (async_writer) {
-            db::TaxonWritePayload p;
-            p.result = r;
-            p.diversity_stats = div_stats;
-            p.all_accessions = all_accessions;
-            p.representatives = all_representatives;
-            p.ani_map = ani_to_rep_map;
-            p.contamination = contam_records;
-            async_writer->push(std::move(p));
-        } else {
-            auto& conn = db.thread_connection();
-            conn.Query("BEGIN TRANSACTION");
-            if (!contam_records.empty())
-                db::ops::insert_contamination_candidates(db, taxon.taxonomy, contam_records);
-            db::ops::insert_diversity_stats(db, div_stats);
-            db::ops::insert_result(db, r);
-            db::ops::insert_genomes_derep(db, taxon.taxonomy, all_accessions,
-                                          all_representatives, ani_to_rep_map);
-            db::ops::set_pipeline_stage(db, taxon.taxonomy, PipelineStage::COMPLETE);
-            conn.Query("COMMIT");
+        if (run_state) {
+            TaxonOutput out;
+            out.result          = r;
+            out.diversity_stats = div_stats;
+            out.all_accessions  = all_accessions;
+            out.representatives = all_representatives;
+            out.ani_map         = ani_to_rep_map;
+            out.outliers        = contam_records;
+            out.failed_genomes  = std::move(geodesic_failed_records);
+            // Pipeline health
+            out.n_input                 = static_cast<int>(all_accessions.size());
+            out.n_preflight_excluded    = static_cast<int>(preflagged_fragmented.size());
+            out.n_quality_floor_excluded = n_quality_floor;
+            out.n_outliers_excluded     = n_olr_excl;
+            out.n_outliers_retained     = n_olr_ret;
+            out.mst_p90_edge            = nn.mst_max_edge;
+            out.mst_true_max            = nn.mst_true_max;
+            out.ani_threshold_used      = dist_to_ani(static_cast<double>(diversity_threshold));
+            run_state->push(std::move(out));
         }
 
         return r;
 
     } catch (const std::exception& e) {
         spdlog::error("[{}] failed: {}", taxon.taxonomy, e.what());
-        db::ops::set_pipeline_stage(db, taxon.taxonomy,
-                                    PipelineStage::NOT_STARTED, "", "",
-                                    e.what());
         TaxonResult r;
         r.taxonomy = taxon.taxonomy;
         r.status = TaxonStatus::FAILED;
@@ -911,33 +942,14 @@ TaxonResult process_taxon(
 std::vector<TaxonResult> process_tiny_batch(
     const std::vector<const Taxon*>& taxa,
     const Config& cfg,
-    db::DBManager& db,
-    db::AsyncDBWriter* async_writer,
-    db::SketchStore* sketch_store,
-    db::GenomePack* genome_pack,
-    const std::unordered_map<std::string, GuncQuality>* gunc_scores) {
+    const std::unordered_map<std::string, GuncQuality>* gunc_scores,
+    IPackReader* gpk_reader,
+    RunState* run_state) {
     std::vector<TaxonResult> results;
     results.reserve(taxa.size());
-    if (async_writer) {
-        // Async path: each taxon pushes its payload; no batch transaction needed
-        for (const Taxon* t : taxa)
-            results.push_back(process_taxon(*t, cfg, 1, db, nullptr, gunc_scores,
-                                            /*in_batch_txn=*/false, async_writer, sketch_store,
-                                            genome_pack));
-    } else {
-        auto& conn = db.thread_connection();
-        conn.Query("BEGIN TRANSACTION");
-        try {
-            for (const Taxon* t : taxa)
-                results.push_back(process_taxon(*t, cfg, 1, db, nullptr, gunc_scores,
-                                                /*in_batch_txn=*/true, nullptr, sketch_store,
-                                                genome_pack));
-            conn.Query("COMMIT");
-        } catch (...) {
-            conn.Query("ROLLBACK");
-            throw;
-        }
-    }
+    for (const Taxon* t : taxa)
+        results.push_back(process_taxon(*t, cfg, 1, gunc_scores,
+                                        gpk_reader, run_state));
     return results;
 }
 

@@ -23,12 +23,11 @@ Verifies that every non-representative genome is within `ani_threshold` ANI of a
 |------------|--------------------------------------------------|
 | `GEODESIC` | `../../build/geodesic`                           |
 | `SKANI`    | `/maps/projects/.../conda/envs/bioinfo/bin/skani`|
-| `DUCKDB`   | `/maps/projects/.../conda/envs/bioinfo/bin/duckdb`|
 
 ### What it does
 
 1. Runs `geodesic derep` on the input TSV
-2. Queries the output DuckDB for representative and non-representative genome files
+2. Parses the `_derep_genomes.tsv` output to classify representatives and non-representatives
 3. Runs `skani dist` (non-reps as queries, reps as references)
 4. Asserts every non-rep has at least one rep with ANI >= threshold
 

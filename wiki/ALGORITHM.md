@@ -34,7 +34,7 @@ For taxa with exactly 2 genomes, the full pipeline is skipped; see [n=2 fast pat
 
 ### One-permutation hashing
 
-For each genome, geodesic computes a [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signature of $m = 10{,}000$ bins using k-mers of length $k = 21$.
+For each genome, geodesic computes a [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signature of $m$ bins using k-mers of length $k$. Both parameters are chosen by auto-calibration from sampled genome pairs (see Phase 1 calibration below); the default tier for 95–99% ANI taxa uses $m = 10{,}000$ and $k = 21$. The calibration first-pass sketch uses $m = 4{,}096$.
 
 **Canonical k-mer selection.** For each position in the genome, both the forward k-mer and its reverse complement are encoded as a 64-bit integer (2 bits per base, A=0/C=1/G=2/T=3). The canonical k-mer is the lexicographic minimum of the two encodings, selected by a branchless comparison:
 
@@ -119,7 +119,7 @@ $$
 \mathbb{E}[f_i] \approx 1 - e^{-|G_i|/m}
 $$
 
-For complete bacterial genomes ($|G| \sim 10^6$ k-mers, $m = 10{,}000$), $f \approx 1$. Highly incomplete assemblies ($f \ll 0.2$) have elevated OPH variance and trigger containment-based corrections in Phase 2.
+For complete bacterial genomes ($|G| \sim 10^6$ k-mers, $m = 10{,}000$), $f \approx 1$. Highly incomplete assemblies ($f \ll 0.2$) have elevated OPH variance and trigger containment-based corrections in Phase 2. At $m = 4{,}096$ (calibration first-pass tier), the same assemblies still satisfy $f \approx 1$.
 
 ### K-mer size and OPH accuracy
 
@@ -133,6 +133,16 @@ The default is $k = 21$. The k-mer size determines how quickly Jaccard drops wit
 | 99%  | 0.741 | 0.680 | 0.578 |
 
 At 95–99% ANI (typical bacterial species), $k=21$ gives $J \in [0.205, 0.680]$, sufficient for reliable ranking. Use `--sketch-k 16` for highly diverse taxa (ANI < 95%) where $k=21$ gives $J < 0.02$ and loses signal; use `--sketch-k 31` for clonal taxa (ANI > 99%) to spread compressed $J$ values apart.
+
+**Auto-calibration tiers.** When `--auto-calibrate` is active (default), a first-pass sketch at $m=4{,}096$, $k=21$ is computed for up to 50 sampled genome pairs. The P95 pairwise ANI determines the final tier:
+
+| P95 ANI of sample | Tier | $k$ | $m$ | $d_{\mathrm{cfg}}$ |
+|-------------------|------|-----|-----|---------------------|
+| ≥ 99%             | Very clonal | 31 | 20,000 | 512 |
+| 95–99%            | Typical (default) | 21 | 10,000 | 256 |
+| < 95%             | Very diverse | 16 | 5,000 | 128 |
+
+When auto-calibration is disabled or the taxon has fewer than 50 genomes, the defaults from config apply (typically $k=21$, $m=10{,}000$, $d=256$).
 
 The OPH direct Jaccard estimator (used in Phase 7) has standard deviation $\sqrt{J(1-J)/m}$, giving sub-0.2% ANI error at $m=10{,}000$ across the 90–99% ANI range:
 
@@ -243,7 +253,7 @@ The index serves two purposes:
 
 For $n \leq 50$ genomes, HNSW overhead exceeds $O(n^2)$ brute-force dot products; the brute-force path is used instead.
 
-**Reduced ef\_search for isolation scores.** Only approximate nearest-neighbour ordering is needed; ef\_search is set to $\max(50,\, \min(200,\, n/100))$ during the isolation pass, then restored. This cuts HNSW query time without affecting representative quality.
+**Reduced ef\_search for isolation scores.** Only approximate nearest-neighbour ordering is needed; ef\_search is set to $\max(2 K_{\mathrm{cap}},\, \min(200,\, n/100))$ during the isolation pass, then restored. This cuts HNSW query time without affecting representative quality.
 
 ---
 
@@ -288,10 +298,10 @@ For clonal taxa (tight NN distribution), $\theta_{\mathrm{MST}}$ is small and dr
 | Flag | Condition | Severity | Interpretation |
 |------|-----------|----------|----------------|
 | `low_pair_count` | fewer than 20 non-outlier genomes | warning | MST built on too few points; threshold unreliable |
-| `high_gap_ratio` | $\theta_{\mathrm{MST}} / \mathrm{NN}_{P95} > 5$ | warning | one long bridge edge dominates; MST may conflate sub-populations |
-| `disconnected_mst` | MST has $> 1$ component at $k_{\mathrm{iso}}$ (not at adaptive $k_{\mathrm{stable}}$) | warning | k-NN graph not connected; threshold is a lower bound |
+| `pathological_bridge` | smallest MST component $\leq 10$ genomes AND $\leq 0.5\%$ of non-outliers, AND the terminal merge is isolated (few other MST edges near the same scale) | warning | an anomalous genome (e.g. misassigned singleton) is bridging two distinct taxa; the bridge MST edge is not a real inter-strain scale |
+| `disconnected_mst` | MST has $> 1$ component at $K_{\mathrm{cap}}$ (i.e., $k_{\mathrm{conn}} = -1$) | warning | k-NN graph not connected; threshold is a lower bound |
 
-`high_gap_ratio` uses $\mathrm{NN}_{P95}$ as denominator. Clonal taxa (e.g. *E. coli*, *S. enterica*) have $\mathrm{NN}_{P50} \approx 0.003$ (intra-clone distances), which would produce false alarms when the MST bridge correctly captures an inter-pathotype gap; $\mathrm{NN}_{P95}$ represents the upper bound of normal within-population variation and is a more robust reference.
+`pathological_bridge` distinguishes anomalous-singleton bridges from genuine multi-scale population structure (e.g. *S. enterica* serovars), which also produce a large MST bridge but have substantial components on both sides and many inter-group edges near the same scale. The ratio $\theta_{\mathrm{MST}} / \mathrm{NN}_{P95}$ is logged as a diagnostic when it exceeds 5, but is not itself a warning flag — high ratios are expected and correct for taxa with genuine pathotype gaps.
 
 `disconnected_mst` is only raised when the graph remains disconnected even at the adaptive $k_{\mathrm{stable}}$ (i.e., $k_{\mathrm{conn}} = -1$). A graph that is disconnected at $k_{\mathrm{iso}}$ but connects before $K_{\mathrm{cap}}$ logs an info message instead.
 
@@ -374,7 +384,7 @@ $$
 3. Convert: $d_{\mathrm{sketch}} = \arccos\!\left(\min(1, \max(0, J_{\mathrm{dual}}))\right) / \pi$
 4. Promote $G_i$ to representative only if all checked representatives satisfy $d_{\mathrm{sketch}} \geq \theta$.
 
-This uses OPH sketch Jaccard ($m = 10{,}000$ bins), not exact ANI, with variance $J(1-J) / (2\, m_{\mathrm{real}})$.
+This uses OPH sketch Jaccard (with $m$ bins as configured for the taxon tier, typically 10,000), not exact ANI, with variance $J(1-J) / (2\, m_{\mathrm{real}})$.
 
 ---
 
@@ -407,7 +417,7 @@ $J_{\mathrm{cert}}$ is used for the symmetric Jaccard arm (equal-size genomes). 
 
 The outer loop is parallelised with OpenMP (`schedule(dynamic, 256)`); each thread maintains a local repair queue merged after the barrier.
 
-**Coverage guarantee.** After Phase 8, every non-representative genome satisfies `oph_certified` against at least one representative, independent of Nyström approximation error. For symmetric pairs this is a sketch-space Jaccard guarantee; for asymmetric pairs it is a directional containment guarantee. The remaining uncertainty is OPH estimation variance: at 95% ANI with $m = 10{,}000$ bins, $\sigma_J \approx 0.004$ for dense assemblies; sparse genomes (low $m_{\mathrm{real}}$) have higher variance and looser sketch-space guarantees.
+**Coverage guarantee.** After Phase 8, every non-representative genome satisfies `oph_certified` against at least one representative, independent of Nyström approximation error. For symmetric pairs this is a sketch-space Jaccard guarantee; for asymmetric pairs it is a directional containment guarantee. The remaining uncertainty is OPH estimation variance: at 95% ANI with $m = 10{,}000$ bins (typical tier), $\sigma_J \approx 0.004$ for dense assemblies; sparse genomes (low $m_{\mathrm{real}}$) have higher variance and looser sketch-space guarantees.
 
 ---
 
@@ -418,7 +428,7 @@ For taxa with exactly 2 genomes, the full pipeline is unnecessary. The outcome d
 - If OPH Jaccard(A, B) → ANI $\geq$ ani_threshold: select the genome with higher quality score as the sole representative.
 - Otherwise: both are representatives.
 
-The OPH direct Jaccard at $m=10{,}000$ has sub-0.2% ANI error (see Phase 1 table), making this comparison reliable. For $n=1$ taxa, the single genome is trivially the representative.
+The OPH direct Jaccard has sub-0.2% ANI error at $m=10{,}000$ bins (see Phase 1 table); the n=2 path uses whichever $m$ was configured for the taxon. For $n=1$ taxa, the single genome is trivially the representative.
 
 ---
 
@@ -463,7 +473,7 @@ After degree normalisation, dot products approximate a normalised-graph similari
 | Verify | OPH sketch Jaccard | $O(n_{\mathrm{borderline}} \cdot m)$ |
 | Certify | Universal OPH coverage check | $O(nm)$ fast path; $O(n \cdot r \cdot m)$ worst case |
 
-Typical values: $p \approx 512$, $m = 10{,}000$, $d \approx 64$–$256$. Embedding (Nyström extension) dominates for $n > 10{,}000$; FPS dominates for medium-size taxa.
+Typical values: $p \approx 512$, $m \in \{5{,}000,\, 10{,}000,\, 20{,}000\}$ (tier-dependent), $d \approx 64$–$512$. Embedding (Nyström extension) dominates for $n > 10{,}000$; FPS dominates for medium-size taxa.
 
 ---
 
@@ -471,9 +481,10 @@ Typical values: $p \approx 512$, $m = 10{,}000$, $d \approx 64$–$256$. Embeddi
 
 - **SIMD**: AVX2 in the OPH inner loop (32 bytes/cycle), anchor-slab Gram matrix (`_mm256_cmpeq_epi16`), and FPS update loops.
 - **OpenMP**: parallel OPH sketching, Gram matrix rows, FPS fitness/update loops, HNSW isolation queries.
-- **DuckDB**: all results persisted incrementally; interrupted runs resume by skipping completed taxa (`SELECT 1 FROM results WHERE taxonomy = ?`).
-- **Anchor slab**: anchor signatures ($p \times m \times 2$ bytes $\approx 10\ \mathrm{MB}$ for $p=512$) packed into a contiguous aligned buffer for cache-friendly Gram matrix computation.
+- **GEODF**: results written to flat binary file; interrupted runs resume via GEODF crash recovery.
+- **Anchor slab**: anchor signatures ($p \times m \times 2$ bytes, e.g. $512 \times 4{,}096 \times 2 = 4\ \mathrm{MB}$ at the medium tier or $512 \times 10{,}000 \times 2 \approx 10\ \mathrm{MB}$ at the typical tier) packed into a contiguous aligned buffer for cache-friendly Gram matrix computation.
 - **Producer-consumer I/O**: genome decompression overlapped with k-mer computation via bounded semaphore.
+- **Async DB writer**: taxon results are pushed to a `AsyncDBWriter` background thread that micro-batches writes (up to 500 taxa or 100,000 rows per transaction, flushed every 500 ms or when the batch fills). This decouples DB I/O from the compute workers; the queue capacity is 2,000 pending payloads before back-pressure kicks in.
 - **NFS robustness**: `embed_genome()` retries failed reads up to 3 times with 500 ms / 1 s backoff; permanently failed genomes recorded in the `jobs_failed` table.
 
 ---

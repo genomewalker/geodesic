@@ -7,15 +7,14 @@
 #include <future>
 #include <memory>
 #include <random>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-namespace derep {
+namespace derep { struct IPackReader; }
 
-namespace db { class EmbeddingStore; }  // Forward declaration
-namespace db { class SketchStore; }     // Forward declaration
-namespace db { class GenomePack; }      // Forward declaration
+namespace derep {
 
 // Aligned allocator for SIMD-friendly memory layout
 template <typename T, size_t Alignment = 64>
@@ -201,52 +200,29 @@ public:
 
     // Phase 1-2: Embed all genomes and build spatial index
     // quality_scores: path.string() → quality (completeness - 5*contamination)
-    // emb_store/taxonomy: if provided, CountSketch vectors are saved asynchronously
-    //   (background thread overlapping Nyström/HNSW/FPS) for future warm runs.
     void build_index(const std::vector<std::filesystem::path>& genomes,
-                     const std::unordered_map<std::string, double>& quality_scores = {},
-                     db::EmbeddingStore* emb_store = nullptr,
-                     const std::string& taxonomy = "");
+                     const std::unordered_map<std::string, double>& quality_scores = {});
 
-    // Incremental build: load existing embeddings from store, embed only missing genomes
-    // Returns number of newly embedded genomes
-    size_t build_index_incremental(
+    // genopack v2 build: load raw FASTA from pack reader by accession.
+    void build_index_from_gpk(
+        const std::vector<std::string>& accessions,
         const std::vector<std::filesystem::path>& genomes,
-        db::EmbeddingStore& store,
-        const std::string& taxonomy,
+        IPackReader& gpk,
         const std::unordered_map<std::string, double>& quality_scores = {});
 
-    // Sketch-cache build: load oph_sig from SketchStore instead of reading NFS files.
-    // Falls back to embed_genome() for cache misses when require_sketches=false.
-    // When require_sketches=true, cache misses are recorded in failed_reads_.
-    void build_index_from_sketches(
+    // GPK sketch-accelerated build: load pre-computed OPH sketches from SKCH section.
+    // Zero decompression, zero re-sketching — ~100× faster than build_index_from_gpk.
+    void build_index_from_gpk_sketches(
         const std::vector<std::string>& accessions,
         const std::vector<std::filesystem::path>& genomes,
-        db::SketchStore& sketch_store,
-        const std::unordered_map<std::string, double>& quality_scores = {},
-        bool require_sketches = false,
-        db::EmbeddingStore* emb_store = nullptr,
-        const std::string& taxonomy = "");
-
-    // Pack-based build: load raw FASTA from GenomePack instead of NFS.
-    // Falls back to embed_genome() for genomes not in pack.
-    void build_index_from_pack(
-        const std::vector<std::string>& accessions,
-        const std::vector<std::filesystem::path>& genomes,
-        db::GenomePack& pack,
-        const std::string& taxonomy,
-        const std::unordered_map<std::string, double>& quality_scores = {},
-        db::EmbeddingStore* emb_store = nullptr);
-
-    // Async variant: uses pre-Nyström float snapshot, streams in batches to cap RAM overhead.
-    void save_embeddings_async(db::EmbeddingStore& store, const std::string& taxonomy,
-                               std::vector<std::vector<float>>&& vec_snap);
+        IPackReader& gpk,
+        const std::unordered_map<std::string, double>& quality_scores = {});
 
     // Get representative genome IDs (after select_representatives)
     std::vector<uint64_t> get_representative_ids() const { return last_representative_ids_; }
 
     // Exclude paths from being selected as representatives (sets quality score to 0).
-    // Call after build_index and detect_contamination, before select_representatives.
+    // Call after build_index and detect_outlier_candidates, before select_representatives.
     void exclude_from_reps(const std::unordered_set<std::string>& paths);
 
     // Compute ad-hoc quality scores for genomes without CheckM2 data.
@@ -287,7 +263,7 @@ public:
     static double jaccard_to_ani(double J, int kmer_size);
 
     // Contamination detection: returns genome IDs with anomalous embedding patterns
-    struct ContaminationCandidate {
+    struct OutlierCandidate {
         uint64_t genome_id;
         float centroid_distance;    // Distance from species centroid (informational)
         float isolation_score;      // Mean distance to k-NN
@@ -298,8 +274,11 @@ public:
         float margin_to_threshold = 0.0f; // isolation_score - nn_threshold (positive = above threshold)
         std::string flag_reason;    // "nn_outlier", "size_outlier", or "nn_outlier+size_outlier"
         std::filesystem::path path;
+        uint32_t n_contigs = 0;
+        uint64_t genome_length_bp = 0;
+        bool excluded = true;   // false = flagged only, still participates in rep selection
     };
-    std::vector<ContaminationCandidate> detect_contamination_candidates(
+    std::vector<OutlierCandidate> detect_outlier_candidates(
         float z_threshold = 2.0f) const;
 
     // NN distance distribution from HNSW.
@@ -307,11 +286,11 @@ public:
         double p5;
         double p50;
         double p95;
-        // Maximum edge in the minimum spanning tree of the k-NN graph.
-        // The minimum θ at which the k-NN graph becomes connected — the
-        // binary_search_filter analog from the original graph-based pipeline.
-        // Zero if unavailable (small-n brute-force path).
+        // 90th-percentile edge in the minimum spanning tree of the k-NN graph.
+        // Used as the taxon diversity threshold — more robust than the true max
+        // against rare outlier edges. Zero if unavailable (small-n brute-force path).
         double mst_max_edge = 0.0;
+        double mst_true_max = 0.0;       // Actual maximum MST edge (diagnostic; mst_max_edge holds P90)
         double mst_w2 = 0.0;             // second-largest MST edge (penultimate Kruskal merge)
         uint32_t bridge_min_side = 0;    // smaller component at the final MST merge
         int k_conn   = -1;  // smallest k where k-NN graph connects (-1 = never within K_cap)
@@ -377,20 +356,14 @@ private:
     std::unique_ptr<HNSWIndex> index_;
 
     // Per-genome component label from K_cap Kruskal (-1 = MST outlier).
-    // Set by compute_isolation_scores(), read by detect_contamination_candidates().
+    // Set by compute_isolation_scores(), read by detect_outlier_candidates().
     std::vector<int> component_ids_;
 
     // Last selected representatives (for incremental workflows)
     std::vector<uint64_t> last_representative_ids_;
 
-    // Path to accession mapping (for incremental store integration)
-    std::unordered_map<std::string, std::string> path_to_accession_;
-
     // Pinned representative paths (pre-seeded before FPS)
     std::unordered_set<std::string> pinned_rep_paths_;
-
-    // Async embedding save (started in build_index, joined in destructor)
-    std::future<void> async_save_future_;
 
     // Whether Nyström embedding was applied (false → exact Jaccard FPS for small n)
     bool nystrom_applied_ = false;
@@ -412,6 +385,11 @@ private:
     std::vector<std::vector<char>> buf_cache_;
     std::atomic<size_t> buf_cache_bytes_{0};
 
+    // Pack reader for sig2 materialization (avoids NFS re-reads).
+    // Set by build_index_from_gpk(), null otherwise.
+    IPackReader* gpk_reader_ = nullptr;
+    std::vector<std::string> gpk_accessions_;  // index-parallel to embeddings_
+
     // Generate embedding for single genome (reads from NFS)
     GenomeEmbedding embed_genome(const std::filesystem::path& path, uint64_t id);
 
@@ -428,9 +406,9 @@ private:
     // (Phase 7 verification). Skips indices that already have sig2 or lack a path.
     void materialize_sig2_for_indices(const std::vector<size_t>& indices);
 
-    // Shared tail of build_index / build_index_from_sketches:
-    // SoA copy, Nyström embedding, async save, HNSW build.
-    void finalize_embeddings_(db::EmbeddingStore* emb_store, const std::string& taxonomy);
+    // Shared tail of build_index / build_index_from_gpk:
+    // SoA copy, Nyström embedding, HNSW build.
+    void finalize_embeddings_();
 
     // Brute-force O(n²) isolation scores for small n (no HNSW needed)
     void compute_isolation_scores_brute();

@@ -4,12 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GEODESIC="${GEODESIC:-${SCRIPT_DIR}/../../build/geodesic}"
 SKANI="${SKANI:-/maps/projects/fernandezguerra/apps/opt/conda/envs/bioinfo/bin/skani}"
-DUCKDB="${DUCKDB:-/maps/projects/fernandezguerra/apps/opt/conda/envs/bioinfo/bin/duckdb}"
 INPUT_TSV="${1:-${SCRIPT_DIR}/test_input.tsv}"
 ANI_THRESHOLD="${2:-95.0}"
 THREADS="${3:-4}"
 
-for tool in "$GEODESIC" "$SKANI" "$DUCKDB"; do
+for tool in "$GEODESIC" "$SKANI"; do
     [[ -x "$tool" ]] || { echo "ERROR: not found or not executable: $tool"; exit 1; }
 done
 [[ -f "$INPUT_TSV" ]] || { echo "ERROR: input TSV not found: $INPUT_TSV"; exit 1; }
@@ -27,49 +26,77 @@ echo ""
 echo "==> Step 1: Running geodesic derep..."
 "$GEODESIC" derep \
     --tax-file "$INPUT_TSV" \
-    --db-path "$WORKDIR/test.db" \
     --prefix test \
+    --out-dir "$WORKDIR" \
     --threads "$THREADS" \
     --ani-threshold "$ANI_THRESHOLD" \
     -q \
     2>&1 | tail -10
 
-DB="$WORKDIR/test.db"
-[[ -f "$DB" ]] || { echo "ERROR: geodesic did not produce $DB"; exit 1; }
+DEREP_TSV="$WORKDIR/test_derep_genomes.tsv"
+[[ -f "$DEREP_TSV" ]] || { echo "ERROR: geodesic did not produce $DEREP_TSV"; exit 1; }
 
-# --- Step 2: Extract rep and non-rep file lists ---
+# --- Step 2: Extract rep and non-rep file lists from TSV ---
 echo ""
-echo "==> Step 2: Extracting representatives and non-representatives from DB..."
+echo "==> Step 2: Extracting representatives and non-representatives from TSV..."
 
-# Get non-rep accessions and file paths (CSV: accession,file)
-"$DUCKDB" "$DB" -csv -noheader \
-    "SELECT g.accession, g.file
-     FROM genomes g
-     JOIN genomes_derep gd ON g.accession = gd.accession
-     WHERE gd.representative = false" \
-    > "$WORKDIR/nonreps.csv"
+python3 - "$DEREP_TSV" "$INPUT_TSV" "$WORKDIR" <<'PYEOF'
+import sys, csv, os
 
-# Get rep accessions and file paths (CSV: accession,file)
-"$DUCKDB" "$DB" -csv -noheader \
-    "SELECT g.accession, g.file
-     FROM genomes g
-     JOIN genomes_derep gd ON g.accession = gd.accession
-     WHERE gd.representative = true" \
-    > "$WORKDIR/reps.csv"
+derep_file = sys.argv[1]
+input_file = sys.argv[2]
+workdir    = sys.argv[3]
+
+# Build accession → file path map from input TSV
+acc_to_file = {}
+with open(input_file) as f:
+    reader = csv.DictReader(f, delimiter='\t')
+    for row in reader:
+        acc_to_file[row['accession']] = row['file']
+
+# Parse derep TSV to classify reps vs non-reps
+reps = []
+nonreps = []
+with open(derep_file) as f:
+    reader = csv.DictReader(f, delimiter='\t')
+    for row in reader:
+        acc = row['accession']
+        fpath = acc_to_file.get(acc, '')
+        if not fpath:
+            continue
+        is_rep = row.get('is_representative', row.get('representative', '')).lower() in ('true', '1', 'yes')
+        if is_rep:
+            reps.append((acc, fpath))
+        else:
+            nonreps.append((acc, fpath))
+
+with open(os.path.join(workdir, 'reps.csv'), 'w') as f:
+    for acc, fpath in reps:
+        f.write(f"{acc},{fpath}\n")
+
+with open(os.path.join(workdir, 'nonreps.csv'), 'w') as f:
+    for acc, fpath in nonreps:
+        f.write(f"{acc},{fpath}\n")
+
+print(f"  Representatives: {len(reps)}")
+print(f"  Non-representatives: {len(nonreps)}")
+
+if len(nonreps) == 0:
+    print("PASS: all genomes are representatives (nothing to verify)")
+    sys.exit(0)
+if len(reps) == 0:
+    print(f"ERROR: no representatives found but {len(nonreps)} non-reps exist")
+    sys.exit(1)
+PYEOF
 
 N_REPS=$(wc -l < "$WORKDIR/reps.csv")
 N_NONREPS=$(wc -l < "$WORKDIR/nonreps.csv")
 
-echo "  Representatives: $N_REPS"
-echo "  Non-representatives: $N_NONREPS"
-
 if [[ "$N_NONREPS" -eq 0 ]]; then
-    echo "PASS: all genomes are representatives (nothing to verify)"
     exit 0
 fi
-
 if [[ "$N_REPS" -eq 0 ]]; then
-    echo "ERROR: no representatives found but $N_NONREPS non-reps exist"
+    echo "ERROR: no representatives found"
     exit 1
 fi
 
@@ -103,7 +130,6 @@ reps_file    = sys.argv[2]
 ani_file     = sys.argv[3]
 threshold    = float(sys.argv[4])
 
-# Load CSV (accession,file) → build file path → accession map
 def load_acc_file_map(path):
     m = {}
     with open(path) as f:
@@ -117,7 +143,6 @@ def load_acc_file_map(path):
 nonrep_map = load_acc_file_map(nonreps_file)
 rep_map    = load_acc_file_map(reps_file)
 
-# Collect all non-rep accessions
 nonrep_accs = set()
 with open(nonreps_file) as f:
     reader = csv.reader(f)
@@ -125,9 +150,8 @@ with open(nonreps_file) as f:
         if row:
             nonrep_accs.add(row[0])
 
-# For each non-rep, find best ANI to any rep
-best_ani = {}  # non-rep accession → best ANI
-best_rep = {}  # non-rep accession → best rep accession
+best_ani = {}
+best_rep = {}
 
 with open(ani_file) as f:
     reader = csv.DictReader(f, delimiter='\t')
@@ -139,13 +163,8 @@ with open(ani_file) as f:
         except (ValueError, KeyError):
             continue
 
-        # Determine which is non-rep and which is rep
-        # skani dist: query=non-rep, ref=rep
-        q_basename = os.path.basename(query_file)
-        r_basename = os.path.basename(ref_file)
-
-        q_acc = nonrep_map.get(query_file) or nonrep_map.get(q_basename)
-        r_acc = rep_map.get(ref_file) or rep_map.get(r_basename)
+        q_acc = nonrep_map.get(query_file)
+        r_acc = rep_map.get(ref_file)
 
         if q_acc and r_acc and q_acc in nonrep_accs:
             if ani > best_ani.get(q_acc, 0.0):

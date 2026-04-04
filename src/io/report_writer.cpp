@@ -1,6 +1,4 @@
 #include "report_writer.hpp"
-#include "db/db_manager.hpp"
-#include <duckdb.hpp>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -1876,70 +1874,61 @@ animate();
 ReportWriter::ReportWriter(std::filesystem::path output_dir, std::string prefix, std::string timestamp)
     : dir_(std::move(output_dir)), prefix_(std::move(prefix)), ts_(std::move(timestamp)) {}
 
-std::string ReportWriter::build_json(db::DBManager& db) const {
+static std::string fmt_runtime(double sec) {
+    if (sec < 60)   return std::to_string(static_cast<int>(sec)) + "s";
+    if (sec < 3600) return std::to_string(static_cast<int>(sec/60)) + "m " + std::to_string(static_cast<int>(std::fmod(sec,60))) + "s";
+    int h = static_cast<int>(sec/3600), m = static_cast<int>(std::fmod(sec,3600)/60);
+    return std::to_string(h) + "h " + std::to_string(m) + "m";
+}
+
+std::string ReportWriter::build_json(const RunState& state) const {
+    const auto& taxa = state.taxa();
+
     // ── Summary ──────────────────────────────────────────────────────────────
     int64_t total_genomes = 0, total_taxa = 0, total_reps = 0, n_singletons = 0, n_failed = 0;
     double mean_cov = 0, mean_div = 0, total_rt = 0;
-    {
-        auto r = db.query(
-            "SELECT "
-            "  SUM(r.n_genomes), COUNT(*), SUM(r.n_genomes_derep), "
-            "  SUM(CASE WHEN r.method='singleton' THEN 1 ELSE 0 END), "
-            "  SUM(CASE WHEN r.method='failed'    THEN 1 ELSE 0 END), "
-            "  AVG(CASE WHEN r.method NOT IN ('singleton','fixed') THEN d.coverage_mean_ani  ELSE NULL END), "
-            "  AVG(CASE WHEN r.method NOT IN ('singleton','fixed') THEN d.diversity_mean_ani ELSE NULL END), "
-            "  SUM(COALESCE(d.runtime_seconds,0)) "
-            "FROM results r LEFT JOIN diversity_stats d ON r.taxonomy = d.taxonomy");
-        auto chunk = r->Fetch();
-        if (chunk && chunk->size() > 0) {
-            auto get_i64 = [&](int c) -> int64_t {
-                auto v = chunk->GetValue(c, 0);
-                return v.IsNull() ? 0 : v.GetValue<int64_t>();
-            };
-            auto get_d = [&](int c) -> double {
-                auto v = chunk->GetValue(c, 0);
-                return v.IsNull() ? 0.0 : v.GetValue<double>();
-            };
-            total_genomes = get_i64(0);
-            total_taxa    = get_i64(1);
-            total_reps    = get_i64(2);
-            n_singletons  = get_i64(3);
-            n_failed      = get_i64(4);
-            mean_cov      = get_d(5);
-            mean_div      = get_d(6);
-            total_rt      = get_d(7);
+    int n_cov = 0, n_div = 0;
+    for (const auto& t : taxa) {
+        ++total_taxa;
+        total_genomes += t.result.n_genomes;
+        total_reps    += t.result.n_representatives;
+        if (t.result.status == TaxonStatus::SINGLETON) ++n_singletons;
+        if (t.result.status == TaxonStatus::FAILED)    ++n_failed;
+        const auto& d = t.diversity_stats;
+        total_rt += d.runtime_seconds;
+        if (t.result.method != "singleton" && t.result.method != "fixed" && !d.taxonomy.empty()) {
+            mean_cov += d.coverage_mean_ani;  ++n_cov;
+            mean_div += d.diversity_mean_ani; ++n_div;
         }
     }
+    if (n_cov > 0) mean_cov /= n_cov;
+    if (n_div > 0) mean_div /= n_div;
 
-    // ── Taxa data (columnar) ─────────────────────────────────────────────────
-    auto taxa_res = db.query(
-        "SELECT "
-        "  r.taxonomy, r.n_genomes, r.n_genomes_derep, r.method, "
-        "  COALESCE(d.reduction_ratio,   0.0) AS rr, "
-        "  COALESCE(d.coverage_mean_ani, 100.0) AS cm, "
-        "  COALESCE(d.diversity_mean_ani, 0.0) AS dm, "
-        "  COALESCE(d.diversity_ani_range, 0.0) AS da, "
-        "  COALESCE(d.runtime_seconds,   0.0) AS rt "
-        "FROM results r LEFT JOIN diversity_stats d ON r.taxonomy = d.taxonomy "
-        "ORDER BY r.n_genomes DESC");
+    // ── Taxa data (columnar, sorted large-to-small) ───────────────────────────
+    std::vector<const TaxonOutput*> sorted;
+    sorted.reserve(taxa.size());
+    for (const auto& t : taxa) sorted.push_back(&t);
+    std::sort(sorted.begin(), sorted.end(), [](const TaxonOutput* a, const TaxonOutput* b) {
+        return a->result.n_genomes > b->result.n_genomes;
+    });
 
     std::ostringstream tx_s, ng_s, nr_s, rr_s, cm_s, dm_s, mt_s, rt_s;
     tx_s << '['; ng_s << '['; nr_s << '['; rr_s << '[';
     cm_s << '['; dm_s << '['; mt_s << '['; rt_s << '[';
     bool first = true;
-    while (auto chunk = taxa_res->Fetch()) {
-        for (duckdb::idx_t row = 0; row < chunk->size(); ++row) {
-            if (!first) { tx_s<<','; ng_s<<','; nr_s<<','; rr_s<<','; cm_s<<','; dm_s<<','; mt_s<<','; rt_s<<','; }
-            first = false;
-            tx_s << '"' << esc_json(chunk->GetValue(0,row).GetValue<std::string>()) << '"';
-            ng_s << chunk->GetValue(1,row).GetValue<int32_t>();
-            nr_s << chunk->GetValue(2,row).GetValue<int32_t>();
-            mt_s << '"' << esc_json(chunk->GetValue(3,row).GetValue<std::string>()) << '"';
-            rr_s << fmt_d(chunk->GetValue(4,row).IsNull() ? 0.0 : chunk->GetValue(4,row).GetValue<double>(), 4);
-            cm_s << fmt_d(chunk->GetValue(5,row).IsNull() ? 0.0 : chunk->GetValue(5,row).GetValue<double>(), 4);
-            dm_s << fmt_d(chunk->GetValue(6,row).IsNull() ? 0.0 : chunk->GetValue(6,row).GetValue<double>(), 4);
-            rt_s << fmt_d(chunk->GetValue(8,row).IsNull() ? 0.0 : chunk->GetValue(8,row).GetValue<double>(), 2);
-        }
+    for (const auto* tp : sorted) {
+        const auto& r = tp->result;
+        const auto& d = tp->diversity_stats;
+        if (!first) { tx_s<<','; ng_s<<','; nr_s<<','; rr_s<<','; cm_s<<','; dm_s<<','; mt_s<<','; rt_s<<','; }
+        first = false;
+        tx_s << '"' << esc_json(r.taxonomy) << '"';
+        ng_s << r.n_genomes;
+        nr_s << r.n_representatives;
+        mt_s << '"' << esc_json(r.method) << '"';
+        rr_s << fmt_d(d.reduction_ratio,   4);
+        cm_s << fmt_d(d.coverage_mean_ani, 4);
+        dm_s << fmt_d(d.diversity_mean_ani, 4);
+        rt_s << fmt_d(d.runtime_seconds,   2);
     }
     tx_s<<']'; ng_s<<']'; nr_s<<']'; rr_s<<']'; cm_s<<']'; dm_s<<']'; mt_s<<']'; rt_s<<']';
 
@@ -1949,11 +1938,11 @@ std::string ReportWriter::build_json(db::DBManager& db) const {
       << "\"meta\":{\"prefix\":\"" << esc_json(prefix_) << "\","
       <<            "\"timestamp\":\"" << esc_json(ts_) << "\"},"
       << "\"summary\":{"
-      <<   "\"n_genomes\":"   << total_genomes << ","
-      <<   "\"n_taxa\":"      << total_taxa    << ","
-      <<   "\"n_reps\":"      << total_reps    << ","
+      <<   "\"n_genomes\":"    << total_genomes << ","
+      <<   "\"n_taxa\":"       << total_taxa    << ","
+      <<   "\"n_reps\":"       << total_reps    << ","
       <<   "\"n_singletons\":" << n_singletons  << ","
-      <<   "\"n_failed\":"    << n_failed      << ","
+      <<   "\"n_failed\":"     << n_failed      << ","
       <<   "\"mean_coverage\":" << fmt_d(mean_cov, 4) << ","
       <<   "\"mean_diversity\":" << fmt_d(mean_div, 4) << ","
       <<   "\"total_runtime\":" << fmt_d(total_rt, 1)
@@ -1972,44 +1961,29 @@ std::string ReportWriter::build_json(db::DBManager& db) const {
     return j.str();
 }
 
-static std::string fmt_runtime(double sec) {
-    if (sec < 60)   return std::to_string(static_cast<int>(sec)) + "s";
-    if (sec < 3600) return std::to_string(static_cast<int>(sec/60)) + "m " + std::to_string(static_cast<int>(std::fmod(sec,60))) + "s";
-    int h = static_cast<int>(sec/3600), m = static_cast<int>(std::fmod(sec,3600)/60);
-    return std::to_string(h) + "h " + std::to_string(m) + "m";
-}
-
-void ReportWriter::write(db::DBManager& db) const {
-    // ── Build JSON data ──────────────────────────────────────────────────────
+void ReportWriter::write(const RunState& state) const {
     spdlog::info("Generating HTML report...");
     std::string json;
     try {
-        json = build_json(db);
+        json = build_json(state);
     } catch (const std::exception& e) {
         spdlog::warn("Report generation failed: {}", e.what());
         return;
     }
 
-    // Extract scalar summary values for HTML placeholder substitution
-    int64_t n_genomes=0, n_taxa=0, n_reps=0, n_singletons=0, n_failed=0;
-    double mean_cov=0, total_rt=0;
-    {
-        auto r = db.query(
-            "SELECT SUM(n_genomes), COUNT(*), SUM(n_genomes_derep), "
-            "  SUM(CASE WHEN method='singleton' THEN 1 ELSE 0 END), "
-            "  SUM(CASE WHEN method='failed'    THEN 1 ELSE 0 END) "
-            "FROM results");
-        auto chunk = r->Fetch();
-        if (chunk && chunk->size() > 0) {
-            auto gi = [&](int c) -> int64_t { auto v=chunk->GetValue(c,0); return v.IsNull()?0:v.GetValue<int64_t>(); };
-            n_genomes=gi(0); n_taxa=gi(1); n_reps=gi(2); n_singletons=gi(3); n_failed=gi(4);
-        }
-        auto r2 = db.query("SELECT SUM(runtime_seconds) FROM diversity_stats");
-        auto c2 = r2->Fetch();
-        if (c2 && c2->size()>0 && !c2->GetValue(0,0).IsNull()) total_rt = c2->GetValue(0,0).GetValue<double>();
+    const auto& taxa = state.taxa();
+    int64_t n_genomes = 0, n_taxa = 0, n_reps = 0, n_singletons = 0, n_failed = 0;
+    double total_rt = 0.0;
+    for (const auto& t : taxa) {
+        ++n_taxa;
+        n_genomes += static_cast<int64_t>(t.result.n_genomes);
+        n_reps    += static_cast<int64_t>(t.result.n_representatives);
+        if (t.result.status == TaxonStatus::SINGLETON) ++n_singletons;
+        if (t.result.status == TaxonStatus::FAILED)    ++n_failed;
+        total_rt += t.diversity_stats.runtime_seconds;
     }
 
-    auto replace_all = [](std::string s, const std::string& from, const std::string& to) {
+    auto replace_all_fn = [](std::string s, const std::string& from, const std::string& to) {
         size_t pos = 0;
         while ((pos = s.find(from, pos)) != std::string::npos) {
             s.replace(pos, from.size(), to);
@@ -2018,17 +1992,16 @@ void ReportWriter::write(db::DBManager& db) const {
         return s;
     };
 
-    // ── Main report ──────────────────────────────────────────────────────────
     std::string html = REPORT_HTML;
-    html = replace_all(html, "__DATA__",        json);
-    html = replace_all(html, "__PREFIX__",      prefix_);
-    html = replace_all(html, "__TIMESTAMP__",   ts_);
-    html = replace_all(html, "__N_GENOMES__",   std::to_string(n_genomes));
-    html = replace_all(html, "__N_TAXA__",      std::to_string(n_taxa));
-    html = replace_all(html, "__N_REPS__",      std::to_string(n_reps));
-    html = replace_all(html, "__N_SINGLETONS__",std::to_string(n_singletons));
-    html = replace_all(html, "__N_FAILED__",    std::to_string(n_failed));
-    html = replace_all(html, "__RUNTIME__",     fmt_runtime(total_rt));
+    html = replace_all_fn(html, "__DATA__",         json);
+    html = replace_all_fn(html, "__PREFIX__",       prefix_);
+    html = replace_all_fn(html, "__TIMESTAMP__",    ts_);
+    html = replace_all_fn(html, "__N_GENOMES__",    std::to_string(n_genomes));
+    html = replace_all_fn(html, "__N_TAXA__",       std::to_string(n_taxa));
+    html = replace_all_fn(html, "__N_REPS__",       std::to_string(n_reps));
+    html = replace_all_fn(html, "__N_SINGLETONS__", std::to_string(n_singletons));
+    html = replace_all_fn(html, "__N_FAILED__",     std::to_string(n_failed));
+    html = replace_all_fn(html, "__RUNTIME__",      fmt_runtime(total_rt));
 
     auto report_path = dir_ / (prefix_ + "_report.html");
     std::ofstream rf(report_path);
@@ -2037,9 +2010,8 @@ void ReportWriter::write(db::DBManager& db) const {
     rf.close();
     spdlog::info("Report written to {}", report_path.string());
 
-    // ── Algorithm visualization page ─────────────────────────────────────────
     std::string alg_html = ALGORITHM_HTML;
-    alg_html = replace_all(alg_html, "__PREFIX__", prefix_);
+    alg_html = replace_all_fn(alg_html, "__PREFIX__", prefix_);
     auto alg_path = dir_ / (prefix_ + "_algorithm.html");
     std::ofstream af(alg_path);
     if (!af) throw std::runtime_error("Cannot write algorithm page: " + alg_path.string());

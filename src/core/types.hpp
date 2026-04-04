@@ -113,7 +113,8 @@ struct TaxonDiversityStats {
     int diversity_n_pairs = 0;
 
     // Contamination: genomes flagged as potential contamination
-    int n_contaminated = 0;
+    int n_outliers_excluded = 0;   // Outliers excluded from rep selection
+    int n_outliers_retained = 0;   // Outliers flagged but retained
 };
 
 enum class PipelineStage : int {
@@ -123,7 +124,7 @@ enum class PipelineStage : int {
     GRAPH_DONE = 3,
     PARTITION_DONE = 4,
     REPRESENTATIVES_DONE = 5,
-    EMBEDDING_DONE = 6,       // OPH sigs written to EmbeddingStore; FPS not yet run
+    EMBEDDING_DONE = 6,       // OPH sigs computed; FPS not yet run
     COMPLETE = 7
 };
 

@@ -20,13 +20,44 @@ endif()
 # Frame pointers for perf call-graph profiling (negligible overhead)
 add_compile_options(-fno-omit-frame-pointer)
 
+# AddressSanitizer for heap corruption debugging
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+if(ENABLE_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -O1)
+    add_link_options(-fsanitize=address)
+    message(STATUS "AddressSanitizer enabled")
+endif()
+
 # Enable OpenMP for parallel processing
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     message(STATUS "OpenMP found, enabling parallel optimizations")
 endif()
 
-# Custom find modules (DuckDB, etc.)
+# genopack dependency — configure with:
+#   cmake -DGENOPACK_INCLUDE_DIR=/path/to/genopack/include \
+#         -DGENOPACK_LIBRARY=/path/to/libgenopack_lib.a
+set(GENOPACK_INCLUDE_DIR "" CACHE PATH "genopack include directory (required)")
+set(GENOPACK_LIBRARY     "" CACHE FILEPATH "genopack static library (required)")
+if(NOT GENOPACK_INCLUDE_DIR OR NOT GENOPACK_LIBRARY)
+    # Attempt auto-detection from a sibling checkout (common dev layout)
+    get_filename_component(_repo_root "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
+    set(_auto_inc "${_repo_root}/genopack/include")
+    set(_auto_lib "${_repo_root}/genopack/build/libgenopack_lib.a")
+    if(EXISTS "${_auto_inc}" AND EXISTS "${_auto_lib}")
+        set(GENOPACK_INCLUDE_DIR "${_auto_inc}" CACHE PATH "genopack include directory" FORCE)
+        set(GENOPACK_LIBRARY     "${_auto_lib}" CACHE FILEPATH "genopack static library" FORCE)
+        message(STATUS "genopack: auto-detected at ${_auto_inc}")
+    else()
+        message(FATAL_ERROR
+            "genopack not found. Set -DGENOPACK_INCLUDE_DIR= and -DGENOPACK_LIBRARY= "
+            "or place genopack as a sibling directory of geodesic.")
+    endif()
+endif()
+message(STATUS "genopack include: ${GENOPACK_INCLUDE_DIR}")
+message(STATUS "genopack library: ${GENOPACK_LIBRARY}")
+
+# Custom find modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(FetchContent)
@@ -44,7 +75,11 @@ FetchContent_Declare(thread_pool GIT_REPOSITORY https://github.com/bshoshany/thr
 FetchContent_MakeAvailable(thread_pool)
 
 # hnswlib (header-only HNSW implementation)
-FetchContent_Declare(hnswlib GIT_REPOSITORY https://github.com/nmslib/hnswlib.git GIT_TAG v0.8.0)
+FetchContent_Declare(hnswlib
+    GIT_REPOSITORY https://github.com/nmslib/hnswlib.git
+    GIT_TAG v0.8.0
+    PATCH_COMMAND git apply --check ${CMAKE_CURRENT_SOURCE_DIR}/patches/hnswlib-prefetch-fix.patch
+                  && git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/hnswlib-prefetch-fix.patch || true)
 FetchContent_MakeAvailable(hnswlib)
 
 # Catch2 v3.7.1
@@ -73,35 +108,43 @@ set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(Eigen3)
 
-find_package(DuckDB MODULE REQUIRED)
 find_package(Zstd MODULE QUIET)
+find_package(ZLIB REQUIRED)
 
-# RPATH: embed DuckDB library search path so the binary runs without LD_LIBRARY_PATH
-get_filename_component(_duckdb_dir "${DuckDB_LIBRARIES}" DIRECTORY)
-set(CMAKE_BUILD_RPATH "${_duckdb_dir}")
+# libdeflate — required by genopack's gzip decompression path
+find_library(LIBDEFLATE_LIBRARY NAMES deflate libdeflate
+    HINTS "${GENOPACK_INCLUDE_DIR}/../.." ENV CONDA_PREFIX
+    PATH_SUFFIXES lib lib64)
+if(NOT LIBDEFLATE_LIBRARY)
+    message(FATAL_ERROR "libdeflate not found (required by genopack). "
+        "Install libdeflate or set LIBDEFLATE_LIBRARY.")
+endif()
+message(STATUS "libdeflate: ${LIBDEFLATE_LIBRARY}")
 
 add_executable(geodesic
     src/main.cpp
     src/config.cpp
     src/pipeline.cpp
+    src/update.cpp
     src/io/tsv_reader.cpp
     src/io/fasta_reader.cpp
     src/io/gz_reader.cpp
+    src/io/lock_writer.cpp
     src/io/results_writer.cpp
     src/io/report_writer.cpp
-    src/db/schema.cpp
-    src/db/db_manager.cpp
-    src/db/operations.cpp
-    src/db/embedding_store.cpp
-    src/db/genome_pack.cpp
-    src/db/sketch_store.cpp
+    src/db/geodf/geodf_writer.cpp
+    src/db/geodf/geodf_reader.cpp
+    src/db/taxdb/ncbi_taxdb.cpp
     src/core/subprocess.cpp
     src/core/genome_cache.cpp
+    src/core/multi_pack_reader.cpp
+    src/taxonomy/normalize.cpp
     src/core/similarity/similarity_base.cpp
     src/core/similarity/skani.cpp
     src/core/sketch/minhash.cpp
     src/core/geodesic/geodesic.cpp
     src/parallel/taxon_processor.cpp
+    src/state/run_state.cpp
 )
 
 target_include_directories(geodesic PRIVATE
@@ -110,6 +153,7 @@ target_include_directories(geodesic PRIVATE
     "${hnswlib_SOURCE_DIR}"
     "${rapidgzip_SOURCE_DIR}/src"
     "${eigen3_SOURCE_DIR}"
+    "${GENOPACK_INCLUDE_DIR}"
 )
 if(Zstd_FOUND)
     target_include_directories(geodesic PRIVATE "${Zstd_INCLUDE_DIRS}")
@@ -119,9 +163,11 @@ endif()
 target_link_libraries(geodesic PRIVATE
     CLI11::CLI11
     spdlog::spdlog
-    ${DuckDB_LIBRARIES}
     librapidgzip
     pthread
+    "${GENOPACK_LIBRARY}"
+    "${LIBDEFLATE_LIBRARY}"
+    ZLIB::ZLIB
 )
 if(Zstd_FOUND)
     target_link_libraries(geodesic PRIVATE ${Zstd_LIBRARIES})

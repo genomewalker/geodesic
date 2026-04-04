@@ -61,19 +61,21 @@ This signal is computed and stored for analysis. It is not currently used as a f
 
 ## CheckM2 integration
 
-When CheckM2 quality estimates are available (`--checkm2`), contamination enters directly through the fitness function:
+When CheckM2 quality estimates are available (`--checkm2`), the quality score per genome is:
 
 $$
 q = \text{completeness} - 5 \times \text{contamination}
 $$
 
+This score is used as a **tie-breaker** in FPS, not as a multiplier in the primary fitness:
+
 $$
-\text{fitness}_i = d_i \cdot \frac{q_i}{100} \cdot \sqrt{\frac{L_i}{L_m}}
+\text{fitness}_i = d_i \cdot \sqrt{\frac{L_i}{L_m}}
 $$
 
-where $d_i$ is the distance to the nearest current representative, $q_i$ is the CheckM2 quality score (defaults to 100 when unavailable), $L_i$ is genome length, and $L_m$ is the taxon median genome length.
+where $d_i$ is the angular-distance proxy to the nearest current representative and $L_m$ is the taxon median genome length. When two candidates have fitness values within $10^{-3}$ of each other, the one with higher $q$ is selected. This preserves the pure diversity objective (maximise spread) while preferring higher-quality assemblies among equidistant candidates.
 
-A genome with 10% CheckM2 contamination loses 50 quality points. This typically suppresses contaminated genomes without fully excluding them; they remain in the candidate pool but rank far below clean assemblies. The embedding-based `nn_outlier` flag is the fallback when CheckM2 scores are unavailable.
+A genome with 10% CheckM2 contamination loses 50 quality points and is consistently deprioritised as a tie-break loser. Heavily contaminated genomes that are also isolation-score outliers are excluded entirely via the `nn_outlier` flag. The embedding-based `nn_outlier` flag is the fallback when CheckM2 scores are unavailable.
 
 ---
 
