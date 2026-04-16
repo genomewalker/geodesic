@@ -150,6 +150,7 @@ static double refine_jaccard_ptr(const uint16_t* __restrict a,
 // Uses inner product space (for normalized vectors, maximizing IP = minimizing angular distance)
 struct GeodesicDerep::HNSWIndex {
     size_t dim = 256;  // Set dynamically during build
+    uint64_t seed_ = 42;
     std::unique_ptr<hnswlib::InnerProductSpace> space;
     std::unique_ptr<hnswlib::HierarchicalNSW<float>> index;
     std::vector<GenomeEmbedding>* embeddings;
@@ -163,11 +164,13 @@ struct GeodesicDerep::HNSWIndex {
         dim = embs[0].vector.size();
         space = std::make_unique<hnswlib::InnerProductSpace>(dim);
         index = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-            space.get(), embs.size(), M, ef_construction, /*seed=*/42);
+            space.get(), embs.size(), M, ef_construction, /*seed=*/seed_);
         index->setEf(ef_search);
-        index->addPoint(embs[0].vector.data(), 0);
-        #pragma omp parallel for schedule(static) num_threads(n_threads)
-        for (size_t i = 1; i < embs.size(); ++i)
+        // Sequential insertion: hnswlib parallel addPoint races on internal graph
+        // structure, producing different topology on each run even with fixed seed.
+        // Sequential insertion is fully deterministic and only ~2× slower at M=16
+        // (our large-N default), where each insertion touches a small neighbourhood.
+        for (size_t i = 0; i < embs.size(); ++i)
             index->addPoint(embs[i].vector.data(), i);
     }
 
@@ -419,7 +422,8 @@ double ANICalibrator::inverse_lower(double target_ani) const {
 GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     const std::vector<std::filesystem::path>& genomes,
     int sample_pairs,
-    int threads) {
+    int threads,
+    uint64_t seed) {
 
     // Helper: embed a set of genome indices and return index→embedding map.
     // Uses OPH+CountSketch projection: E[dot(u,v)] = J(A,B).
@@ -428,7 +432,7 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
         -> std::unordered_map<size_t, std::vector<float>>
     {
         MinHasher hasher({ .kmer_size = kmer_size, .sketch_size = sketch_size,
-                           .syncmer_s = 0, .seed = 42 });
+                           .syncmer_s = 0, .seed = seed });
 
         // OPH+CountSketch projection: E[dot(u,v)] = J(A,B)
         auto cs_project = [&](const std::vector<uint16_t>& oph_sig) -> std::vector<float> {
@@ -507,7 +511,7 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
     // ----------------------------------------------------------------
     // Step 1: sample random pairs + unique genome indices
     // ----------------------------------------------------------------
-    std::mt19937_64 rng(42);
+    std::mt19937_64 rng(seed);
     std::uniform_int_distribution<size_t> udist(0, genomes.size() - 1);
     std::vector<std::pair<size_t, size_t>> pairs;
     std::unordered_set<size_t> seen;
@@ -550,8 +554,13 @@ GeodesicDerep::CalibratedParams GeodesicDerep::auto_calibrate(
 
     int kmer, sketch_size, embedding_dim;
     if (ani_p95_sample >= 99.0) {
-        // Very clonal (all pairs >99% ANI): high k for within-clone discrimination
-        kmer = 31; sketch_size = 20000; embedding_dim = 512;
+        // Very clonal (all pairs >99% ANI): large sketch/dim for resolution.
+        // k=31 is NOT used here: with k=31 the Nyström embedding collapses all
+        // within-species genomes into angular distances < 0.01, causing FPS to
+        // select exactly 1 representative for 100k+ genome collections.
+        // k=21 with sketch=20000/dim=512 preserves sufficient resolution while
+        // keeping the embedding spread that FPS needs to function correctly.
+        kmer = 21; sketch_size = 20000; embedding_dim = 512;
     } else if (ani_p95_sample >= 95.0) {
         // Typical species (95–99% ANI): standard resolution
         kmer = 21; sketch_size = 10000; embedding_dim = 256;
@@ -745,7 +754,7 @@ GenomeEmbedding GeodesicDerep::embed_genome(const std::filesystem::path& path, u
         .kmer_size = cfg_.kmer_size,
         .sketch_size = cfg_.sketch_size,
         .syncmer_s = cfg_.syncmer_s,
-        .seed = 42
+        .seed = cfg_.seed
     });
     auto oph = hasher.sketch_oph_with_positions_from_buffer(buf.data(), buf.size(), cfg_.sketch_size);
 
@@ -794,7 +803,7 @@ GenomeEmbedding GeodesicDerep::embed_genome_from_buffer(
         .kmer_size = cfg_.kmer_size,
         .sketch_size = cfg_.sketch_size,
         .syncmer_s = cfg_.syncmer_s,
-        .seed = 42
+        .seed = cfg_.seed
     });
 
     auto oph = hasher.sketch_oph_with_positions_from_buffer(data, len, cfg_.sketch_size);
@@ -845,7 +854,7 @@ void GeodesicDerep::materialize_sig2_for_indices(const std::vector<size_t>& indi
         .kmer_size  = cfg_.kmer_size,
         .sketch_size = cfg_.sketch_size,
         .syncmer_s  = cfg_.syncmer_s,
-        .seed       = 1337
+        .seed       = cfg_.seed + 1  // sig2 must differ from sig1 (seed)
     };
 
     // GPK path: shard-batched fetch + parallel sketch — zero NFS reads.
@@ -1107,10 +1116,29 @@ void GeodesicDerep::finalize_embeddings_() {
 
     // Build HNSW index — skip for small n (brute-force pairwise is faster)
     if (n > SMALL_N_THRESHOLD) {
-        index_->build(embeddings_, cfg_.hnsw_m, cfg_.hnsw_ef_construction, cfg_.hnsw_ef_search, cfg_.threads);
-        if (is_verbose()) spdlog::info("GEODESIC: HNSW index built ({} embeddings, M={}, ef={})",
-                     embeddings_.size(), cfg_.hnsw_m, cfg_.hnsw_ef_construction);
+        // Auto-scale HNSW params: M=48/ef=400 is excellent quality but O(N*M*ef) build cost.
+        // For large N, M=16/ef=100 gives >99% recall (hnswlib paper default) at a fraction of cost.
+        // User-configured values are treated as caps; we only reduce, never exceed.
+        int eff_m  = cfg_.hnsw_m;
+        int eff_ef = cfg_.hnsw_ef_construction;
+        if (n > 50000) {
+            eff_m  = std::min(eff_m,  16);
+            eff_ef = std::min(eff_ef, 100);
+        } else if (n > 10000) {
+            eff_m  = std::min(eff_m,  32);
+            eff_ef = std::min(eff_ef, 200);
+        }
+        index_->seed_ = cfg_.seed;
+        index_->build(embeddings_, eff_m, eff_ef, cfg_.hnsw_ef_search, cfg_.threads);
+        if (is_verbose()) spdlog::info("GEODESIC: HNSW index built ({} embeddings, M={}, ef_construction={})",
+                     embeddings_.size(), eff_m, eff_ef);
     }
+
+    // sig1 (oph_sig) is kept in memory for Phase 7c OPH certification.
+    // Freeing it here and rematerializing via visit_shard_batches costs a full NFS re-read
+    // (~57s for 233k E. coli, ~52s for 367k Salmonella) which dominated total runtime (92%).
+    // The memory cost is sketch_size × 2 bytes/genome: 233k × 10000 × 2 ≈ 4.7 GB.
+    // Freed by GeodesicDerep destructor after Phase 7c completes.
 }
 
 void GeodesicDerep::build_index_from_gpk(
@@ -1207,6 +1235,7 @@ void GeodesicDerep::build_index_from_gpk_sketches(
 
     gpk_reader_ = &gpk;
     gpk_accessions_ = accessions;
+    gpk_paths_      = genomes;
 
     embeddings_.resize(n);
     store_.resize(n, cfg_.embedding_dim);
@@ -1215,51 +1244,125 @@ void GeodesicDerep::build_index_from_gpk_sketches(
 
     auto t0 = std::chrono::steady_clock::now();
 
+    // Pre-probe: calibrate cfg_ from GPK's available SKCH section before the loop.
+    // This ensures param-aware lookup picks the right section when multiple k values
+    // coexist, and enables hierarchical slicing when cfg_.sketch_size < stored size.
+    const uint32_t gpk_k  = gpk.sketch_kmer_size();
+    const uint32_t gpk_sz = gpk.sketch_sketch_size();
+    const bool use_param_aware = (gpk_k > 0);
+
+    if (use_param_aware) {
+        if (static_cast<int>(gpk_k) != cfg_.kmer_size) {
+            // For multi-k archives, check if the requested k is actually available
+            // before falling back. This allows maybe_reselect_k to switch k properly.
+            const auto avail_ks = gpk.available_kmer_sizes();
+            const uint32_t req_k = static_cast<uint32_t>(cfg_.kmer_size);
+            const bool requested_k_available = std::find(avail_ks.begin(), avail_ks.end(), req_k) != avail_ks.end();
+            if (!requested_k_available) {
+                spdlog::warn("GEODESIC: GPK has k={} sketches, cfg requested k={} — using GPK k={}",
+                             gpk_k, cfg_.kmer_size, gpk_k);
+                cfg_.kmer_size = static_cast<int>(gpk_k);
+            }
+        }
+        if (gpk_sz > 0 && static_cast<int>(gpk_sz) < cfg_.sketch_size) {
+            spdlog::warn("GEODESIC: GPK sketch_size={} < requested {} — capping to GPK size",
+                         gpk_sz, cfg_.sketch_size);
+            cfg_.sketch_size = static_cast<int>(gpk_sz);
+        }
+
+        // k pre-probe: determine optimal k from a small sample before loading all N
+        // sketches, so we never need a full rebuild on k-switch (maybe_reselect_k).
+        // Only runs when the GPK has multiple k values and N is large enough to matter.
+        if (n > 100) {
+            const int probed_k = probe_kmer_size_(accessions, gpk);
+            if (probed_k > 0 && probed_k != cfg_.kmer_size
+                    && gpk.has_kmer_size(static_cast<uint32_t>(probed_k))) {
+                cfg_.kmer_size = probed_k;
+            }
+        }
+        spdlog::info("GEODESIC: GPK sketch params: k={} size={}", cfg_.kmer_size, cfg_.sketch_size);
+    }
+
     // Resolve accessions to genome_ids, then fetch sketches from SKCH.
+    // Genomes not found in SKCH are excluded (treated as failed reads) rather than
+    // inserted with zero vectors — identical zero points corrupt hnswlib's graph.
+    //
+    // Uses visit_sketch_batches() to group accessions by archive and decompress each
+    // archive's SKCH exactly once before releasing — avoids thrashing the LRU when
+    // accessions interleave across multiple archive parts (peak memory unchanged: one
+    // archive SKCH decompressed at a time, same as max_hot_archives_=1).
     size_t hits = 0, misses = 0;
     std::vector<std::string> path_strs(n);
     for (size_t i = 0; i < n; ++i) path_strs[i] = genomes[i].string();
 
+    std::vector<bool> valid(n, false);
+
+    // First pass: record which accessions are missing from the archive entirely.
+    // visit_sketch_batches silently skips misses; we need to attribute them correctly.
+    std::vector<bool> in_archive(n, false);
     for (size_t i = 0; i < n; ++i) {
-        auto meta = gpk.genome_meta_by_accession(accessions[i]);
-        if (!meta) {
-            ++misses;
-            embeddings_[i].genome_id = i;
-            embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
-            embeddings_[i].quality_score = 0.0f;
-            embeddings_[i].path = genomes[i];
-            continue;
+        if (gpk.genome_meta_by_accession(accessions[i]))
+            in_archive[i] = true;
+    }
+
+    const uint32_t req_k  = use_param_aware ? static_cast<uint32_t>(cfg_.kmer_size)  : 0;
+    const uint32_t req_sz = use_param_aware ? static_cast<uint32_t>(cfg_.sketch_size) : 0;
+
+    gpk.visit_sketch_batches(accessions, req_k, req_sz,
+        [&](size_t i, const genopack::SketchResult& sk) {
+            // On first hit, lock in actual params served.
+            if (hits == 0) {
+                cfg_.kmer_size   = static_cast<int>(sk.kmer_size);
+                cfg_.sketch_size = static_cast<int>(sk.sketch_size);
+            }
+            ++hits;
+            valid[i] = true;
+            auto& emb = embeddings_[i];
+            emb.genome_id = i;
+            emb.vector.assign(cfg_.embedding_dim, 0.0f);
+            emb.oph_sig.assign(sk.sig, sk.sig + sk.sketch_size);
+            emb.n_real_bins = sk.n_real_bins;
+            emb.genome_size = sk.genome_length;
+            emb.real_bins_mask.assign(sk.mask, sk.mask + sk.mask_words);
+            emb.isolation_score = 0.0f;
+            emb.path = genomes[i];
+            auto it = quality_scores.find(path_strs[i]);
+            emb.quality_score = (it != quality_scores.end())
+                ? static_cast<float>(it->second) : 50.0f;
+        });
+
+    // Attribute misses: not-in-archive vs found-in-archive-but-no-sketch.
+    for (size_t i = 0; i < n; ++i) {
+        if (valid[i]) continue;
+        ++misses;
+        std::lock_guard<std::mutex> lock(failed_reads_mutex_);
+        failed_reads_.emplace_back(genomes[i].string(),
+            in_archive[i] ? "sketch not found in SKCH section"
+                          : "accession not found in genopack archive");
+    }
+
+    // Compact: remove miss entries so only valid genomes enter the pipeline.
+    if (misses > 0) {
+        std::vector<GenomeEmbedding>      compacted;
+        std::vector<std::string>           compacted_acc;
+        std::vector<std::filesystem::path> compacted_paths;
+        compacted.reserve(hits);
+        compacted_acc.reserve(hits);
+        compacted_paths.reserve(hits);
+        for (size_t i = 0; i < n; ++i) {
+            if (!valid[i]) continue;
+            auto& emb = embeddings_[i];
+            emb.genome_id = compacted.size();  // re-index
+            compacted.push_back(std::move(emb));
+            compacted_acc.push_back(gpk_accessions_[i]);
+            compacted_paths.push_back(gpk_paths_[i]);
         }
+        embeddings_     = std::move(compacted);
+        gpk_accessions_ = std::move(compacted_acc);
+        gpk_paths_      = std::move(compacted_paths);
 
-        auto sk = gpk.sketch_for(meta->genome_id);
-        if (!sk) {
-            ++misses;
-            embeddings_[i].genome_id = i;
-            embeddings_[i].vector.assign(cfg_.embedding_dim, 0.0f);
-            embeddings_[i].quality_score = 0.0f;
-            embeddings_[i].path = genomes[i];
-            continue;
-        }
-
-        // Use SKCH sketch_size for this run (overrides calibrated value on first hit).
-        if (hits == 0) cfg_.sketch_size = static_cast<int>(sk->sketch_size);
-
-        ++hits;
-        auto& emb = embeddings_[i];
-        emb.genome_id = i;
-        emb.vector.assign(cfg_.embedding_dim, 0.0f);
-        emb.oph_sig.assign(sk->sig, sk->sig + sk->sketch_size);
-        emb.n_real_bins = sk->n_real_bins;
-        emb.genome_size = sk->genome_length;
-        emb.real_bins_mask.assign(sk->mask, sk->mask + sk->mask_words);
-        emb.isolation_score = 0.0f;
-        emb.path = genomes[i];
-
-        auto it = quality_scores.find(path_strs[i]);
-        if (it != quality_scores.end())
-            emb.quality_score = static_cast<float>(it->second);
-        else
-            emb.quality_score = 50.0f;
+        store_.resize(hits, cfg_.embedding_dim);
+        buf_cache_.assign(hits, {});
     }
 
     auto t1 = std::chrono::steady_clock::now();
@@ -1267,7 +1370,7 @@ void GeodesicDerep::build_index_from_gpk_sketches(
     spdlog::info("GEODESIC: gpk-sketch timing: {}ms ({} hits, {} misses)", ms, hits, misses);
 
     if (misses > 0)
-        spdlog::warn("GEODESIC: {} genomes not found in SKCH section — they will have zero embeddings", misses);
+        spdlog::warn("GEODESIC: {} genomes excluded (not in SKCH) — {} remain", misses, hits);
 
     finalize_embeddings_();
 }
@@ -1306,7 +1409,10 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     const int k_iso = (n_emb >= 4)
         ? std::max(k_iso_min, std::min(20, static_cast<int>(std::log2(static_cast<double>(n_emb)))))
         : k_iso_min;
-    int K_cap = std::min(64, static_cast<int>(n_emb) - 1);
+    // Scale initial K_cap with N: large clonal clusters (Salmonella, E. coli)
+    // will never connect at K_cap=64 — start high to avoid 2-3 wasted retry passes.
+    const int k_cap_init = (n_emb > 50000) ? 256 : (n_emb > 5000) ? 128 : 64;
+    int K_cap = std::min(k_cap_init, static_cast<int>(n_emb) - 1);
 
     if (is_verbose()) spdlog::info("GEODESIC: computing isolation scores (k_iso={}, K_cap={})",
                                    k_iso, K_cap);
@@ -1556,10 +1662,11 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             // unite is a no-op; min-dist wins in Kruskal sort).
             struct KNNEdge { uint32_t u, v; float dist; };
             struct MstResult {
-                double   max_edge  = 0.0;
-                double   p90_edge  = 0.0;
-                double   w2        = 0.0;
-                uint32_t bridge_min = 0;
+                double   max_edge      = 0.0;
+                double   trimmed_max   = 0.0;  // max edge excluding outlier bridges (bridge_min <= sqrt(n))
+                double   p90_edge      = 0.0;  // retained for logging only
+                double   w2            = 0.0;
+                uint32_t bridge_min    = 0;
                 std::vector<double>   weights;
                 std::vector<uint32_t> labels;
                 size_t   components = 0;
@@ -1602,6 +1709,11 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
                 MstResult res;
                 res.components = n_main;
                 res.weights.reserve(n_main > 1 ? n_main - 1 : 0);
+                // Outlier-bridge threshold: exclude edges whose smaller component side
+                // is ≤ ceil(sqrt(n_main)) — these are singleton/pair outliers connecting
+                // to the main mass and should not set the diversity threshold.
+                const uint32_t bridge_thresh = static_cast<uint32_t>(
+                    std::ceil(std::sqrt(static_cast<double>(n_main))));
                 for (const auto& e : edges) {
                     uint32_t sa = 0, sb = 0;
                     if (unite_uf(e.u, e.v, sa, sb)) {
@@ -1609,9 +1721,14 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
                         res.max_edge   = e.dist;
                         res.bridge_min = std::min(sa, sb);
                         res.weights.push_back(e.dist);
+                        if (res.bridge_min > bridge_thresh)
+                            res.trimmed_max = e.dist;  // last qualifying edge = max qualifying
                         if (--res.components == 1) break;
                     }
                 }
+                // Fall back to true max when all edges have tiny bridge sides (small taxa).
+                if (res.trimmed_max <= 0.0) res.trimmed_max = res.max_edge;
+                // Retain P90 for logging/comparison only.
                 if (!res.weights.empty()) {
                     size_t p90_idx = static_cast<size_t>(res.weights.size() * 0.90);
                     p90_idx = std::min(p90_idx, res.weights.size() - 1);
@@ -1663,7 +1780,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             const MstResult& chosen = used_cap ? res_cap : chosen_storage;
 
             mst_true_max    = chosen.max_edge;
-            mst_max_edge    = chosen.p90_edge;
+            mst_max_edge    = chosen.trimmed_max;  // bridge-size-conditioned; excludes outlier bridges
             mst_w2          = chosen.w2;
             bridge_min_side = chosen.bridge_min;
             mst_weights     = chosen.weights;
@@ -1676,11 +1793,12 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             }
 
             if (is_verbose()) {
+                double tail_r = (mst_max_edge > 1e-9) ? mst_true_max / mst_max_edge : 0.0;
                 spdlog::info("GEODESIC: MST over {} non-outlier genomes "
                              "(k_conn={} k_stable={} K_cap={} components={} "
-                             "B_stable_P90={:.5f} B_stable_max={:.5f} B_ref={:.5f})",
+                             "trimmed={:.5f} P90={:.5f} max={:.5f} B_ref={:.5f} tail_ratio={:.2f})",
                              n_main, k_conn_min, k_stable_val, K_cap,
-                             chosen.components, mst_max_edge, mst_true_max, B_ref);
+                             chosen.components, mst_max_edge, chosen.p90_edge, mst_true_max, B_ref, tail_r);
             } else if (disconnected) {
                 spdlog::info("GEODESIC: k-NN graph disconnected at K_cap={} (components={}); "
                              "per-component thresholds will be used", K_cap, chosen.components);
@@ -1715,6 +1833,11 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
         sorted.reserve(n_emb);
         for (size_t idx : perm) sorted.push_back(std::move(embeddings_[idx]));
         embeddings_ = std::move(sorted);
+        if (!component_ids_.empty()) {
+            std::vector<int> sorted_cids(n_emb);
+            for (size_t i = 0; i < n_emb; ++i) sorted_cids[i] = component_ids_[perm[i]];
+            component_ids_ = std::move(sorted_cids);
+        }
     }
 
     // Rebuild canonical ID → row map after sort
@@ -1759,6 +1882,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
     stats.p95 = nn_dists[n * 95 / 100];
     stats.mst_max_edge    = mst_max_edge;
     stats.mst_true_max    = mst_true_max;
+    stats.tail_ratio      = (mst_max_edge > 1e-9) ? mst_true_max / mst_max_edge : 0.0;
     stats.mst_w2          = mst_w2;
     stats.bridge_min_side = bridge_min_side;
     stats.k_conn          = k_conn_min;
@@ -1822,40 +1946,50 @@ void GeodesicDerep::apply_nystrom_embeddings() {
     std::vector<size_t> anchor_idx;
     anchor_idx.reserve(n_anchors);
     {
-        std::mt19937_64 rng(42);
+        std::mt19937_64 rng(cfg_.seed);
         const bool do_stratify = (n_anchors >= 5 && n >= 5 && cfg_.sketch_size > 0);
         if (do_stratify) {
-            static constexpr int N_STRATA = 5;
-            // Sort genome indices by fill fraction f_i = n_real_bins_i / sketch_size
-            std::vector<std::pair<float, size_t>> fi_sorted(n);
+            // Dense-only anchor pool: only genomes with f_i >= 0.85 and n_real_bins >= 50
+            // are eligible as anchors. This keeps the anchor Gram matrix K and its
+            // eigensystem W free from OPH deflation artefacts introduced by sparse MAGs.
+            // Sparse queries still project correctly via the per-anchor one-sided
+            // fill-fraction correction in Step 4. If the dense pool is exhausted,
+            // we pad from the next-densest available genomes (sorted by descending f_i)
+            // to guarantee n_anchors anchors are always available.
+            const float dense_threshold =
+                static_cast<float>(cfg_.sketch_size) * 0.85f;
+
+            // Partition into dense (f >= 0.85) and fallback (f < 0.85, sorted descending).
+            std::vector<size_t> dense_pool, fallback_pool;
+            std::vector<std::pair<float, size_t>> fallback_sorted;
             for (size_t i = 0; i < n; ++i) {
-                fi_sorted[i] = {
-                    static_cast<float>(embeddings_[i].n_real_bins) / static_cast<float>(cfg_.sketch_size),
-                    i
-                };
+                const uint32_t nr = embeddings_[i].n_real_bins;
+                if (nr < 50) continue;
+                if (static_cast<float>(nr) >= dense_threshold)
+                    dense_pool.push_back(i);
+                else
+                    fallback_sorted.push_back({static_cast<float>(nr), i});
             }
-            std::sort(fi_sorted.begin(), fi_sorted.end());
+            std::shuffle(dense_pool.begin(), dense_pool.end(), rng);
+            // Sort fallback descending by fill fraction (densest sparse first).
+            std::sort(fallback_sorted.begin(), fallback_sorted.end(),
+                      [](const auto& a, const auto& b){ return a.first > b.first; });
 
-            size_t per_stratum = n_anchors / N_STRATA;
-            size_t remainder   = n_anchors % N_STRATA;
-            for (int s = 0; s < N_STRATA; ++s) {
-                size_t stratum_start = (static_cast<size_t>(s) * n) / N_STRATA;
-                size_t stratum_end   = (static_cast<size_t>(s + 1) * n) / N_STRATA;
-                size_t k = per_stratum + (static_cast<size_t>(s) < remainder ? 1 : 0);
-                k = std::min(k, stratum_end - stratum_start);
-
-                std::vector<size_t> stratum;
-                stratum.reserve(stratum_end - stratum_start);
-                for (size_t idx = stratum_start; idx < stratum_end; ++idx)
-                    stratum.push_back(fi_sorted[idx].second);
-
-                for (size_t t = 0; t < k && !stratum.empty(); ++t) {
-                    std::uniform_int_distribution<size_t> dist(t, stratum.size() - 1);
-                    std::swap(stratum[t], stratum[dist(rng)]);
-                    anchor_idx.push_back(stratum[t]);
-                }
+            // Fill anchor_idx: dense first, then fallback if needed.
+            for (size_t t = 0; t < dense_pool.size() && anchor_idx.size() < n_anchors; ++t)
+                anchor_idx.push_back(dense_pool[t]);
+            if (anchor_idx.size() < n_anchors) {
+                spdlog::warn("GEODESIC/Nyström: dense pool ({} genomes) smaller than "
+                             "n_anchors ({}); padding with {}/{} sparser genomes — "
+                             "consider a larger collection or smaller --geodesic-dim",
+                             dense_pool.size(), n_anchors,
+                             std::min(n_anchors - anchor_idx.size(), fallback_sorted.size()),
+                             fallback_sorted.size());
+                for (size_t t = 0; t < fallback_sorted.size() && anchor_idx.size() < n_anchors; ++t)
+                    anchor_idx.push_back(fallback_sorted[t].second);
             }
-            // Pad to n_anchors if strata were too small
+
+            // Last resort: pad from any remaining genome (e.g., n_real_bins < 50).
             if (anchor_idx.size() < n_anchors) {
                 std::unordered_set<size_t> already(anchor_idx.begin(), anchor_idx.end());
                 std::vector<size_t> remaining;
@@ -2056,6 +2190,10 @@ void GeodesicDerep::apply_nystrom_embeddings() {
     using RowMajMat = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
 #if GEODESIC_USE_OMP
+    // Eigen's internal parallelism must be disabled inside the OMP parallel region:
+    // each of cfg_.threads workers would otherwise spawn its own Eigen thread pool,
+    // causing cfg_.threads² threads competing for the same cores.
+    Eigen::setNbThreads(1);
     #pragma omp parallel num_threads(cfg_.threads)
     {
         // Thread-local batch matrices: allocated once per thread, reused per batch.
@@ -2092,6 +2230,33 @@ void GeodesicDerep::apply_nystrom_embeddings() {
                                 refine_jaccard_ptr(sig_i_ptr, sig_a.data(), m_sig));
                         }
                         k_mat(bi, static_cast<int>(a)) = jac;
+                    }
+                    // Fill-fraction correction for sparse genomes (MAGs with low
+                    // completeness). OPH Jaccard between a sparse query (f_i = n_real_i/m)
+                    // and an anchor of fill f_a is deflated by ~f_i relative to a dense
+                    // anchor; after Laplacian degree normalisation the residual bias is
+                    // ~sqrt(f_i). Per-anchor scaling by sqrt(n_real_a / n_real_i) corrects
+                    // each element independently, avoiding over-correction when sparse MAGs
+                    // appear in the anchor set (FPS can select them). Capped at 4× to bound
+                    // noise amplification. Skipped when f_i > 0.85 (negligible correction)
+                    // or n_real_i < 50 (too noisy; earlier quality filters should catch these).
+                    {
+                        const uint32_t n_real_i = embeddings_[i].n_real_bins;
+                        if (m_sig > 0 && n_real_i >= 50 &&
+                            n_real_i < static_cast<uint32_t>(m_sig) * 85 / 100) {
+                            for (size_t a = 0; a < n_anchors; ++a) {
+                                const uint32_t n_real_a =
+                                    embeddings_[anchor_idx[a]].n_real_bins;
+                                // One-sided: uplift sparse-query vs dense-anchor pairs;
+                                // never suppress when anchor is equally/more sparse than
+                                // the query (no theoretical basis for shrinkage there).
+                                const float corr = std::min(
+                                    std::sqrt(static_cast<float>(std::max(n_real_a, n_real_i)) /
+                                              static_cast<float>(n_real_i)),
+                                    4.0f);
+                                k_mat(bi, static_cast<int>(a)) *= corr;
+                            }
+                        }
                     }
                     if (cfg_.nystrom_degree_normalize) {
                         float d_i = k_mat.row(bi).sum();
@@ -2145,6 +2310,33 @@ void GeodesicDerep::apply_nystrom_embeddings() {
                         }
                         k_mat(bi, static_cast<int>(a)) = jac;
                     }
+                    // Fill-fraction correction for sparse genomes (MAGs with low
+                    // completeness). OPH Jaccard between a sparse query (f_i = n_real_i/m)
+                    // and an anchor of fill f_a is deflated by ~f_i relative to a dense
+                    // anchor; after Laplacian degree normalisation the residual bias is
+                    // ~sqrt(f_i). Per-anchor scaling by sqrt(n_real_a / n_real_i) corrects
+                    // each element independently, avoiding over-correction when sparse MAGs
+                    // appear in the anchor set (FPS can select them). Capped at 4× to bound
+                    // noise amplification. Skipped when f_i > 0.85 (negligible correction)
+                    // or n_real_i < 50 (too noisy; earlier quality filters should catch these).
+                    {
+                        const uint32_t n_real_i = embeddings_[i].n_real_bins;
+                        if (m_sig > 0 && n_real_i >= 50 &&
+                            n_real_i < static_cast<uint32_t>(m_sig) * 85 / 100) {
+                            for (size_t a = 0; a < n_anchors; ++a) {
+                                const uint32_t n_real_a =
+                                    embeddings_[anchor_idx[a]].n_real_bins;
+                                // One-sided: uplift sparse-query vs dense-anchor pairs;
+                                // never suppress when anchor is equally/more sparse than
+                                // the query (no theoretical basis for shrinkage there).
+                                const float corr = std::min(
+                                    std::sqrt(static_cast<float>(std::max(n_real_a, n_real_i)) /
+                                              static_cast<float>(n_real_i)),
+                                    4.0f);
+                                k_mat(bi, static_cast<int>(a)) *= corr;
+                            }
+                        }
+                    }
                     if (cfg_.nystrom_degree_normalize) {
                         float d_i = k_mat.row(bi).sum();
                         if (d_i < 1e-10f) d_i = 1.0f;
@@ -2166,6 +2358,8 @@ void GeodesicDerep::apply_nystrom_embeddings() {
         }
     }
 #endif
+
+    Eigen::setNbThreads(0);  // restore to auto (hardware concurrency)
 
     t_nys("Nyström project all genomes");
 
@@ -2819,6 +3013,55 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         representatives = std::move(refined_reps);
     }
 
+    // Rematerialize sig1 if it was freed after Nyström (GPK path memory optimisation).
+    // Only rematerialize genomes that actually need OPH certification (non-rep, quality>0).
+    // Reps need it too for the fast-path check against their assigned non-rep genomes.
+    if (nystrom_applied_ && gpk_reader_ && !gpk_accessions_.empty()
+        && !embeddings_.empty() && embeddings_[0].oph_sig.empty()) {
+        std::vector<std::string> acc_batch;
+        std::unordered_map<size_t, size_t> out_to_emb;
+        acc_batch.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            if (store_.quality_scores[i] == 0.0f) continue;
+            if (i >= gpk_accessions_.size()) continue;
+            out_to_emb[acc_batch.size()] = i;
+            acc_batch.push_back(gpk_accessions_[i]);
+        }
+        const MinHasher::Config cfg1{
+            .kmer_size   = cfg_.kmer_size,
+            .sketch_size = cfg_.sketch_size,
+            .syncmer_s   = cfg_.syncmer_s,
+            .seed        = cfg_.seed
+        };
+        gpk_reader_->visit_shard_batches(acc_batch,
+            [&](genopack::ArchiveReader::ShardBatch& batch) {
+                const int bsz = static_cast<int>(batch.size());
+                #pragma omp parallel for schedule(dynamic, 1) num_threads(cfg_.threads)
+                for (int j = 0; j < bsz; ++j) {
+                    const size_t out_idx = batch[j].first;
+                    const auto& eg = batch[j].second;
+                    auto it = out_to_emb.find(out_idx);
+                    if (it == out_to_emb.end()) continue;
+                    const size_t i = it->second;
+                    try {
+                        MinHasher hasher1(cfg1);
+                        auto oph1 = hasher1.sketch_oph_with_positions_from_buffer(
+                            eg.fasta.data(), eg.fasta.size(), cfg_.sketch_size);
+                        const size_t m1 = oph1.signature.size();
+                        std::vector<uint16_t> sig1(m1);
+                        for (size_t t = 0; t < m1; ++t)
+                            sig1[t] = static_cast<uint16_t>(oph1.signature[t]);
+                        embeddings_[i].oph_sig = std::move(sig1);
+                    } catch (const std::exception& e) {
+                        spdlog::warn("GEODESIC: sig1 rematerialize failed for {}: {}",
+                                     embeddings_[i].path.filename().string(), e.what());
+                    }
+                }
+            });
+        if (is_verbose()) spdlog::info("GEODESIC: sig1 rematerialized for Phase 7c ({} genomes)",
+                                       acc_batch.size());
+    }
+
     // Phase 7c: Universal sketch-space certification.
     // The Nyström embedding is a candidate-generation layer, not a coverage guarantee.
     // Densified OPH bins inflate kernel values for sparse MAGs, causing embedding
@@ -2877,7 +3120,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             const double bins_ratio = (bins_i < bins_r)
                 ? static_cast<double>(bins_i) / static_cast<double>(bins_r)
                 : static_cast<double>(bins_r) / static_cast<double>(bins_i);
-            if (bins_ratio > 0.5) return {false, jac};
+            if (bins_ratio > 0.85) return {false, jac};
             // Identify small and large by n_real_bins (sketch coverage).
             const bool i_is_small = (bins_i <= bins_r);
             const auto& mask_small = i_is_small
@@ -2887,11 +3130,12 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             const uint16_t* sig_small = i_is_small ? sig_i.data() : sig_r.data();
             const uint16_t* sig_large = i_is_small ? sig_r.data() : sig_i.data();
             if (mask_small.empty() || mask_large.empty()) return {false, jac};
-            int n_match = 0, n_small_real = 0;
+            int n_match = 0, n_small_real = 0, n_both_real = 0;
             const size_t n_words = std::min(mask_small.size(), mask_large.size());
             for (size_t w = 0; w < n_words; ++w) {
                 n_small_real += __builtin_popcountll(mask_small[w]);
                 uint64_t both_real = mask_small[w] & mask_large[w];
+                n_both_real += __builtin_popcountll(both_real);
                 while (both_real) {
                     const int bit = __builtin_ctzll(both_real);
                     const size_t t = w * 64 + static_cast<size_t>(bit);
@@ -2903,63 +3147,73 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             // Containment threshold is q_cert = ANI^k (raw probability), not J_cert.
             // J_cert = q/(2-q) is derived for symmetric Jaccard; at 95% ANI / k=21,
             // q_cert ≈ 0.34 vs J_cert ≈ 0.21. Using J_cert here would be too permissive.
-            return {static_cast<double>(n_match) / n_small_real >= q_cert, jac};
+            //
+            // False-match correction: each co-occupied bin has a 1/65536 chance of a
+            // hash collision (uint16 OPH). Subtract the expected false matches before
+            // computing containment. The maximum shift is bounded by
+            // n_both_real / (65536 × n_small_real) ≤ 1/65536 ≈ 0.0015 pp — effectively
+            // zero for any practical threshold. Included for statistical correctness.
+            const double expected_collisions = n_both_real / 65536.0;
+            const double containment =
+                std::max(0.0, static_cast<double>(n_match) - expected_collisions)
+                / n_small_real;
+            return {containment >= q_cert, jac};
         };
 
-        // Pre-build compact rep embedding pointer array for dot-product ranking.
-        // Embedding similarity ≈ OPH Jaccard, so ranking reps by embedding dot product
-        // before the exhaustive OPH scan dramatically reduces calls for large rep sets.
-        // Threshold: only worth ranking when n_reps > CERT_TOP_K.
+        // cert_scan: find the best certified rep for genome i.
+        //
+        // Strategy: use HNSW to get top-K nearest reps in O(log n) instead of O(n_reps × d).
+        // The HNSW index covers all n genomes; we filter to rep_set to get rep-only neighbors.
+        // For correctness, if no certified rep is found in the HNSW top-K, fall back to a
+        // linear scan over cert_rep_vecs (the same O(n_reps × d) path as before, but rare).
         static constexpr size_t CERT_TOP_K = 64;
         const size_t n_cert_reps = cert_rep_idx.size();
         const size_t embed_d = (!embeddings_.empty() && !embeddings_[0].vector.empty())
             ? embeddings_[0].vector.size() : 0;
-        const bool use_embed_rank = (embed_d > 0 && n_cert_reps > CERT_TOP_K);
 
-        // Gather rep embedding pointers once (pointer-stable since embeddings_ isn't modified here).
+        // Fallback: gather rep embedding pointers for the rare linear-scan case.
+        // Used when n_reps <= CERT_TOP_K or when HNSW fails to certify in top-K.
         std::vector<const float*> cert_rep_vecs;
-        if (use_embed_rank) {
-            cert_rep_vecs.resize(n_cert_reps);
-            for (size_t k = 0; k < n_cert_reps; ++k)
-                cert_rep_vecs[k] = embeddings_[cert_rep_idx[k]].vector.data();
-        }
+        cert_rep_vecs.resize(n_cert_reps);
+        for (size_t k = 0; k < n_cert_reps; ++k)
+            cert_rep_vecs[k] = embeddings_[cert_rep_idx[k]].vector.data();
 
-        // Embedding-ranked exhaustive scan: computes dot products with all n_reps rep
-        // embeddings (O(n_reps * d)), partial-sorts top-K, then checks oph_cert_jac for
-        // top-K first. Falls back to the remaining reps only if no certified rep found in top-K.
-        // For n_reps <= CERT_TOP_K or when embeddings are absent, falls through to a plain scan.
-        // Correctness: always falls back to full scan → identical result in the worst case.
+        // Build gid→store-row lookup for cert_rep_idx (needed to map HNSW results to rows).
+        // gid_to_row_ maps genome_id → embeddings_ row; reps are a tiny subset of all n.
+        const bool use_hnsw_cert = (index_->index && embed_d > 0 && n_cert_reps > CERT_TOP_K);
+
         auto cert_scan = [&](size_t i,
                              double& best_cert_jac, size_t& best_rep_row) {
-            if (use_embed_rank) {
-                const float* vec_i = embeddings_[i].vector.data();
-                // Compute dot products: O(n_reps * d), fast (d=256 floats per rep)
-                std::vector<std::pair<float, size_t>> ranked(n_cert_reps);
-                for (size_t k = 0; k < n_cert_reps; ++k) {
-                    ranked[k] = {dot_product_simd(vec_i, cert_rep_vecs[k], embed_d),
-                                 cert_rep_idx[k]};
-                }
-                std::partial_sort(ranked.begin(), ranked.begin() + CERT_TOP_K,
-                                  ranked.end(),
-                                  [](const auto& a, const auto& b) { return a.first > b.first; });
-                // Phase 1: check top-K candidates (high embedding similarity → likely certified)
-                for (size_t k = 0; k < CERT_TOP_K; ++k) {
-                    size_t ri = ranked[k].second;
+            if (use_hnsw_cert) {
+                // HNSW search filtered to rep_set: O(log n) candidate generation.
+                // ef is temporarily raised to ensure enough rep neighbors are returned
+                // even when reps are sparse (n_reps << n). The saved value is restored.
+                const int saved_ef = index_->ef_search;
+                index_->index->setEf(std::max(saved_ef,
+                    static_cast<int>(std::min(n_cert_reps * 4, n))));
+                auto neighbors = index_->search(embeddings_[i].vector, CERT_TOP_K, &rep_set);
+                index_->index->setEf(saved_ef);
+
+                // Phase 1: HNSW top-K (sorted by ascending angular distance = descending sim)
+                for (const auto& [gid, dist] : neighbors) {
+                    auto row_it = gid_to_row_.find(gid);
+                    if (row_it == gid_to_row_.end()) continue;
+                    const size_t ri = row_it->second;
                     auto [cert, jac] = oph_cert_jac(i, ri);
                     if (!cert) continue;
                     if (jac > best_cert_jac) { best_cert_jac = jac; best_rep_row = ri; }
                 }
-                // Phase 2: if not certified in top-K, scan remaining (correctness fallback)
+                // Phase 2: linear fallback only if HNSW top-K found nothing certified
                 if (best_rep_row == SIZE_MAX) {
-                    for (size_t k = CERT_TOP_K; k < n_cert_reps; ++k) {
-                        size_t ri = ranked[k].second;
+                    for (size_t k = 0; k < n_cert_reps; ++k) {
+                        size_t ri = cert_rep_idx[k];
                         auto [cert, jac] = oph_cert_jac(i, ri);
                         if (!cert) continue;
                         if (jac > best_cert_jac) { best_cert_jac = jac; best_rep_row = ri; }
                     }
                 }
             } else {
-                // Plain scan: small n_reps or no embedding vectors
+                // Plain scan: small n_reps or no HNSW index
                 for (size_t ri : cert_rep_idx) {
                     auto [cert, jac] = oph_cert_jac(i, ri);
                     if (!cert) continue;
@@ -3075,6 +3329,191 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             }
         } else if (is_verbose()) {
             spdlog::info("GEODESIC: Phase 7c: all non-rep genomes OPH-certified");
+        }
+
+        // Pruning pass: remove redundant representatives (sequential greedy removal).
+        //
+        // The single-pass approach ("remove r if all its genomes have other coverage")
+        // fails because of cascading: removing A makes B's genomes uncovered, then B
+        // can't be removed even if it was conceptually redundant — but worse, removing
+        // all reps simultaneously breaks everything.
+        //
+        // Correct approach:
+        //   1. Precompute cert_reps[i] = list of ALL reps that OPH-certify genome i
+        //      (up to kPruneK candidates via HNSW, or exhaustive for small n_reps).
+        //   2. Sequentially try to remove each rep (sorted most-redundant first).
+        //      "Can remove r" iff:
+        //        a. every non-rep genome assigned to r has another surviving certifier, AND
+        //        b. genome r itself (now demoted to non-rep) has a surviving certifier.
+        //   3. If removable: erase from survivors, reassign affected genomes.
+        //
+        // This handles cascading correctly because we check against the live survivor set.
+        if (representatives.size() >= 2) {
+            const size_t n_reps_pre_prune = representatives.size();
+            static constexpr size_t kPruneK = 16;
+            const bool hnsw_prune = (index_->index && embed_d > 0 &&
+                                     cert_rep_idx.size() > kPruneK);
+            std::unordered_set<uint64_t> prune_rep_set(representatives.begin(),
+                                                        representatives.end());
+
+            // Step 1: for each genome (including reps, to handle rep demotion), find
+            // which reps cover it at the FPS diversity_threshold scale.
+            // IMPORTANT: use sim_fn / cos_diversity (same as FPS), NOT J_cert (ANI threshold).
+            // Pruning with J_cert would remove reps that are still needed for diversity
+            // coverage — FPS's diversity_threshold is much tighter than J_cert, and
+            // removing a rep that is "covered at 95% ANI" but not "covered at diversity
+            // scale" destroys the uniformity of the rep set.
+            std::vector<std::vector<uint64_t>> cert_reps(n);
+#if GEODESIC_USE_OMP
+            #pragma omp parallel for schedule(dynamic, 128) num_threads(cfg_.threads)
+#endif
+            for (size_t i = 0; i < n; ++i) {
+                if (store_.quality_scores[i] == 0.0f) continue;
+
+                std::vector<uint64_t> certifiers;
+                if (hnsw_prune) {
+                    auto neighbors = index_->search(embeddings_[i].vector, kPruneK,
+                                                    &prune_rep_set);
+                    for (const auto& [rep_gid, dist] : neighbors) {
+                        // dist < diversity_threshold ↔ dist (angular) < cfg_.diversity_threshold
+                        // HNSW returns angular distance; compare directly.
+                        if (dist < cfg_.diversity_threshold)
+                            certifiers.push_back(rep_gid);
+                    }
+                } else {
+                    for (size_t ri : cert_rep_idx) {
+                        float s = sim_fn(i, ri);
+                        // sim > cos_diversity ↔ dist < diversity_threshold
+                        if (s > cos_diversity)
+                            certifiers.push_back(store_.genome_ids[ri]);
+                    }
+                }
+                cert_reps[i] = std::move(certifiers);
+            }
+
+            // Step 2: build genome-to-rep assignment and sequential greedy removal.
+            std::unordered_set<uint64_t> survivors(representatives.begin(),
+                                                    representatives.end());
+            // assigned_rep[i]: which surviving rep genome i is currently assigned to.
+            std::vector<uint64_t> assigned_rep(n, UINT64_MAX);
+            for (size_t i = 0; i < n; ++i) {
+                if (store_.quality_scores[i] == 0.0f) continue;
+                if (cert_reps[i].empty()) continue;
+                // Initial assignment: prefer nearest_rep[i] if it certifies, else first certifier.
+                for (uint64_t r : cert_reps[i]) {
+                    if (r == nearest_rep[i]) { assigned_rep[i] = r; break; }
+                }
+                if (assigned_rep[i] == UINT64_MAX) assigned_rep[i] = cert_reps[i][0];
+            }
+
+            // Helper: for genome i, find its best surviving certifier excluding 'skip'.
+            auto best_surviving_cert = [&](size_t i, uint64_t skip) -> uint64_t {
+                for (uint64_t cr : cert_reps[i])
+                    if (cr != skip && survivors.count(cr)) return cr;
+                return UINT64_MAX;
+            };
+
+            // Sort reps: try those with fewest exclusively-assigned genomes first
+            // (most likely to be removable without cascading).
+            std::vector<uint64_t> reps_sorted = representatives;
+            {
+                std::unordered_map<uint64_t, int> excl_count;
+                excl_count.reserve(reps_sorted.size());
+                for (uint64_t r : reps_sorted) excl_count[r] = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    if (assigned_rep[i] == UINT64_MAX) continue;
+                    if (store_.quality_scores[i] == 0.0f) continue;
+                    if (is_rep_row[i]) continue;  // rep genomes handled separately
+                    if (best_surviving_cert(i, assigned_rep[i]) == UINT64_MAX)
+                        ++excl_count[assigned_rep[i]];
+                }
+                std::stable_sort(reps_sorted.begin(), reps_sorted.end(),
+                    [&](uint64_t a, uint64_t b) { return excl_count[a] < excl_count[b]; });
+            }
+
+            size_t n_pruned_total = 0;
+            for (uint64_t r : reps_sorted) {
+                if (!survivors.count(r)) continue;
+
+                // Get store index of rep genome r (needed for case b check).
+                auto r_row_it = gid_to_row_.find(r);
+                if (r_row_it == gid_to_row_.end()) continue;
+                const size_t r_row = r_row_it->second;
+
+                // Case (a): all non-rep genomes currently assigned to r have another certifier.
+                bool can_remove = true;
+                for (size_t i = 0; i < n; ++i) {
+                    if (assigned_rep[i] != r) continue;
+                    if (is_rep_row[i]) continue;
+                    if (store_.quality_scores[i] == 0.0f) continue;
+                    if (best_surviving_cert(i, r) == UINT64_MAX) { can_remove = false; break; }
+                }
+                if (!can_remove) continue;
+
+                // Case (b): genome r itself (if demoted) would be certified by a surviving rep.
+                // We need a surviving rep s ≠ r that certifies r.
+                if (best_surviving_cert(r_row, r) == UINT64_MAX) continue;
+
+                // Safe to remove.
+                survivors.erase(r);
+                ++n_pruned_total;
+
+                // Reassign affected non-rep genomes.
+                for (size_t i = 0; i < n; ++i) {
+                    if (assigned_rep[i] != r) continue;
+                    if (is_rep_row[i]) continue;
+                    if (store_.quality_scores[i] == 0.0f) continue;
+                    uint64_t next = best_surviving_cert(i, r);
+                    if (next != UINT64_MAX) assigned_rep[i] = next;
+                }
+            }
+
+            if (n_pruned_total > 0) {
+                spdlog::info("GEODESIC: Pruning: removed {} redundant reps ({} → {})",
+                             n_pruned_total, n_reps_pre_prune, survivors.size());
+
+                representatives.clear();
+                for (uint64_t gid : survivors) representatives.push_back(gid);
+
+                // Rebuild is_rep_row, cert_rep_idx.
+                std::fill(is_rep_row.begin(), is_rep_row.end(), false);
+                cert_rep_idx.clear();
+                for (uint64_t gid : representatives) {
+                    auto it = gid_to_row_.find(gid);
+                    if (it != gid_to_row_.end()) {
+                        is_rep_row[it->second] = true;
+                        cert_rep_idx.push_back(it->second);
+                    }
+                }
+                // Update nearest_rep / max_sim_to_rep from precomputed cert_reps.
+                for (size_t i = 0; i < n; ++i) {
+                    if (is_rep_row[i]) continue;
+                    if (store_.quality_scores[i] == 0.0f) continue;
+                    // Check assigned rep is still alive; if not, find first surviving certifier.
+                    auto rep_it = gid_to_row_.find(nearest_rep[i]);
+                    const bool old_ok = (rep_it != gid_to_row_.end() &&
+                                         is_rep_row[rep_it->second]);
+                    if (old_ok) continue;
+                    uint64_t new_rep = best_surviving_cert(i, UINT64_MAX);
+                    if (new_rep != UINT64_MAX) {
+                        nearest_rep[i] = new_rep;
+                        auto nrit = gid_to_row_.find(new_rep);
+                        if (nrit != gid_to_row_.end())
+                            max_sim_to_rep[i] = sim_fn(i, nrit->second);
+                    } else {
+                        // No known certifier in cert_reps — fall back to cert_scan.
+                        double best_jac = -1.0;
+                        size_t best_row = SIZE_MAX;
+                        cert_scan(i, best_jac, best_row);
+                        if (best_row != SIZE_MAX) {
+                            nearest_rep[i]    = store_.genome_ids[best_row];
+                            max_sim_to_rep[i] = static_cast<float>(best_jac);
+                        }
+                    }
+                }
+            } else if (is_verbose()) {
+                spdlog::info("GEODESIC: Pruning: no redundant reps found");
+            }
         }
     }
 
@@ -3533,8 +3972,29 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
             if (sim > max_sim) { max_sim = sim; best_rep = rep_idx; }
         }
 
-        // Convert to angular distance once per genome (output path only)
-        double min_dist = std::acos(std::clamp(max_sim, -1.0f, 1.0f)) / M_PI;
+        // Convert to distance. After Nyström the embedding vectors live in spectral
+        // space, so dot products no longer estimate OPH Jaccard. Use OPH Jaccard directly
+        // for the coverage_mean/percentile stats when Nyström has been applied.
+        double min_dist;
+        if (nystrom_applied_ && best_rep != SIZE_MAX &&
+            !embeddings_[i].oph_sig.empty() && !embeddings_[best_rep].oph_sig.empty() &&
+            !embeddings_[i].real_bins_mask.empty() && !embeddings_[best_rep].real_bins_mask.empty()) {
+            const auto& qe = embeddings_[i];
+            const auto& re = embeddings_[best_rep];
+            int n11 = 0, n_union = 0;
+            const int m = cfg_.sketch_size;
+            for (int t = 0; t < m; ++t) {
+                const bool q_real = (qe.real_bins_mask[t >> 6] >> (t & 63)) & 1ULL;
+                const bool r_real = (re.real_bins_mask[t >> 6] >> (t & 63)) & 1ULL;
+                if (!q_real && !r_real) continue;
+                ++n_union;
+                if (q_real && r_real && qe.oph_sig[t] == re.oph_sig[t]) ++n11;
+            }
+            const double j = (n_union > 0) ? static_cast<double>(n11) / n_union : 0.0;
+            min_dist = std::acos(std::clamp(j, 0.0, 1.0)) / M_PI;
+        } else {
+            min_dist = std::acos(std::clamp(max_sim, -1.0f, 1.0f)) / M_PI;
+        }
         coverage_dists[i] = min_dist;
         nearest_rep_idx[i] = best_rep;
         coverage_sum += min_dist;
@@ -3623,7 +4083,7 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
     if (rep_indices.size() >= 2) {
         std::vector<double> pair_dists;
         const size_t max_pairs = 2000;
-        std::mt19937_64 rng(12345);
+        std::mt19937_64 rng(cfg_.seed);
 
         if (rep_indices.size() * (rep_indices.size() - 1) / 2 <= max_pairs) {
             // Enumerate all pairs
@@ -3664,6 +4124,106 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
     }
 
     return metrics;
+}
+
+// ── Adaptive k-selection ──────────────────────────────────────────────────────
+
+int GeodesicDerep::probe_kmer_size_(const std::vector<std::string>& accessions,
+                                    IPackReader& gpk) const
+{
+    static constexpr size_t kProbeN    = 300;
+    static constexpr size_t kProbeBins = 500;
+
+    const size_t n = accessions.size();
+    if (n < 20) return 0;
+
+    const auto avail_ks = gpk.available_kmer_sizes();
+    if (avail_ks.size() < 2) return 0;
+
+    const size_t probe_n  = std::min(kProbeN, n / 5);
+    const size_t stride   = n / probe_n;
+    const uint32_t probe_k  = avail_ks.back();    // largest k → most conservative (avoids k-switch)
+    const uint32_t probe_sz = static_cast<uint32_t>(
+        std::min(kProbeBins, static_cast<size_t>(cfg_.sketch_size)));
+
+    std::vector<std::vector<uint32_t>> sigs;
+    sigs.reserve(probe_n);
+    for (size_t i = 0; i < probe_n; ++i) {
+        auto meta = gpk.genome_meta_by_accession(accessions[i * stride]);
+        if (!meta) continue;
+        auto sk = gpk.sketch_for(meta->genome_id, probe_k, probe_sz);
+        if (!sk) continue;
+        sigs.emplace_back(sk->sig, sk->sig + sk->sketch_size);
+    }
+    if (sigs.size() < 10) return 0;
+
+    // Brute-force NN Jaccard distance for each probe genome.
+    const size_t m = sigs.size();
+    std::vector<float> nn(m, 1.0f);
+    for (size_t i = 0; i < m; ++i) {
+        const size_t bins = sigs[i].size();
+        for (size_t j = 0; j < m; ++j) {
+            if (i == j) continue;
+            size_t matches = 0;
+            for (size_t b = 0; b < bins; ++b)
+                matches += (sigs[i][b] == sigs[j][b]);
+            float d = 1.0f - float(matches) / float(bins);
+            if (d < nn[i]) nn[i] = d;
+        }
+    }
+    std::sort(nn.begin(), nn.end());
+    const float p95 = nn[static_cast<size_t>(m * 0.95)];
+    const int best_k = select_best_k_for_diversity(p95);
+    spdlog::info("GEODESIC: k pre-probe (n={} sample, bins={}): p95_nn={:.4f} → k={}",
+                 m, probe_sz, p95, best_k);
+    return best_k;
+}
+
+int GeodesicDerep::select_best_k_for_diversity(float p95_nn_dist) {
+    // Thresholds derived from OPH Jaccard ↔ ANI relationship:
+    //   p95 < 0.002  → clonal (>99.9% ANI) → long k discriminates paralogs better
+    //   p95 < 0.010  → moderate diversity (>99% ANI)
+    //   p95 ≥ 0.010  → diverse (cross-species contamination likely) → short k has higher sensitivity
+    if (p95_nn_dist < 0.002f) return 31;
+    if (p95_nn_dist < 0.010f) return 21;
+    return 16;
+}
+
+bool GeodesicDerep::maybe_reselect_k(
+    const NNDistStats& stats,
+    const std::unordered_map<std::string, double>& quality_scores)
+{
+    if (!gpk_reader_ || gpk_accessions_.empty()) return false;
+
+    const int best_k = select_best_k_for_diversity(static_cast<float>(stats.p95));
+    if (best_k == cfg_.kmer_size) return false;
+
+    if (!gpk_reader_->has_kmer_size(static_cast<uint32_t>(best_k))) {
+        std::string avail;
+        for (uint32_t k : gpk_reader_->available_kmer_sizes())
+            { if (!avail.empty()) avail += ','; avail += std::to_string(k); }
+        spdlog::info("GEODESIC: adaptive k: best_k={} not available in GPK (stored: [{}]), keeping k={}",
+                     best_k, avail, cfg_.kmer_size);
+        return false;
+    }
+
+    spdlog::info("GEODESIC: adaptive k: p95_nn={:.4f} → switching k={} → k={}, re-embedding",
+                 stats.p95, cfg_.kmer_size, best_k);
+    cfg_.kmer_size = best_k;
+
+    // Reset state that will be rebuilt.
+    embeddings_.clear();
+    store_ = SoAStore{};
+    index_ = std::make_unique<HNSWIndex>();
+    component_ids_.clear();
+    gid_to_row_.clear();
+    failed_reads_.clear();
+    buf_cache_.clear();
+    buf_cache_bytes_.store(0);
+    nystrom_applied_ = false;
+
+    build_index_from_gpk_sketches(gpk_accessions_, gpk_paths_, *gpk_reader_, quality_scores);
+    return true;
 }
 
 } // namespace derep

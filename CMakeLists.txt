@@ -134,6 +134,10 @@ add_executable(geodesic
     src/io/report_writer.cpp
     src/db/geodf/geodf_writer.cpp
     src/db/geodf/geodf_reader.cpp
+    src/db/grd/grd_writer.cpp
+    src/db/grd/grd_merge.cpp
+    src/distributed.cpp
+    src/taxonomy/partition.cpp
     src/db/taxdb/ncbi_taxdb.cpp
     src/core/subprocess.cpp
     src/core/genome_cache.cpp

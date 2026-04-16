@@ -12,7 +12,8 @@ std::unique_ptr<MultiPackReader>
 MultiPackReader::open_dir(const fs::path& parts_dir) {
     std::vector<fs::path> gpk_paths;
     for (const auto& entry : fs::directory_iterator(parts_dir)) {
-        if (entry.is_directory() && entry.path().extension() == ".gpk")
+        if (entry.path().extension() == ".gpk" &&
+            (entry.is_directory() || entry.is_regular_file() || entry.is_symlink()))
             gpk_paths.push_back(entry.path());
     }
     if (gpk_paths.empty())
@@ -75,11 +76,59 @@ bool MultiPackReader::has_sketches() const {
     return false;
 }
 
+void MultiPackReader::touch_archive_(size_t aidx) const {
+    std::lock_guard<std::mutex> lock(lru_mu_);
+    auto it = lru_pos_.find(aidx);
+    if (it != lru_pos_.end()) {
+        // Already hot — move to front (MRU).
+        lru_order_.splice(lru_order_.begin(), lru_order_, it->second);
+        it->second = lru_order_.begin();
+        return;
+    }
+    // New archive — add to front.
+    lru_order_.push_front(aidx);
+    lru_pos_[aidx] = lru_order_.begin();
+
+    // Evict from back until within budget.
+    while (lru_order_.size() > max_hot_archives_) {
+        size_t victim = lru_order_.back();
+        lru_order_.pop_back();
+        lru_pos_.erase(victim);
+        spdlog::debug("multi_pack LRU: releasing sketches for archive {}", victim);
+        archives_[victim].reader->release_sketches();
+    }
+}
+
 std::optional<genopack::SketchResult>
 MultiPackReader::sketch_for(genopack::GenomeId virt_id) const {
     auto [aidx, local_id] = decode_virt(virt_id);
     if (aidx >= archives_.size()) return std::nullopt;
+    touch_archive_(aidx);
     return archives_[aidx].reader->sketch_for(local_id);
+}
+
+std::optional<genopack::SketchResult>
+MultiPackReader::sketch_for(genopack::GenomeId virt_id, uint32_t k, uint32_t sz) const {
+    auto [aidx, local_id] = decode_virt(virt_id);
+    if (aidx >= archives_.size()) return std::nullopt;
+    touch_archive_(aidx);
+    return archives_[aidx].reader->sketch_for(local_id, k, sz);
+}
+
+uint32_t MultiPackReader::sketch_kmer_size() const {
+    for (const auto& e : archives_) {
+        uint32_t k = e.reader->sketch_kmer_size();
+        if (k > 0) return k;
+    }
+    return 0;
+}
+
+uint32_t MultiPackReader::sketch_sketch_size() const {
+    for (const auto& e : archives_) {
+        uint32_t sz = e.reader->sketch_sketch_size();
+        if (sz > 0) return sz;
+    }
+    return 0;
 }
 
 void MultiPackReader::visit_shard_batches(
@@ -112,6 +161,48 @@ void MultiPackReader::visit_shard_batches(
                     remapped.emplace_back(sl.global_idx[local_idx], std::move(genome));
                 cb(remapped);
             });
+    }
+}
+
+void MultiPackReader::visit_sketch_batches(
+    const std::vector<std::string>& accessions,
+    uint32_t k, uint32_t sz,
+    const std::function<void(size_t idx,
+                             const genopack::SketchResult& sk)>& cb) const
+{
+    // Group accessions by archive — one struct per archive.
+    struct ArchSlice {
+        std::vector<size_t>               global_idx;
+        std::vector<genopack::GenomeId>   local_ids;
+    };
+    std::vector<ArchSlice> slices(archives_.size());
+
+    for (size_t i = 0; i < accessions.size(); ++i) {
+        auto it = acc_to_arch_.find(accessions[i]);
+        if (it == acc_to_arch_.end()) continue;
+        const uint16_t aidx = it->second;
+        auto meta = archives_[aidx].reader->genome_meta_by_accession(accessions[i]);
+        if (!meta) continue;
+        slices[aidx].global_idx.push_back(i);
+        slices[aidx].local_ids.push_back(meta->genome_id);
+    }
+
+    // For each archive: decompress SKCH once, extract all requested genomes, release.
+    for (size_t aidx = 0; aidx < archives_.size(); ++aidx) {
+        auto& sl = slices[aidx];
+        if (sl.global_idx.empty()) continue;
+        auto& reader = *archives_[aidx].reader;
+        for (size_t j = 0; j < sl.global_idx.size(); ++j) {
+            std::optional<genopack::SketchResult> sk;
+            if (k > 0 && sz > 0) {
+                sk = reader.sketch_for(sl.local_ids[j], k, sz);
+                if (!sk) sk = reader.sketch_for(sl.local_ids[j]);
+            } else {
+                sk = reader.sketch_for(sl.local_ids[j]);
+            }
+            if (sk) cb(sl.global_idx[j], *sk);
+        }
+        reader.release_sketches();
     }
 }
 

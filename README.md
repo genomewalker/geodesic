@@ -38,7 +38,6 @@ ANI thresholds are derived from Jaccard via the Mash formula: $\mathrm{ANI} = \l
 - CLI11, spdlog, BS::thread_pool, hnswlib, Catch2, rapidgzip, Eigen3
 
 **System dependencies:**
-- DuckDB (searched in conda env or system paths)
 - C++20 compiler with AVX2 support
 
 ```bash
@@ -74,8 +73,7 @@ Results written to the working directory (or `--out-dir`):
 - `<prefix>_derep_genomes.tsv` -- all genomes with representative assignment and ANI to rep
 - `<prefix>_results.tsv` -- per-taxon summary (n_genomes, n_reps, method, runtime)
 - `<prefix>_diversity_stats.tsv` -- coverage and diversity metrics per taxon
-- `<prefix>_contamination.tsv` -- flagged anomalous genomes
-- `<prefix>.db` -- DuckDB database with full results
+- `<prefix>_outliers.tsv` -- flagged anomalous genomes (isolation score outliers)
 
 ### Key options
 
@@ -93,15 +91,42 @@ Results written to the working directory (or `--out-dir`):
 | `-z` | 2.0 | Z-score threshold for contamination detection |
 | `--nystrom-diagonal-loading` | 0.01 | Tikhonov regularisation fraction |
 | `--nystrom-degree-normalize` | on | Symmetric Laplacian normalisation of Gram matrix |
-| `--embedding-db` | -- | Persistent embedding store for incremental updates |
-| `--incremental` | off | Reuse existing embeddings, embed only new genomes |
+
+### Distributed mode
+
+For large collections across multiple nodes, use scatter/gather:
+
+```bash
+# 1. Partition input across N workers
+geodesic scatter -t genomes.tsv -n 4 -o dist/ --threads 24
+
+# 2. Run each partition (via sbatch, ssh, GNU parallel, etc.)
+bash dist/run.sh                    # sequential
+parallel -j4 < dist/run.sh         # local parallel
+sbatch --array=0-3 --wrap 'sed -n "$((SLURM_ARRAY_TASK_ID+1))p" dist/run.sh | bash'
+
+# 3. Merge shard results
+geodesic gather -d dist/ -o dist/merged.grd -p merged
+```
+
+Each worker runs an independent `geodesic derep` on its partition. No shared state or coordination required — partitions are self-contained. The `gather` step merges GRD archives and TSV result files.
+
+### Scatter/Gather options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `scatter -n` | -- | Number of partitions |
+| `scatter --rank` | `g` | Taxonomy rank for LPT partitioning (`g`=genus, `f`=family) |
+| `scatter --tmp-dir` | scatter dir | Temporary directory for workers |
+| `gather -d` | -- | Directory containing shard results |
+| `gather -o` | -- | Output path for merged GRD file |
 
 ### Resuming
 
-`geodesic` writes progress to DuckDB as it runs. Resume an interrupted run by pointing to the same database:
+`geodesic` writes progress to a `.geodf` file as it runs. Resume an interrupted run by pointing to the same output directory:
 
 ```bash
-geodesic derep -t genomes.tsv -d my_run.db --threads 24 -p my_run
+geodesic derep -t genomes.tsv --threads 24 -p my_run
 ```
 
 Already-completed taxa are skipped automatically.

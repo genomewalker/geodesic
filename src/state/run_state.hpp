@@ -24,6 +24,11 @@ struct OutlierRecord {
     double kmer_div_zscore = 0.0;
     double margin_to_threshold = 0.0;
     std::string flag_reason;
+    // category: "misassigned" | "low_quality" | "contaminated"
+    // misassigned  = embedding outlier (wrong species, divergent strain)
+    // low_quality  = fragmented/incomplete assembly (pre-filter or quality floor)
+    // contaminated = chimeric assembly (GUNC failure)
+    std::string category;
     uint32_t n_contigs = 0;
     uint64_t genome_length_bp = 0;
     bool excluded = true;

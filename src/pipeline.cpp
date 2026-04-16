@@ -11,6 +11,7 @@
 #include "taxonomy/normalize.hpp"
 #include "db/geodf/geodf_writer.hpp"
 #include "db/geodf/geodf_reader.hpp"
+#include "db/grd/grd_writer.hpp"
 #include "db/taxdb/ncbi_taxdb.hpp"
 #include <genopack/archive.hpp>
 #include "io/gz_reader.hpp"
@@ -161,11 +162,13 @@ void process_taxa_parallel(
     const Config& cfg,
     RunState& run_state,
     IPackReader* gpk_reader,
-    const std::unordered_map<std::string, GuncQuality>* gunc_scores) {
+    const std::unordered_map<std::string, GuncQuality>* gunc_scores,
+    grd::GrdWriter* grd_writer) {
 
     RunState* run_state_ptr = &run_state;
     IPackReader* gpk_reader_ptr = gpk_reader;
     const std::unordered_map<std::string, GuncQuality>* gunc_scores_ptr = gunc_scores;
+    grd::GrdWriter* grd_writer_ptr = grd_writer;
 
     const int total_budget = cfg.workers * cfg.threads;
     BS::thread_pool pool(static_cast<BS::concurrency_t>(total_budget));
@@ -267,12 +270,13 @@ void process_taxa_parallel(
             int acquired = budget_acquire(desired);
             pool.detach_task(
                 [&taxa, i, &cfg, gunc_scores_ptr,
-                 gpk_reader_ptr, run_state_ptr,
+                 gpk_reader_ptr, run_state_ptr, grd_writer_ptr,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release, acquired] {
                     auto result = process_taxon(taxa[i], cfg, acquired,
                                                gunc_scores_ptr,
-                                               gpk_reader_ptr, run_state_ptr);
+                                               gpk_reader_ptr, run_state_ptr,
+                                               grd_writer_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         done_queue.push(std::move(result));
@@ -289,11 +293,12 @@ void process_taxa_parallel(
                 batch_taxa.push_back(&taxa[i]);
             pool.detach_task(
                 [batch_taxa, &cfg,
-                 gpk_reader_ptr, gunc_scores_ptr, run_state_ptr, &done_queue, &done_mutex, &done_cv,
+                 gpk_reader_ptr, gunc_scores_ptr, run_state_ptr, grd_writer_ptr,
+                 &done_queue, &done_mutex, &done_cv,
                  &budget_release] {
                     auto results = process_tiny_batch(batch_taxa, cfg,
                                                       gunc_scores_ptr, gpk_reader_ptr,
-                                                      run_state_ptr);
+                                                      run_state_ptr, grd_writer_ptr);
                     {
                         std::lock_guard lock(done_mutex);
                         for (auto& r : results)
@@ -387,6 +392,13 @@ void process_taxa_parallel(
     }
 
     scheduler.join();
+
+    // Release SKCH buffers now that all taxa are done with sketch loading.
+    if (gpk_reader_ptr) {
+        size_t skch_mb = gpk_reader_ptr->sketch_memory_bytes() / (1024 * 1024);
+        gpk_reader_ptr->release_sketches();
+        if (skch_mb > 0) spdlog::info("Released {}MB SKCH buffers", skch_mb);
+    }
 
     spdlog::info("Done: {} success, {} failed, {} singleton, {} fixed, {} skipped",
                  success, failed, singleton, fixed, skipped);
@@ -529,9 +541,17 @@ int run_pipeline(Config& cfg) {
         }
     }
 
-    // 9. Parallel processing
+    // 9. Open GRD writer if requested (stream-writes per taxon during parallel processing)
+    std::unique_ptr<grd::GrdWriter> grd_writer;
+    if (!cfg.grd_output.empty()) {
+        grd_writer = std::make_unique<grd::GrdWriter>(cfg.grd_output);
+        spdlog::info("GRD output: {}", cfg.grd_output.string());
+    }
+
+    // 10. Parallel processing
     process_taxa_parallel(taxa, cfg, run_state,
-                          gpk_reader.get(), gunc_scores_ptr);
+                          gpk_reader.get(), gunc_scores_ptr,
+                          grd_writer.get());
 
     // 11. Summary and output
     ResultsWriter writer(results_dir, cfg.prefix);
@@ -590,6 +610,15 @@ int run_pipeline(Config& cfg) {
             spdlog::info("GEODF results written to {}", cfg.geodf_output.string());
         } catch (const std::exception& e) {
             spdlog::warn("GEODF write failed: {}", e.what());
+        }
+    }
+
+    // Finalize GRD archive (write global sections + TOC + TailLocator)
+    if (grd_writer) {
+        try {
+            grd_writer->close();
+        } catch (const std::exception& e) {
+            spdlog::warn("GRD finalize failed: {}", e.what());
         }
     }
 

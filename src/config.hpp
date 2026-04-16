@@ -1,11 +1,12 @@
 #pragma once
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
 
 namespace derep {
 
-enum class Command { Derep, Update };
+enum class Command { Derep, Update, Scatter, Gather };
 
 struct Config {
     Command command = Command::Derep;
@@ -19,7 +20,7 @@ struct Config {
     std::optional<std::filesystem::path> fixed_reps_file;
     std::optional<std::filesystem::path> out_dir;
     std::string prefix;
-    std::filesystem::path tmp_dir{"/tmp"};
+    std::filesystem::path tmp_dir{"."};
 
     // Runtime paths (set during setup)
     std::filesystem::path results_dir;
@@ -40,6 +41,7 @@ struct Config {
     // GEODESIC params (geodesic_ prefix dropped)
     bool auto_calibrate = true;
     int calibration_pairs = 50;
+    uint64_t seed = 42;  // Master RNG seed; all sub-seeds derived from this
     int embedding_dim = 256;
     int kmer_size = 21;
     int sketch_size = 10000;
@@ -61,6 +63,9 @@ struct Config {
     // GEODF output (optional; empty = disabled)
     std::filesystem::path geodf_output;
 
+    // GRD output — geodesic results data archive with per-genome embeddings (optional)
+    std::filesystem::path grd_output;
+
     // Lock file input (for 'geodesic update' — path to prior run's lock file)
     std::filesystem::path lock_input;
 
@@ -74,6 +79,13 @@ struct Config {
 
     // Logging verbosity: 0=quiet, 1=normal (default), 2=verbose, 3=debug
     int verbosity = 1;
+
+    // Scatter/Gather (distributed mode)
+    int n_partitions = 0;                    // scatter: number of partitions
+    std::string partition_rank = "g";        // scatter: taxonomy rank for grouping
+    std::filesystem::path scatter_dir;       // scatter: output directory for partitions
+    std::filesystem::path gather_dir;        // gather: directory containing shard results
+    std::filesystem::path gather_output;     // gather: merged output path
 };
 
 Config parse_args(int argc, char** argv);

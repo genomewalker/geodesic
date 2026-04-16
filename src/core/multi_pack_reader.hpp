@@ -1,7 +1,10 @@
 #pragma once
 #include "pack_reader.hpp"
+#include <algorithm>
 #include <filesystem>
+#include <list>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -33,9 +36,57 @@ public:
     std::optional<genopack::SketchResult> sketch_for(
         genopack::GenomeId virt_id) const override;
 
+    std::optional<genopack::SketchResult> sketch_for(
+        genopack::GenomeId virt_id, uint32_t k, uint32_t sz) const override;
+
+    uint32_t sketch_kmer_size()   const override;
+    uint32_t sketch_sketch_size() const override;
+
+    bool has_kmer_size(uint32_t k) const override {
+        for (const auto& a : archives_)
+            if (a.reader->has_sketches()) {
+                auto ks = a.reader->available_sketch_kmer_sizes();
+                if (std::find(ks.begin(), ks.end(), k) != ks.end()) return true;
+            }
+        return false;
+    }
+
+    std::vector<uint32_t> available_kmer_sizes() const override {
+        std::vector<uint32_t> all;
+        for (const auto& a : archives_) {
+            for (uint32_t k : a.reader->available_sketch_kmer_sizes())
+                if (std::find(all.begin(), all.end(), k) == all.end())
+                    all.push_back(k);
+        }
+        std::sort(all.begin(), all.end());
+        return all;
+    }
+
     void visit_shard_batches(
         const std::vector<std::string>& accessions,
         const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const override;
+
+    // Sketch batch visitor: groups accessions by archive, decompresses each archive's
+    // SKCH section exactly once, delivers all sketches from it, then releases.
+    // Eliminates SKCH thrashing when n_archives > max_hot_archives_.
+    // cb(global_idx, sketch_result) — called for each found genome in archive order.
+    void visit_sketch_batches(
+        const std::vector<std::string>& accessions,
+        uint32_t k, uint32_t sz,
+        const std::function<void(size_t idx,
+                                 const genopack::SketchResult& sk)>& cb) const;
+
+    void release_sketches() const override {
+        std::lock_guard<std::mutex> lock(lru_mu_);
+        for (auto& a : archives_) a.reader->release_sketches();
+        lru_order_.clear();
+        lru_pos_.clear();
+    }
+    size_t sketch_memory_bytes() const override {
+        size_t t = 0;
+        for (const auto& a : archives_) t += a.reader->sketch_memory_bytes();
+        return t;
+    }
 
     size_t n_archives() const { return archives_.size(); }
     size_t n_genomes()  const { return acc_to_arch_.size(); }
@@ -49,6 +100,18 @@ private:
     std::vector<ArchiveEntry> archives_;
     // accession → archive_idx (for O(1) routing)
     std::unordered_map<std::string, uint16_t> acc_to_arch_;
+
+    // LRU eviction: keep at most max_hot_archives_ sketch sections decompressed.
+    // front = MRU, back = LRU.
+    mutable std::mutex                                         lru_mu_;
+    mutable std::list<size_t>                                  lru_order_;
+    mutable std::unordered_map<size_t,
+                std::list<size_t>::iterator>                   lru_pos_;
+    size_t                                                     max_hot_archives_ = 2;
+
+    // Mark aidx as recently used; evict LRU archives if over budget.
+    // Must be called WITHOUT lru_mu_ held (acquires internally).
+    void touch_archive_(size_t aidx) const;
 
     static genopack::GenomeId encode_virt(uint16_t aidx, genopack::GenomeId local) noexcept {
         return (static_cast<genopack::GenomeId>(aidx) << 48)

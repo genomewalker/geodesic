@@ -95,4 +95,4 @@ The `_outliers.tsv` file contains all flagged candidates with columns:
 taxonomy  accession  nn_outlier  isolation_score  kmer_div_zscore  genome_size_zscore  centroid_distance  anomaly_score  genome_length_bp  n_contigs  margin_to_threshold  flag_reason
 ```
 
-All genomes still appear in `_derep_genomes.tsv` assigned to their nearest representative; contamination detection only affects selection eligibility, not assignment.
+All genomes still appear in `_derep_genomes.tsv` assigned to their nearest representative; outlier detection only affects selection eligibility, not assignment.

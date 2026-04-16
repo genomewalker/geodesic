@@ -3,4 +3,5 @@
 - [Home](Home)
 - [Background and Motivation](Background-and-Motivation)
 - [Algorithm](ALGORITHM)
-- [Contamination Detection](Contamination)
+- [Outlier Detection](Outlier-Detection)
+- [Distributed Mode](Distributed-Mode)

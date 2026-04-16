@@ -5,6 +5,7 @@
 #include "core/pack_reader.hpp"
 #include "core/similarity/skani.hpp"
 #include "core/sketch/minhash.hpp"
+#include "db/grd/grd_writer.hpp"
 #include <genopack/archive.hpp>
 
 #include <algorithm>
@@ -128,7 +129,8 @@ TaxonResult process_taxon(
     int thread_budget,
     const std::unordered_map<std::string, GuncQuality>* gunc_scores,
     IPackReader* gpk_reader,
-    RunState* run_state) {
+    RunState* run_state,
+    grd::GrdWriter* grd_writer) {
     try {
         const int threads = (thread_budget > 0) ? thread_budget : cfg.threads;
 
@@ -257,6 +259,8 @@ TaxonResult process_taxon(
                     rec.accession       = acc;
                     rec.kmer_div_zscore = static_cast<double>(git->second.clade_separation_score);
                     rec.nn_outlier      = false;
+                    rec.flag_reason     = "gunc_fail";
+                    rec.category        = "contaminated";
                     gunc_contam_records.push_back(std::move(rec));
                 }
             }
@@ -448,7 +452,7 @@ TaxonResult process_taxon(
         const bool is_warm_run = false;
         if (cfg.auto_calibrate && file_paths.size() >= 50 && !is_warm_run) {
             auto params = GeodesicDerep::auto_calibrate(
-                file_paths, cfg.calibration_pairs, threads);
+                file_paths, cfg.calibration_pairs, threads, cfg.seed);
             kmer_size     = params.kmer_size;
             embedding_dim = params.embedding_dim;
             sketch_size   = params.sketch_size;
@@ -487,24 +491,28 @@ TaxonResult process_taxon(
             .min_rep_distance = min_rep_distance,
             .max_rep_fraction = cfg.max_rep_fraction,
             .nystrom_diagonal_loading = cfg.nystrom_diagonal_loading,
-            .nystrom_degree_normalize = cfg.nystrom_degree_normalize
+            .nystrom_degree_normalize = cfg.nystrom_degree_normalize,
+            .seed = cfg.seed
         };
 
         GeodesicDerep geodesic(gcfg);
 
-        // Stage 1: Pre-filter fragmented assemblies using archive metadata (no FASTA read).
-        // Fragmented MAGs (high n_contigs) pollute the geodesic embedding and account for
-        // 98.5% of "contamination" calls. Pre-filtering excludes them from embedding,
-        // improving both speed and embedding quality for the remaining genomes.
-        // Only applied when a .gpk archive is available (provides n_contigs without FASTA read).
-        static constexpr uint32_t FRAGMENTED_CONTIGS_THRESHOLD = 500;
+        // Stage 1: Pre-filter severely fragmented assemblies using archive metadata.
+        // Uses average contig size (genome_length / n_contigs) instead of a hard contig
+        // count cutoff.  A genome with many contigs but decent average size (e.g. 600
+        // contigs × 5 kb = 3 Mbp) is fine; one with avg < 1 kb is genuinely junk.
+        // Only applied when a .gpk archive is available (provides metadata without FASTA read).
+        static constexpr double MIN_AVG_CONTIG_BP = 1000.0;  // 1 kb average contig size floor
         std::vector<GeodesicDerep::OutlierCandidate> preflagged_fragmented;
         if (gpk_reader && !taxon.genomes.empty()) {
             std::vector<Genome> clean_genomes;
             clean_genomes.reserve(taxon.genomes.size());
             for (const auto& g : taxon.genomes) {
                 auto meta = gpk_reader->genome_meta_by_accession(g.accession);
-                if (meta && meta->n_contigs > FRAGMENTED_CONTIGS_THRESHOLD) {
+                const bool is_fragmented = meta && meta->n_contigs > 0 &&
+                    (static_cast<double>(meta->genome_length) /
+                     static_cast<double>(meta->n_contigs)) < MIN_AVG_CONTIG_BP;
+                if (is_fragmented) {
                     GeodesicDerep::OutlierCandidate c;
                     c.genome_id            = 0;
                     c.nn_outlier           = true;
@@ -524,8 +532,9 @@ TaxonResult process_taxon(
                 }
             }
             if (!preflagged_fragmented.empty()) {
-                spdlog::debug("[{}] Stage-1 pre-filter: {} fragmented ({} remain)",
-                              taxon.taxonomy, preflagged_fragmented.size(), clean_genomes.size());
+                spdlog::debug("[{}] Stage-1 pre-filter: {} fragmented (avg contig < {} bp, {} remain)",
+                              taxon.taxonomy, preflagged_fragmented.size(),
+                              static_cast<int>(MIN_AVG_CONTIG_BP), clean_genomes.size());
                 // Rebuild file_paths for the clean subset only
                 file_paths.clear();
                 for (const auto& g : clean_genomes)
@@ -563,8 +572,38 @@ TaxonResult process_taxon(
             geodesic_failed_records.push_back({accession, taxon.taxonomy, file_path, reason});
         }
 
+        // All genomes excluded (e.g. entire taxon missing from SKCH) — record failures and skip.
+        if (geodesic.embeddings().empty()) {
+            spdlog::warn("[{}] all {} genomes excluded (no valid embeddings) — skipping taxon",
+                         taxon.taxonomy, taxon.size());
+
+            TaxonResult r;
+            r.taxonomy          = taxon.taxonomy;
+            r.status            = TaxonStatus::FAILED;
+            r.n_genomes         = static_cast<int>(taxon.size());
+            r.n_representatives = 0;
+            r.method            = "geodesic-skipped";
+
+            if (run_state) {
+                TaxonOutput out;
+                out.result          = r;
+                out.all_accessions  = all_accessions;
+                out.failed_genomes  = std::move(geodesic_failed_records);
+                run_state->push(std::move(out));
+            }
+            return r;
+        }
+
         // Phase 3: single HNSW pass — isolation scores + 1-NN distribution fused.
         auto nn = geodesic.compute_isolation_scores();
+
+        // Adaptive k-selection: if GPK has multi-k sketches, re-embed with the k
+        // that best matches this taxon's diversity (clonal→31, moderate→21, diverse→16).
+        // maybe_reselect_k() returns true only when k actually changed; in that case
+        // re-run isolation scores on the fresh HNSW.
+        if (gpk_reader && geodesic.maybe_reselect_k(nn, quality_scores)) {
+            nn = geodesic.compute_isolation_scores();
+        }
 
         // Compute ad-hoc quality scores for genomes without CheckM2 data.
         // Uses centrality (inverse isolation) and kmer density as quality proxy.
@@ -584,6 +623,13 @@ TaxonResult process_taxon(
 
             diversity_threshold = std::max(1e-6f,
                 std::min(diversity_threshold, mst_threshold));
+            // Compute θ_ANI for logging — not used as a floor since trimmed_max
+            // already excludes outlier bridges, making a hard floor unnecessary.
+            const float ani_floor = [&]() -> float {
+                double ak = std::pow(ani_threshold_frac, static_cast<double>(kmer_size));
+                double j  = std::clamp(ak / (2.0 - ak), 0.0, 1.0);
+                return static_cast<float>(std::acos(j) / M_PI) * 0.25f;
+            }();
             // theta/4 ensures coverage-preserving merge: by triangle inequality,
             // theta/2 can leave genomes 1.5*theta away from kept rep.
             min_rep_distance = std::min(static_cast<float>(nn.p5),
@@ -592,22 +638,26 @@ TaxonResult process_taxon(
             geodesic.set_diversity_threshold(diversity_threshold);
             geodesic.set_min_rep_distance(min_rep_distance);
 
-            if (nn.low_pair_count || nn.pathological_bridge || nn.disconnected_mst) {
-                spdlog::warn("[{}] Threshold instability detected: low_pairs={} bridge={} disconnected={}. "
-                             "diversity_threshold={:.4f} (use --geodesic-diversity-threshold to override)",
+            const bool heavy_tail = (nn.tail_ratio > 2.0);
+            if (nn.low_pair_count || nn.pathological_bridge || nn.disconnected_mst || heavy_tail) {
+                spdlog::warn("[{}] Threshold instability detected: low_pairs={} bridge={} disconnected={} "
+                             "heavy_tail={} (tail_ratio={:.2f}). "
+                             "diversity_threshold={:.4f} ani_floor={:.4f} "
+                             "(use --geodesic-diversity-threshold to override)",
                              taxon.taxonomy,
                              nn.low_pair_count, nn.pathological_bridge, nn.disconnected_mst,
-                             diversity_threshold);
+                             heavy_tail, nn.tail_ratio,
+                             diversity_threshold, ani_floor);
             }
 
             double thr_j   = std::cos(static_cast<double>(diversity_threshold) * M_PI);
             double thr_ani = GeodesicDerep::jaccard_to_ani(std::max(0.0, thr_j), kmer_size);
             spdlog::info("[{}] geodesic: k={} dim={} sketch={} | "
-                         "div_thr={:.4f} ({:.1f}% ANI, MST={:.4f}) | "
+                         "div_thr={:.4f} ({:.1f}% ANI, MST={:.4f} floor={:.4f} tail_ratio={:.2f}) | "
                          "min_rep={:.4f} (NN P5={:.4f} P50={:.4f} P95={:.4f}) | "
                          "k_conn={} k_stable={} K_cap={}",
                          taxon.taxonomy, kmer_size, embedding_dim, sketch_size,
-                         diversity_threshold, thr_ani, nn.mst_max_edge,
+                         diversity_threshold, thr_ani, nn.mst_max_edge, ani_floor, nn.tail_ratio,
                          min_rep_distance, nn.p5, nn.p50, nn.p95,
                          nn.k_conn, nn.k_stable, nn.k_cap);
         }
@@ -634,16 +684,19 @@ TaxonResult process_taxon(
         // path → accession is already in path_to_accession.
         std::unordered_set<std::string> contaminated_paths;
         for (auto& c : contamination) {
-            // Fragmented genomes (101–500 contigs) with completeness >= 50% are flagged
-            // but retained for rep selection (excluded = false).
-            const bool is_fragmented_flagged_only =
-                (c.n_contigs >= 101 && c.n_contigs <= 500) && [&]() -> bool {
+            // Outlier candidates with reasonable avg contig size (>= 1 kb) and
+            // completeness >= 50% are flagged but retained for rep selection.
+            const bool has_decent_assembly =
+                (c.n_contigs > 0 && c.genome_length_bp > 0 &&
+                 (static_cast<double>(c.genome_length_bp) /
+                  static_cast<double>(c.n_contigs)) >= MIN_AVG_CONTIG_BP) &&
+                [&]() -> bool {
                     auto it = path_to_accession.find(c.path.string());
                     if (it == path_to_accession.end()) return false;
                     auto cit = acc_completeness.find(it->second);
                     return (cit != acc_completeness.end() && cit->second >= 50.0);
                 }();
-            c.excluded = !is_fragmented_flagged_only;
+            c.excluded = !has_decent_assembly;
 
             if (is_verbose()) spdlog::warn("[{}] Potential contamination: {} (centroid_dist={:.3f}, "
                          "isolation={:.3f}, kmer_div_z={:.2f}, nn_outlier={}, excluded={})",
@@ -654,7 +707,7 @@ TaxonResult process_taxon(
                 contaminated_paths.insert(c.path.string());
         }
 
-        // Pre-FPS quality floor: silently exclude genomes with n_contigs > 500 OR
+        // Pre-FPS quality floor: exclude genomes with avg contig size < 1 kb OR
         // completeness < 50% that were not already caught by outlier detection.
         // These are excluded from rep selection but do NOT generate an OutlierRecord.
         int n_quality_floor = 0;
@@ -671,15 +724,15 @@ TaxonResult process_taxon(
                 if (acc_it == path_to_accession.end()) continue;
                 const std::string& acc = acc_it->second;
 
-                const bool high_contigs = emb.n_contigs > 500;
+                const bool fragmented = emb.n_contigs > 0 &&
+                    (static_cast<double>(emb.genome_size) /
+                     static_cast<double>(emb.n_contigs)) < MIN_AVG_CONTIG_BP;
                 const auto cit = acc_completeness.find(acc);
-                // Missing completeness → conservative: exclude if n_contigs > 500.
-                // If completeness is known, also exclude if < 50%.
                 const bool low_completeness = (cit != acc_completeness.end())
                     ? cit->second < 50.0
                     : false;
 
-                if (high_contigs || low_completeness) {
+                if (fragmented || low_completeness) {
                     contaminated_paths.insert(path_str);
                     ++n_quality_floor;
                 }
@@ -717,6 +770,8 @@ TaxonResult process_taxon(
                 rec.nn_outlier         = false;
                 rec.kmer_div_zscore    = static_cast<double>(git->second.clade_separation_score);
                 rec.genome_size_zscore = 0.0;
+                rec.flag_reason        = "gunc_fail";
+                rec.category           = "contaminated";
                 gunc_contam_records.push_back(std::move(rec));
             }
         }
@@ -801,6 +856,8 @@ TaxonResult process_taxon(
                 rec.kmer_div_zscore    = static_cast<double>(c.kmer_div_zscore);
                 rec.margin_to_threshold = static_cast<double>(c.margin_to_threshold);
                 rec.flag_reason        = c.flag_reason;
+                rec.category           = (c.flag_reason == "fragmented:pre_filter")
+                                         ? "low_quality" : "misassigned";
                 rec.n_contigs          = c.n_contigs;
                 rec.genome_length_bp   = c.genome_length_bp;
                 rec.excluded           = (contaminated_paths.count(c.path.string()) > 0);
@@ -824,14 +881,30 @@ TaxonResult process_taxon(
         double runtime_secs = std::chrono::duration<double>(geodesic_end - geodesic_start).count();
 
         if (is_verbose() || (!is_quiet() && taxon.size() >= 10)) {
-            if (contamination.empty()) {
+            int n_misassigned = 0, n_low_quality = 0, n_gunc = 0;
+            for (const auto& rec : contam_records) {
+                if      (rec.category == "misassigned")  ++n_misassigned;
+                else if (rec.category == "low_quality")  ++n_low_quality;
+                else if (rec.category == "contaminated") ++n_gunc;
+            }
+            if (n_misassigned == 0 && n_low_quality == 0 && n_gunc == 0) {
                 spdlog::info("[{}] {} → {} reps ({:.1f}s)",
                              taxon.taxonomy, taxon.size(),
                              all_representatives.size(), runtime_secs);
             } else {
-                spdlog::info("[{}] {} → {} reps, {} contaminated ({:.1f}s)",
+                std::string suffix;
+                if (n_misassigned > 0) suffix += std::to_string(n_misassigned) + " misassigned";
+                if (n_low_quality > 0) {
+                    if (!suffix.empty()) suffix += ", ";
+                    suffix += std::to_string(n_low_quality) + " low_quality";
+                }
+                if (n_gunc > 0) {
+                    if (!suffix.empty()) suffix += ", ";
+                    suffix += std::to_string(n_gunc) + " contaminated (GUNC)";
+                }
+                spdlog::info("[{}] {} → {} reps, {} ({:.1f}s)",
                              taxon.taxonomy, taxon.size(),
-                             all_representatives.size(), contamination.size(), runtime_secs);
+                             all_representatives.size(), suffix, runtime_secs);
             }
         }
 
@@ -923,7 +996,115 @@ TaxonResult process_taxon(
             out.mst_p90_edge            = nn.mst_max_edge;
             out.mst_true_max            = nn.mst_true_max;
             out.ani_threshold_used      = dist_to_ani(static_cast<double>(diversity_threshold));
+
             run_state->push(std::move(out));
+        }
+
+        // GRD: write per-genome embeddings + metadata directly to archive
+        if (grd_writer) {
+            const auto& embeds = geodesic.embeddings();
+            const auto& comp_ids = geodesic.component_ids();
+            const size_t n_emb = embeds.size();
+            const uint32_t edim = embeds.empty() ? 0u
+                : static_cast<uint32_t>(embeds[0].vector.size());
+
+            grd::TaxonData td;
+            td.taxonomy = taxon.taxonomy;
+            td.embed_dim = edim;
+            td.sketch_size = static_cast<uint32_t>(sketch_size);
+            td.kmer_size = static_cast<uint32_t>(kmer_size);
+            td.k_conn = (nn.k_conn >= 0) ? static_cast<uint32_t>(nn.k_conn) : 0;
+            td.diversity_threshold = diversity_threshold;
+            td.ani_threshold = static_cast<float>(cfg.ani_threshold);
+            td.mst_p90_edge = static_cast<float>(nn.mst_max_edge);
+            td.mst_true_max = static_cast<float>(nn.mst_true_max);
+
+            // Build accession index maps
+            std::unordered_map<std::string, uint32_t> acc_idx_map;
+            acc_idx_map.reserve(all_accessions.size());
+            for (uint32_t i = 0; i < static_cast<uint32_t>(all_accessions.size()); ++i)
+                acc_idx_map[all_accessions[i]] = i;
+
+            std::unordered_map<std::string, uint32_t> path_acc_idx;
+            path_acc_idx.reserve(file_paths.size());
+            for (size_t i = 0; i < file_paths.size(); ++i) {
+                auto it = path_to_accession.find(file_paths[i].string());
+                if (it != path_to_accession.end()) {
+                    auto ait = acc_idx_map.find(it->second);
+                    if (ait != acc_idx_map.end())
+                        path_acc_idx[file_paths[i].string()] = ait->second;
+                }
+            }
+
+            const uint32_t n_acc = static_cast<uint32_t>(all_accessions.size());
+            td.accessions = all_accessions;
+
+            // Status
+            td.status.resize(n_acc, grd::GenomeStatus::MEMBER);
+            for (const auto& acc : all_representatives) {
+                auto it = acc_idx_map.find(acc);
+                if (it != acc_idx_map.end())
+                    td.status[it->second] = grd::GenomeStatus::REPRESENTATIVE;
+            }
+            for (const auto& c : contam_records) {
+                if (!c.excluded) continue;
+                auto it = acc_idx_map.find(c.accession);
+                if (it != acc_idx_map.end())
+                    td.status[it->second] = grd::GenomeStatus::CONTAMINATED;
+            }
+
+            // Per-genome arrays
+            td.embeddings.resize(static_cast<size_t>(n_acc) * edim, 0.0f);
+            td.component_id.resize(n_acc, 0);
+            td.nearest_rep_idx.resize(n_acc, UINT32_MAX);
+            td.nearest_rep_dist.resize(n_acc, 0.0f);
+            td.outlier_zscore.resize(n_acc, 0.0f);
+            td.genome_length.resize(n_acc, 0);
+
+            for (size_t ei = 0; ei < n_emb; ++ei) {
+                auto pit = path_acc_idx.find(embeds[ei].path.string());
+                if (pit == path_acc_idx.end()) continue;
+                uint32_t ai = pit->second;
+                if (edim > 0 && embeds[ei].vector.size() == edim)
+                    std::memcpy(td.embeddings.data() + static_cast<size_t>(ai) * edim,
+                                embeds[ei].vector.data(), edim * sizeof(float));
+                if (ei < comp_ids.size())
+                    td.component_id[ai] = static_cast<uint32_t>(comp_ids[ei]);
+                td.genome_length[ai] = embeds[ei].genome_size;
+            }
+
+            for (const auto& c : contam_records) {
+                auto ait = acc_idx_map.find(c.accession);
+                if (ait != acc_idx_map.end()) {
+                    td.outlier_zscore[ait->second] =
+                        static_cast<float>(c.genome_size_zscore);
+                    if (td.genome_length[ait->second] == 0)
+                        td.genome_length[ait->second] = c.genome_length_bp;
+                }
+            }
+
+            // Edges
+            for (const auto& e : edges) {
+                auto src_it = path_to_accession.find(e.source);
+                auto tgt_it = path_to_accession.find(e.target);
+                if (src_it == path_to_accession.end() ||
+                    tgt_it == path_to_accession.end()) continue;
+                auto mi = acc_idx_map.find(src_it->second);
+                auto ri = acc_idx_map.find(tgt_it->second);
+                if (mi == acc_idx_map.end() || ri == acc_idx_map.end()) continue;
+
+                float dist = static_cast<float>(
+                    std::acos(std::clamp(e.weight_raw, 0.0, 1.0)) / M_PI);
+                td.edges.push_back({mi->second, ri->second, dist});
+
+                if (td.nearest_rep_idx[mi->second] == UINT32_MAX ||
+                    dist < td.nearest_rep_dist[mi->second]) {
+                    td.nearest_rep_idx[mi->second] = ri->second;
+                    td.nearest_rep_dist[mi->second] = dist;
+                }
+            }
+
+            grd_writer->write_taxon(td);
         }
 
         return r;
@@ -944,12 +1125,13 @@ std::vector<TaxonResult> process_tiny_batch(
     const Config& cfg,
     const std::unordered_map<std::string, GuncQuality>* gunc_scores,
     IPackReader* gpk_reader,
-    RunState* run_state) {
+    RunState* run_state,
+    grd::GrdWriter* grd_writer) {
     std::vector<TaxonResult> results;
     results.reserve(taxa.size());
     for (const Taxon* t : taxa)
         results.push_back(process_taxon(*t, cfg, 1, gunc_scores,
-                                        gpk_reader, run_state));
+                                        gpk_reader, run_state, grd_writer));
     return results;
 }
 

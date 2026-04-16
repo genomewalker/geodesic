@@ -182,6 +182,14 @@ public:
         // Internal: set by apply_nystrom_embeddings(). After L2 normalisation,
         // dot(e_A,e_B) ≈ J(A,B)/captured_variance.
         float nystrom_captured_variance = 1.0f;
+
+        // Master RNG seed. All sub-seeds are derived from this:
+        //   sig1 (OPH sketch):          seed
+        //   sig2 (OPH sketch, sig2≠sig1): seed + 1
+        //   HNSW construction:          seed
+        //   Nyström anchor sampling:    seed
+        //   diversity pair sampling:    seed
+        uint64_t seed = 42;
     };
 
     explicit GeodesicDerep(Config cfg);
@@ -196,7 +204,8 @@ public:
     static CalibratedParams auto_calibrate(
         const std::vector<std::filesystem::path>& genomes,
         int sample_pairs = 50,
-        int threads = 4);
+        int threads = 4,
+        uint64_t seed = 42);
 
     // Phase 1-2: Embed all genomes and build spatial index
     // quality_scores: path.string() → quality (completeness - 5*contamination)
@@ -239,6 +248,9 @@ public:
 
     // Get all embeddings
     const std::vector<GenomeEmbedding>& embeddings() const { return embeddings_; }
+
+    // Get per-genome component IDs (set by compute_isolation_scores)
+    const std::vector<int>& component_ids() const { return component_ids_; }
 
     // Exact Jaccard from OPH signatures with b-bit bias correction.
     // Works for both uint16_t (stored) and uint32_t (in-memory OPH path).
@@ -286,12 +298,14 @@ public:
         double p5;
         double p50;
         double p95;
-        // 90th-percentile edge in the minimum spanning tree of the k-NN graph.
-        // Used as the taxon diversity threshold — more robust than the true max
-        // against rare outlier edges. Zero if unavailable (small-n brute-force path).
+        // Bridge-size-conditioned trimmed maximum MST edge weight.
+        // Excludes outlier bridges (min component side ≤ ceil(sqrt(n))) that connect
+        // singleton/pair outliers to the main mass. Falls back to true max when all
+        // edges have tiny bridge sides (very small taxa). Zero if unavailable.
         double mst_max_edge = 0.0;
-        double mst_true_max = 0.0;       // Actual maximum MST edge (diagnostic; mst_max_edge holds P90)
+        double mst_true_max = 0.0;       // Actual maximum MST edge (for tail_ratio diagnostic)
         double mst_w2 = 0.0;             // second-largest MST edge (penultimate Kruskal merge)
+        double tail_ratio = 0.0;         // mst_true_max / mst_max_edge; >2 signals heavy-tail suppression
         uint32_t bridge_min_side = 0;    // smaller component at the final MST merge
         int k_conn   = -1;  // smallest k where k-NN graph connects (-1 = never within K_cap)
         int k_stable = -1;  // k chosen by bottleneck stability probe (smallest k within 3% of B(K_cap))
@@ -313,6 +327,15 @@ public:
     // Returns (path, genome_length_bp) for all embedded genomes after build_index.
     // Used to persist genome_length to the DB (OPH sketch computes it; input TSV doesn't have it).
     std::vector<std::pair<std::filesystem::path, uint64_t>> get_genome_sizes() const;
+
+    // Adaptive k-selection: pick the k that best matches this taxon's NN-distance diversity.
+    // If the GPK has that k and it differs from current cfg_.kmer_size, re-embeds everything
+    // and returns true. Otherwise returns false (caller reuses existing embeddings/HNSW).
+    bool maybe_reselect_k(const NNDistStats& stats,
+                          const std::unordered_map<std::string, double>& quality_scores);
+
+    // Select best k based on P95 NN distance (clonal→31, moderate→21, diverse→16).
+    static int select_best_k_for_diversity(float p95_nn_dist);
 
     // Genomes that permanently failed to read (all retries exhausted) during build_index.
     // Each entry: (file_path, error_reason). Caller should record these in jobs_failed.
@@ -388,7 +411,8 @@ private:
     // Pack reader for sig2 materialization (avoids NFS re-reads).
     // Set by build_index_from_gpk(), null otherwise.
     IPackReader* gpk_reader_ = nullptr;
-    std::vector<std::string> gpk_accessions_;  // index-parallel to embeddings_
+    std::vector<std::string>           gpk_accessions_;  // index-parallel to embeddings_
+    std::vector<std::filesystem::path> gpk_paths_;       // index-parallel to gpk_accessions_
 
     // Generate embedding for single genome (reads from NFS)
     GenomeEmbedding embed_genome(const std::filesystem::path& path, uint64_t id);
@@ -413,9 +437,15 @@ private:
     // Brute-force O(n²) isolation scores for small n (no HNSW needed)
     void compute_isolation_scores_brute();
 
+    // Sample up to ~300 genomes, compute pairwise Jaccard on 500 bins, return
+    // select_best_k_for_diversity(p95_nn).  Returns 0 if probe inconclusive.
+    int probe_kmer_size_(const std::vector<std::string>& accessions,
+                         IPackReader& gpk) const;
+
     // Angular distance between two embeddings (works with any dimension)
     static float angular_distance(const std::vector<float>& a,
                                   const std::vector<float>& b);
+
 };
 
 } // namespace derep

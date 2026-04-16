@@ -41,8 +41,8 @@ Config parse_args(int argc, char** argv) {
 
     derep->add_option("-p,--prefix", cfg.prefix, "Prefix for output files");
 
-    derep->add_option("--tmp-dir", cfg.tmp_dir, "Temporary directory")
-        ->default_val("/tmp");
+    derep->add_option("--tmp-dir", cfg.tmp_dir, "Temporary directory (default: current directory)")
+        ->default_val(".");
 
     derep->add_option("--threads", cfg.threads, "Total CPU threads to use")
         ->default_val(1);
@@ -69,6 +69,8 @@ Config parse_args(int argc, char** argv) {
         "Auto-calibrate params from ANI sample (default: on)")->default_val(true);
     derep->add_option("--geodesic-calibration-pairs", cfg.calibration_pairs,
         "Number of pairs to sample for auto-calibration")->default_val(50);
+    derep->add_option("--seed", cfg.seed,
+        "Master RNG seed (HNSW, sketching, Nyström anchors, diversity sampling)")->default_val(42);
     derep->add_option("--geodesic-dim", cfg.embedding_dim,
         "GEODESIC embedding dimension (higher = more accuracy)")->default_val(256);
     derep->add_option("--geodesic-kmer-size", cfg.kmer_size,
@@ -100,6 +102,9 @@ Config parse_args(int argc, char** argv) {
 
     derep->add_option("--geodf-output", cfg.geodf_output,
         "Path to write GEODF results file (binary format; empty = disabled)");
+
+    derep->add_option("--grd-output", cfg.grd_output,
+        "Path to write GRD results archive with per-genome embeddings for visualization");
 
     derep->add_option("--lock-output", cfg.lock_output,
         "Write a geodesic.lock provenance file (JSON) alongside the run outputs");
@@ -160,6 +165,54 @@ Config parse_args(int argc, char** argv) {
     update_cmd->add_flag("-q,--quiet", [&cfg](int64_t) { cfg.verbosity = 0; },
         "Quiet output");
 
+    // ── scatter subcommand ─────────────────────────────────────────────────
+    auto* scatter_cmd = app.add_subcommand("scatter",
+        "Partition input TSV for distributed execution across nodes");
+
+    scatter_cmd->add_option("-t,--tax-file", cfg.tax_file,
+        "Input taxonomy file (TSV: accession, taxonomy, file_path)")
+        ->required()
+        ->check(CLI::ExistingFile);
+
+    scatter_cmd->add_option("-n,--partitions", cfg.n_partitions,
+        "Number of partitions (typically = number of worker nodes)")
+        ->required();
+
+    scatter_cmd->add_option("-o,--output-dir", cfg.scatter_dir,
+        "Output directory for partition files and worker script")
+        ->required();
+
+    scatter_cmd->add_option("--rank", cfg.partition_rank,
+        "Taxonomy rank for grouping (g=genus, f=family, s=species)")
+        ->default_val("g");
+
+    scatter_cmd->add_option("--pack", cfg.pack_dir,
+        "Path to genopack archive (passed through to worker commands)");
+
+    scatter_cmd->add_option("--tmp-dir", cfg.tmp_dir,
+        "Temporary directory for workers (default: scatter output dir)")
+        ->default_val("");
+
+    scatter_cmd->add_option("--threads", cfg.threads, "Threads per worker")
+        ->default_val(4);
+
+    // ── gather subcommand ──────────────────────────────────────────────────
+    auto* gather_cmd = app.add_subcommand("gather",
+        "Merge distributed shard results (GRD + TSV) into unified output");
+
+    gather_cmd->add_option("-d,--shard-dir", cfg.gather_dir,
+        "Directory containing shard results (from scatter workers)")
+        ->required()
+        ->check(CLI::ExistingDirectory);
+
+    gather_cmd->add_option("-o,--output", cfg.gather_output,
+        "Output path for merged GRD file")
+        ->required();
+
+    gather_cmd->add_option("-p,--prefix", cfg.prefix,
+        "Prefix for merged TSV output files")
+        ->default_val("merged");
+
     // ── parse ───────────────────────────────────────────────────────────────
     try {
         app.parse(argc, argv);
@@ -171,6 +224,12 @@ Config parse_args(int argc, char** argv) {
         cfg.command = Command::Update;
         if (!update_user_set_workers)
             cfg.workers = 1;
+    } else if (scatter_cmd->parsed()) {
+        cfg.command = Command::Scatter;
+        if (cfg.tmp_dir.empty())
+            cfg.tmp_dir = cfg.scatter_dir / "tmp";
+    } else if (gather_cmd->parsed()) {
+        cfg.command = Command::Gather;
     } else {
         cfg.command = Command::Derep;
     }

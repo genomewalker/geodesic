@@ -7,6 +7,7 @@
 
 namespace derep { class IPackReader; }
 namespace derep { class RunState; }
+namespace grd { class GrdWriter; }
 
 namespace derep {
 
@@ -20,6 +21,7 @@ void process_taxa_parallel(
     const Config& cfg,
     RunState& run_state,
     IPackReader* gpk_reader = nullptr,
-    const std::unordered_map<std::string, GuncQuality>* gunc_scores = nullptr);
+    const std::unordered_map<std::string, GuncQuality>* gunc_scores = nullptr,
+    grd::GrdWriter* grd_writer = nullptr);
 
 } // namespace derep

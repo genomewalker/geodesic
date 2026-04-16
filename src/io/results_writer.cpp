@@ -51,7 +51,7 @@ void ResultsWriter::write_stats(const RunState& state) const {
            "n_outliers_excluded\tn_outliers_retained\tn_failed\tn_embedded\t"
            "n_representatives\trep_fraction\t"
            "mst_p90_edge\tmst_true_max\tani_threshold_used\t"
-           "n_outliers_fragmented\tn_outliers_size\tn_outliers_nn_only\n";
+           "n_outliers_fragmented\tn_outliers_size\tn_outliers_distance\n";
 
     for (const auto& taxon : state.taxa()) {
         if (taxon.result.status == TaxonStatus::FAILED) continue;
@@ -182,7 +182,7 @@ void ResultsWriter::write_outliers(const RunState& state) const {
     std::ofstream out(path);
     if (!out) throw std::runtime_error("Cannot open output file: " + path.string());
 
-    out << "taxonomy\taccession\tnn_outlier\tisolation_score\tkmer_div_zscore\t"
+    out << "taxonomy\taccession\tcategory\tnn_outlier\tisolation_score\tkmer_div_zscore\t"
            "genome_size_zscore\tcentroid_distance\tanomaly_score\t"
            "genome_length_bp\tn_contigs\tmargin_to_threshold\tflag_reason\texcluded\n";
 
@@ -190,6 +190,7 @@ void ResultsWriter::write_outliers(const RunState& state) const {
         for (const auto& c : taxon.outliers) {
             out << taxon.result.taxonomy << '\t'
                 << c.accession << '\t'
+                << c.category << '\t'
                 << c.nn_outlier << '\t'
                 << c.isolation_score << '\t'
                 << c.kmer_div_zscore << '\t'

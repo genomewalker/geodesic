@@ -6,6 +6,7 @@
 
 namespace derep { class IPackReader; }
 namespace derep { class RunState; }
+namespace grd { class GrdWriter; }
 
 namespace derep {
 
@@ -14,13 +15,15 @@ namespace derep {
 // gunc_scores: optional GUNC quality map (accession → GuncQuality); null = no GUNC filtering
 // gpk_reader: if non-null, raw FASTA is loaded from pack instead of NFS reads
 // run_state: if non-null, completed TaxonOutput is pushed for in-memory accumulation
+// grd_writer: if non-null, writes per-genome embeddings + metadata to GRD archive
 TaxonResult process_taxon(
     const Taxon& taxon,
     const Config& cfg,
     int thread_budget,
     const std::unordered_map<std::string, GuncQuality>* gunc_scores = nullptr,
     IPackReader* gpk_reader = nullptr,
-    RunState* run_state = nullptr);
+    RunState* run_state = nullptr,
+    grd::GrdWriter* grd_writer = nullptr);
 
 // Process a batch of tiny taxa (n <= TINY_BATCH_N) in a single thread slot.
 // Returns results in the same order as input.
@@ -29,6 +32,7 @@ std::vector<TaxonResult> process_tiny_batch(
     const Config& cfg,
     const std::unordered_map<std::string, GuncQuality>* gunc_scores = nullptr,
     IPackReader* gpk_reader = nullptr,
-    RunState* run_state = nullptr);
+    RunState* run_state = nullptr,
+    grd::GrdWriter* grd_writer = nullptr);
 
 } // namespace derep
