@@ -213,7 +213,6 @@ void MultiPackReader::visit_sketch_batches(
             [&](size_t local_idx, const genopack::SketchResult& sk) {
                 cb(sorted_gidx[local_idx], sk);
             });
-        archives_[aidx].reader->release_sketches();
     }
 }
 
