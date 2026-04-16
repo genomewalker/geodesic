@@ -1273,7 +1273,7 @@ void GeodesicDerep::build_index_from_gpk_sketches(
         // k pre-probe: determine optimal k from a small sample before loading all N
         // sketches, so we never need a full rebuild on k-switch (maybe_reselect_k).
         // Only runs when the GPK has multiple k values and N is large enough to matter.
-        if (n > 100) {
+        if (n > 100 && !kmer_size_locked_) {
             const int probed_k = probe_kmer_size_(accessions, gpk);
             if (probed_k > 0 && probed_k != cfg_.kmer_size
                     && gpk.has_kmer_size(static_cast<uint32_t>(probed_k))) {
@@ -4209,6 +4209,8 @@ bool GeodesicDerep::maybe_reselect_k(
 
     spdlog::info("GEODESIC: adaptive k: p95_nn={:.4f} → switching k={} → k={}, re-embedding",
                  stats.p95, cfg_.kmer_size, best_k);
+
+    const int prev_k = cfg_.kmer_size;
     cfg_.kmer_size = best_k;
 
     // Reset state that will be rebuilt.
@@ -4222,7 +4224,10 @@ bool GeodesicDerep::maybe_reselect_k(
     buf_cache_bytes_.store(0);
     nystrom_applied_ = false;
 
+    kmer_size_locked_ = true;
     build_index_from_gpk_sketches(gpk_accessions_, gpk_paths_, *gpk_reader_, quality_scores);
+    kmer_size_locked_ = false;
+
     return true;
 }
 

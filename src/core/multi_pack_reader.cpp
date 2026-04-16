@@ -1,6 +1,7 @@
 #include "multi_pack_reader.hpp"
 #include <algorithm>
 #include <filesystem>
+#include <numeric>
 #include <stdexcept>
 #include <spdlog/spdlog.h>
 
@@ -187,22 +188,32 @@ void MultiPackReader::visit_sketch_batches(
         slices[aidx].local_ids.push_back(meta->genome_id);
     }
 
-    // For each archive: decompress SKCH once, extract all requested genomes, release.
-    for (size_t aidx = 0; aidx < archives_.size(); ++aidx) {
+    // For each archive: use sketch_for_ids() which decompresses only the frames
+    // that contain the requested genomes (V3 archives) or falls back to per-genome
+    // lookup (V1/V2 archives). local_ids must be sorted ascending for sketch_for_ids.
+    const size_t n_arch = archives_.size();
+    for (size_t aidx = 0; aidx < n_arch; ++aidx) {
         auto& sl = slices[aidx];
         if (sl.global_idx.empty()) continue;
-        auto& reader = *archives_[aidx].reader;
-        for (size_t j = 0; j < sl.global_idx.size(); ++j) {
-            std::optional<genopack::SketchResult> sk;
-            if (k > 0 && sz > 0) {
-                sk = reader.sketch_for(sl.local_ids[j], k, sz);
-                if (!sk) sk = reader.sketch_for(sl.local_ids[j]);
-            } else {
-                sk = reader.sketch_for(sl.local_ids[j]);
-            }
-            if (sk) cb(sl.global_idx[j], *sk);
+
+        // Sort local_ids ascending; keep global_idx in sync.
+        std::vector<size_t> ord(sl.local_ids.size());
+        std::iota(ord.begin(), ord.end(), 0);
+        std::sort(ord.begin(), ord.end(),
+                  [&](size_t a, size_t b) { return sl.local_ids[a] < sl.local_ids[b]; });
+
+        std::vector<genopack::GenomeId> sorted_ids(sl.local_ids.size());
+        std::vector<size_t>             sorted_gidx(sl.local_ids.size());
+        for (size_t i = 0; i < ord.size(); ++i) {
+            sorted_ids[i]  = sl.local_ids[ord[i]];
+            sorted_gidx[i] = sl.global_idx[ord[i]];
         }
-        reader.release_sketches();
+
+        archives_[aidx].reader->sketch_for_ids(sorted_ids, k, sz,
+            [&](size_t local_idx, const genopack::SketchResult& sk) {
+                cb(sorted_gidx[local_idx], sk);
+            });
+        archives_[aidx].reader->release_sketches();
     }
 }
 

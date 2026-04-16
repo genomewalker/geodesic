@@ -391,6 +391,11 @@ private:
     // Whether Nyström embedding was applied (false → exact Jaccard FPS for small n)
     bool nystrom_applied_ = false;
 
+    // Set by maybe_reselect_k before calling build_index_from_gpk_sketches to
+    // suppress the internal k pre-probe (which would otherwise override the
+    // embedding-space k selection with an OPH-space probe result).
+    bool kmer_size_locked_ = false;
+
     // Canonical lookup: genome_id → row index in embeddings_/store_.
     // Rebuilt after every sort of embeddings_ so that genome_ids (which are opaque
     // identifiers after sorting) are never used as direct array indices.
