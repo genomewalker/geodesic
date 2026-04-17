@@ -3,7 +3,12 @@
 #include <filesystem>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 #include <spdlog/spdlog.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace derep {
 
@@ -22,25 +27,39 @@ MultiPackReader::open_dir(const fs::path& parts_dir) {
     std::sort(gpk_paths.begin(), gpk_paths.end());
 
     auto mp = std::unique_ptr<MultiPackReader>(new MultiPackReader());
-    mp->archives_.reserve(gpk_paths.size());
+    const size_t n_arch = gpk_paths.size();
+    mp->archives_.resize(n_arch);
 
-    for (size_t aidx = 0; aidx < gpk_paths.size(); ++aidx) {
+    // Per-archive accession lists; merged serially after the parallel open so
+    // the shared acc_to_arch_ map stays lock-free. Each archive file is
+    // independent on disk, so open + scan_genome_accessions run concurrently.
+    std::vector<std::vector<std::pair<std::string, uint16_t>>> per_arch_accs(n_arch);
+
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (size_t aidx = 0; aidx < n_arch; ++aidx) {
         ArchiveEntry entry;
         entry.reader = std::make_unique<genopack::ArchiveReader>();
         entry.reader->open(gpk_paths[aidx]);
         entry.has_sketches_flag = entry.reader->has_sketches();
 
         const auto aidx16 = static_cast<uint16_t>(aidx);
+        auto& local = per_arch_accs[aidx];
         entry.reader->scan_genome_accessions(
             [&](std::string_view acc, genopack::GenomeId /*local_id*/) {
-                mp->acc_to_arch_.emplace(std::string(acc), aidx16);
+                local.emplace_back(std::string(acc), aidx16);
             });
 
         spdlog::debug("multi_pack: opened {} ({} genomes)",
-                      gpk_paths[aidx].string(),
-                      mp->acc_to_arch_.size());
-        mp->archives_.push_back(std::move(entry));
+                      gpk_paths[aidx].string(), local.size());
+        mp->archives_[aidx] = std::move(entry);
     }
+
+    size_t total = 0;
+    for (const auto& v : per_arch_accs) total += v.size();
+    mp->acc_to_arch_.reserve(total);
+    for (auto& v : per_arch_accs)
+        for (auto& kv : v)
+            mp->acc_to_arch_.emplace(std::move(kv.first), kv.second);
 
     spdlog::info("multi_pack: {} archives, {} genomes total",
                  mp->archives_.size(), mp->acc_to_arch_.size());
