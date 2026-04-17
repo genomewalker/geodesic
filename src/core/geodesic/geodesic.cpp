@@ -183,6 +183,31 @@ struct GeodesicDerep::HNSWIndex {
         if (!index || !embeddings || embeddings->empty() || k == 0) return {};
 
         const size_t total = embeddings->size();
+
+        // Sparse-filter fast path: exact brute-force top-k over the filter set.
+        // hnswlib's graph is filter-unaware; at filter density d = |filter|/total,
+        // each searchKnn with fixed ef returns ~ef*d accepted hits. For d < 5%
+        // and k = O(|filter|), the retry loop below degenerates into many
+        // full-graph searches, each cheaper than exhaustive but repeated
+        // log2(total/query_k) times and still yielding fewer hits than linear.
+        // A direct O(|filter| * dim) sweep beats it and is deterministic.
+        if (filter && filter->size() * 20 < total) {
+            const size_t d = query.size();
+            std::vector<std::pair<uint64_t, float>> out;
+            out.reserve(filter->size());
+            for (const auto& emb : *embeddings) {
+                if (filter->find(emb.genome_id) == filter->end()) continue;
+                float dot = dot_product_simd(query.data(), emb.vector.data(), d);
+                float inner = std::clamp(dot, -1.0f, 1.0f);
+                float angular_dist = std::acos(inner) / static_cast<float>(M_PI);
+                out.emplace_back(emb.genome_id, angular_dist);
+            }
+            std::sort(out.begin(), out.end(),
+                [](const auto& a, const auto& b) { return a.second < b.second; });
+            if (out.size() > k) out.resize(k);
+            return out;
+        }
+
         // When filtering, over-query to ensure we get k valid results
         size_t query_k = std::min(total, k);
         if (filter) query_k = std::min(total, k * 4);
