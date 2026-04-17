@@ -1291,32 +1291,45 @@ void GeodesicDerep::build_index_from_gpk_sketches(
     // archive's SKCH exactly once before releasing — avoids thrashing the LRU when
     // accessions interleave across multiple archive parts (peak memory unchanged: one
     // archive SKCH decompressed at a time, same as max_hot_archives_=1).
-    size_t hits = 0, misses = 0;
+    size_t misses = 0;
     std::vector<std::string> path_strs(n);
     for (size_t i = 0; i < n; ++i) path_strs[i] = genomes[i].string();
 
-    std::vector<bool> valid(n, false);
+    // uint8_t (not vector<bool>) so distinct-i concurrent writes from the
+    // parallelised sketch_for_ids callback are well-defined.
+    std::vector<uint8_t> valid(n, 0);
 
     // First pass: record which accessions are missing from the archive entirely.
     // visit_sketch_batches silently skips misses; we need to attribute them correctly.
-    std::vector<bool> in_archive(n, false);
+    std::vector<uint8_t> in_archive(n, 0);
     for (size_t i = 0; i < n; ++i) {
         if (gpk.genome_meta_by_accession(accessions[i]))
-            in_archive[i] = true;
+            in_archive[i] = 1;
     }
 
     const uint32_t req_k  = use_param_aware ? static_cast<uint32_t>(cfg_.kmer_size)  : 0;
     const uint32_t req_sz = use_param_aware ? static_cast<uint32_t>(cfg_.sketch_size) : 0;
 
+    // Callback runs CONCURRENTLY under OMP from SkchReader::sketch_for_ids.
+    // Each i is unique → embeddings_[i]/valid[i] writes are race-free.
+    // hits counter is atomic; params observed on first hit published once via flag.
+    std::atomic<size_t> hits_atomic{0};
+    std::atomic<bool>   params_seen{false};
+    uint32_t observed_k = 0, observed_sz = 0;
+    std::mutex params_mu;
+
     gpk.visit_sketch_batches(accessions, req_k, req_sz,
         [&](size_t i, const genopack::SketchResult& sk) {
-            // On first hit, lock in actual params served.
-            if (hits == 0) {
-                cfg_.kmer_size   = static_cast<int>(sk.kmer_size);
-                cfg_.sketch_size = static_cast<int>(sk.sketch_size);
+            if (!params_seen.load(std::memory_order_acquire)) {
+                std::lock_guard<std::mutex> lk(params_mu);
+                if (!params_seen.load(std::memory_order_relaxed)) {
+                    observed_k  = sk.kmer_size;
+                    observed_sz = sk.sketch_size;
+                    params_seen.store(true, std::memory_order_release);
+                }
             }
-            ++hits;
-            valid[i] = true;
+            hits_atomic.fetch_add(1, std::memory_order_relaxed);
+            valid[i] = 1;
             auto& emb = embeddings_[i];
             emb.genome_id = i;
             emb.vector.assign(cfg_.embedding_dim, 0.0f);
@@ -1330,6 +1343,12 @@ void GeodesicDerep::build_index_from_gpk_sketches(
             emb.quality_score = (it != quality_scores.end())
                 ? static_cast<float>(it->second) : 50.0f;
         });
+
+    const size_t hits = hits_atomic.load(std::memory_order_relaxed);
+    if (params_seen.load(std::memory_order_acquire)) {
+        cfg_.kmer_size   = static_cast<int>(observed_k);
+        cfg_.sketch_size = static_cast<int>(observed_sz);
+    }
 
     // Attribute misses: not-in-archive vs found-in-archive-but-no-sketch.
     for (size_t i = 0; i < n; ++i) {
@@ -4146,15 +4165,27 @@ int GeodesicDerep::probe_kmer_size_(const std::vector<std::string>& accessions,
     const uint32_t probe_sz = static_cast<uint32_t>(
         std::min(kProbeBins, static_cast<size_t>(cfg_.sketch_size)));
 
+    // Collect probe accessions, then batch-fetch via visit_sketch_batches so V3
+    // archives can parallelise frame decompression instead of paying one decompress
+    // per call (300× single-threaded frame decompress would dominate setup).
+    std::vector<std::string> probe_accs;
+    probe_accs.reserve(probe_n);
+    for (size_t i = 0; i < probe_n; ++i)
+        probe_accs.push_back(accessions[i * stride]);
+
+    // Pre-size slots so concurrent callback writes (under OMP in sketch_for_ids)
+    // land in distinct indices — no mutex needed.
+    std::vector<std::vector<uint32_t>> sigs_slots(probe_n);
+    std::vector<uint8_t>               sig_valid(probe_n, 0);
+    gpk.visit_sketch_batches(probe_accs, probe_k, probe_sz,
+        [&](size_t i, const genopack::SketchResult& sk) {
+            sigs_slots[i].assign(sk.sig, sk.sig + sk.sketch_size);
+            sig_valid[i] = 1;
+        });
     std::vector<std::vector<uint32_t>> sigs;
     sigs.reserve(probe_n);
-    for (size_t i = 0; i < probe_n; ++i) {
-        auto meta = gpk.genome_meta_by_accession(accessions[i * stride]);
-        if (!meta) continue;
-        auto sk = gpk.sketch_for(meta->genome_id, probe_k, probe_sz);
-        if (!sk) continue;
-        sigs.emplace_back(sk->sig, sk->sig + sk->sketch_size);
-    }
+    for (size_t i = 0; i < probe_n; ++i)
+        if (sig_valid[i]) sigs.push_back(std::move(sigs_slots[i]));
     if (sigs.size() < 10) return 0;
 
     // Brute-force NN Jaccard distance for each probe genome.
