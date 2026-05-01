@@ -42,6 +42,11 @@ struct TaxonOutput {
     std::vector<std::string> representatives;
     std::unordered_map<std::string, double> ani_map;
 
+    std::vector<std::vector<float>>                     rep_embeddings;
+    std::unordered_map<std::string, std::string>        member_to_rep;
+    std::unordered_map<std::string, uint32_t>           rep_cluster_size;
+    int                                                 sketch_kmer_used = 0;
+
     std::vector<OutlierRecord> outliers;
 
     std::vector<Genome> completed_genomes;
@@ -70,6 +75,11 @@ public:
     size_t total_contaminated() const;
 
     const std::vector<TaxonOutput>& taxa() const;
+
+    // Sort taxa_ by taxonomy for deterministic emission order. push() is called from
+    // worker threads in completion order — call this after scheduler.join() and before
+    // any reader (writers, .gpd archive, etc) to make outputs bit-identical across runs.
+    void finalize_sort();
 
 private:
     mutable std::mutex mutex_;

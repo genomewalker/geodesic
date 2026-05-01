@@ -66,6 +66,9 @@ struct Config {
     // GRD output — geodesic results data archive with per-genome embeddings (optional)
     std::filesystem::path grd_output;
 
+    // GPD output — derep archive (.gpd) with per-genome cluster/embedding data (optional)
+    std::filesystem::path gpd_output;
+
     // Lock file input (for 'geodesic update' — path to prior run's lock file)
     std::filesystem::path lock_input;
 

@@ -8,6 +8,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 namespace derep {
 
@@ -76,11 +79,17 @@ public:
         const std::function<void(size_t idx,
                                  const genopack::SketchResult& sk)>& cb) const;
 
+    const float* kmer_profile(genopack::GenomeId virt_id) const override;
+    const float* kmer_profile_by_accession(std::string_view acc) const override;
+
     void release_sketches() const override {
         std::lock_guard<std::mutex> lock(lru_mu_);
         for (auto& a : archives_) a.reader->release_sketches();
         lru_order_.clear();
         lru_pos_.clear();
+#if defined(__GLIBC__)
+        ::malloc_trim(0);
+#endif
     }
     size_t sketch_memory_bytes() const override {
         size_t t = 0;
@@ -88,18 +97,25 @@ public:
         return t;
     }
 
-    size_t n_archives() const { return archives_.size(); }
+    size_t n_archives() const override { return archives_.size(); }
     size_t n_genomes()  const { return acc_to_arch_.size(); }
+
+    uint16_t archive_idx_for_accession(std::string_view acc) const override;
 
 private:
     struct ArchiveEntry {
         std::unique_ptr<genopack::ArchiveReader> reader;
+        std::filesystem::path                    path;
         bool has_sketches_flag = false;
     };
 
     std::vector<ArchiveEntry> archives_;
     // accession → archive_idx (for O(1) routing)
     std::unordered_map<std::string, uint16_t> acc_to_arch_;
+
+    // Per-archive mutex: serialises concurrent visit_sketch_batches calls on the
+    // same archive and guards release_sketches() against concurrent sketch_for_ids.
+    mutable std::vector<std::mutex>                            arch_sketch_mu_;
 
     // LRU eviction: keep at most max_hot_archives_ sketch sections decompressed.
     // front = MRU, back = LRU.
@@ -112,6 +128,9 @@ private:
     // Mark aidx as recently used; evict LRU archives if over budget.
     // Must be called WITHOUT lru_mu_ held (acquires internally).
     void touch_archive_(size_t aidx) const;
+
+    // Drop kernel page-cache for all files in the archive at path p.
+    void fadvise_dontneed_(const std::filesystem::path& p) const noexcept;
 
     static genopack::GenomeId encode_virt(uint16_t aidx, genopack::GenomeId local) noexcept {
         return (static_cast<genopack::GenomeId>(aidx) << 48)

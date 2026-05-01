@@ -106,6 +106,9 @@ Config parse_args(int argc, char** argv) {
     derep->add_option("--grd-output", cfg.grd_output,
         "Path to write GRD results archive with per-genome embeddings for visualization");
 
+    derep->add_option("--emit-gpd", cfg.gpd_output,
+        "Path to write derep archive (.gpd) with per-genome cluster and embedding data");
+
     derep->add_option("--lock-output", cfg.lock_output,
         "Write a geodesic.lock provenance file (JSON) alongside the run outputs");
 

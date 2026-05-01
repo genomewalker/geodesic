@@ -5,19 +5,21 @@
 #include "state/run_state.hpp"
 #include "core/logging.hpp"
 #include "core/types.hpp"
-#include "core/sketch/minhash.hpp"
 #include "core/pack_reader.hpp"
 #include "core/multi_pack_reader.hpp"
+#include "core/preloaded_pack_reader.hpp"
+#include "core/kmer_probe.hpp"
 #include "taxonomy/normalize.hpp"
 #include "db/geodf/geodf_writer.hpp"
 #include "db/geodf/geodf_reader.hpp"
 #include "db/grd/grd_writer.hpp"
 #include "db/taxdb/ncbi_taxdb.hpp"
 #include <genopack/archive.hpp>
-#include "io/gz_reader.hpp"
 #include "io/lock_writer.hpp"
 #include "io/report_writer.hpp"
 #include "io/results_writer.hpp"
+#include "derep/derep_archive.hpp"
+#include <genopack/archive_set_reader.hpp>
 #include "io/tsv_reader.hpp"
 
 #include <BS_thread_pool.hpp>
@@ -29,9 +31,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <unistd.h>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -173,139 +177,124 @@ void process_taxa_parallel(
     const int total_budget = cfg.workers * cfg.threads;
     BS::thread_pool pool(static_cast<BS::concurrency_t>(total_budget));
 
-    std::vector<int> taxon_threads(taxa.size(), 1);
+    // Single-queue scheduler: absolute launch-width bands, pre-sorted desc by size,
+    // first-fit backfill. Avoids head-of-line blocking and serial-phase starvation.
+    auto launch_band = [total_budget](size_t sz) -> int {
+        int t;
+        if      (sz <=   500) t = 1;
+        else if (sz <=  5000) t = 4;
+        else if (sz <= 20000) t = 8;
+        else                  t = 12;
+        return std::min(t, total_budget);
+    };
+
+    struct ReadyTask { size_t idx; int launch; size_t size; };
+    std::vector<ReadyTask> tasks;
+    tasks.reserve(taxa.size());
+    for (size_t i = 0; i < taxa.size(); ++i)
+        tasks.push_back({i, launch_band(taxa[i].size()), taxa[i].size()});
+    std::sort(tasks.begin(), tasks.end(),
+              [](const ReadyTask& a, const ReadyTask& b) { return a.size > b.size; });
     {
-        const size_t n = taxa.size();
-        if (n >= 50) {
-            std::vector<size_t> sizes(n);
-            for (size_t i = 0; i < n; ++i) sizes[i] = taxa[i].size();
-            std::vector<size_t> sorted_sizes = sizes;
-            std::sort(sorted_sizes.begin(), sorted_sizes.end());
-            const size_t p25 = sorted_sizes[n * 25 / 100];
-            const size_t p75 = sorted_sizes[n * 75 / 100];
-            const size_t p95 = sorted_sizes[n * 95 / 100];
-            const int t_giant  = std::max(12, total_budget / 2);
-            const int t_large  = std::max(1, total_budget / 6);
-            const int t_medium = std::max(1, total_budget / 12);
-            size_t cnt_giant = 0, cnt_large = 0, cnt_medium = 0, cnt_small = 0;
-            for (size_t i = 0; i < n; ++i) {
-                if      (sizes[i] >= p95) { taxon_threads[i] = t_giant;  ++cnt_giant; }
-                else if (sizes[i] >= p75) { taxon_threads[i] = t_large;  ++cnt_large; }
-                else if (sizes[i] >= p25) { taxon_threads[i] = t_medium; ++cnt_medium; }
-                else                      { taxon_threads[i] = 1;        ++cnt_small; }
-            }
-            spdlog::info(
-                "Execution plan: budget={} | giant={} ({}t, ~{} concurrent) | large={} ({}t) | medium={} ({}t) | small={} (1t)",
-                total_budget, cnt_giant, t_giant, total_budget / t_giant,
-                cnt_large, t_large, cnt_medium, t_medium, cnt_small);
-        } else {
-            size_t large_genomes = 0;
-            for (size_t i = 0; i < n; ++i)
-                if (taxa[i].size() > 10)
-                    large_genomes += taxa[i].size();
-            if (large_genomes > 0) {
-                for (size_t i = 0; i < n; ++i) {
-                    if (taxa[i].size() <= 10) continue;
-                    taxon_threads[i] = std::max(1, static_cast<int>(std::round(
-                        static_cast<double>(total_budget) *
-                        static_cast<double>(taxa[i].size()) /
-                        static_cast<double>(large_genomes))));
-                }
-            } else {
-                for (size_t i = 0; i < n; ++i) taxon_threads[i] = total_budget;
-            }
-            spdlog::info("Execution plan (proportional, budget={}, {} taxa):",
-                         total_budget, n);
-            for (size_t i = 0; i < n; ++i)
-                spdlog::info("  [{}] {} genomes → {} threads",
-                             i, taxa[i].size(), taxon_threads[i]);
+        size_t c1 = 0, c4 = 0, c8 = 0, c12 = 0;
+        for (const auto& t : tasks) {
+            if      (t.launch <= 1) ++c1;
+            else if (t.launch <= 4) ++c4;
+            else if (t.launch <= 8) ++c8;
+            else                    ++c12;
         }
+        spdlog::info(
+            "Scheduler (single-queue, budget={}): 1t={} 4t={} 8t={} 12t+={}",
+            total_budget, c1, c4, c8, c12);
     }
 
     int budget_avail = total_budget;
     std::mutex budget_mtx;
     std::condition_variable budget_cv;
-
-    auto budget_acquire = [&](int desired) -> int {
-        std::unique_lock lock(budget_mtx);
-        budget_cv.wait(lock, [&] { return budget_avail > 0; });
-        int taken = std::min(budget_avail, desired);
-        budget_avail -= taken;
-        return taken;
-    };
     auto budget_release = [&](int n) {
         { std::lock_guard lock(budget_mtx); budget_avail += n; }
-        budget_cv.notify_one();
+        budget_cv.notify_all();
     };
 
     std::queue<TaxonResult> done_queue;
     std::mutex done_mutex;
     std::condition_variable done_cv;
 
-    static constexpr size_t TINY_SCHED_THRESHOLD = 100;
-    static constexpr size_t TINY_BATCH_SIZE = 200;
-
-    std::vector<size_t> large_indices;
-    std::vector<std::vector<size_t>> tiny_batches;
-    {
-        std::vector<size_t> tiny_indices;
-        for (size_t i = 0; i < taxa.size(); ++i) {
-            if (taxa[i].size() > TINY_SCHED_THRESHOLD)
-                large_indices.push_back(i);
-            else
-                tiny_indices.push_back(i);
-        }
-        for (size_t off = 0; off < tiny_indices.size(); off += TINY_BATCH_SIZE) {
-            size_t end = std::min(off + TINY_BATCH_SIZE, tiny_indices.size());
-            tiny_batches.emplace_back(tiny_indices.begin() + off,
-                                      tiny_indices.begin() + end);
-        }
-        spdlog::info("Scheduler: {} large taxa (individual), {} tiny taxa in {} batches",
-                     large_indices.size(), tiny_indices.size(), tiny_batches.size());
-    }
+    std::vector<char> dispatched(tasks.size(), 0);
+    static constexpr size_t BACKFILL_WINDOW = 64;
 
     std::thread scheduler([&] {
-        for (size_t i : large_indices) {
-            int desired  = taxon_threads[i];
-            int acquired = budget_acquire(desired);
+        size_t head = 0;
+        size_t remaining = tasks.size();
+        while (remaining > 0) {
+            while (head < tasks.size() && dispatched[head]) ++head;
+            if (head >= tasks.size()) break;
+
+            std::unique_lock lock(budget_mtx);
+            budget_cv.wait(lock, [&] { return budget_avail > 0; });
+
+            ssize_t pick = -1;
+            if (tasks[head].launch <= budget_avail) {
+                pick = static_cast<ssize_t>(head);
+            } else {
+                size_t limit = std::min(head + BACKFILL_WINDOW, tasks.size());
+                for (size_t j = head + 1; j < limit; ++j) {
+                    if (!dispatched[j] && tasks[j].launch <= budget_avail) {
+                        pick = static_cast<ssize_t>(j);
+                        break;
+                    }
+                }
+                if (pick < 0) {
+                    for (size_t j = limit; j < tasks.size(); ++j) {
+                        if (!dispatched[j] && tasks[j].launch <= budget_avail) {
+                            pick = static_cast<ssize_t>(j);
+                            break;
+                        }
+                    }
+                }
+                if (pick < 0) {
+                    int prev_avail = budget_avail;
+                    budget_cv.wait(lock, [&] { return budget_avail > prev_avail; });
+                    continue;
+                }
+            }
+
+            int acquired = tasks[pick].launch;
+            budget_avail -= acquired;
+            dispatched[pick] = 1;
+            --remaining;
+            size_t ti = tasks[pick].idx;
+            lock.unlock();
+
             pool.detach_task(
-                [&taxa, i, &cfg, gunc_scores_ptr,
+                [&taxa, ti, &cfg, gunc_scores_ptr,
                  gpk_reader_ptr, run_state_ptr, grd_writer_ptr,
                  &done_queue, &done_mutex, &done_cv,
                  &budget_release, acquired] {
-                    auto result = process_taxon(taxa[i], cfg, acquired,
+                    // Mid-taxon release: shared int so we know how much is still
+                    // held when the task ends (callback may or may not fire).
+                    auto held = std::make_shared<int>(acquired);
+                    std::function<void()> on_serial = nullptr;
+                    if (acquired > 1) {
+                        on_serial = [held, &budget_release, acquired]() {
+                            int extra = acquired - 1;
+                            if (*held >= acquired) {
+                                *held = 1;
+                                budget_release(extra);
+                            }
+                        };
+                    }
+                    auto result = process_taxon(taxa[ti], cfg, acquired,
                                                gunc_scores_ptr,
                                                gpk_reader_ptr, run_state_ptr,
-                                               grd_writer_ptr);
+                                               grd_writer_ptr,
+                                               std::move(on_serial));
                     {
-                        std::lock_guard lock(done_mutex);
+                        std::lock_guard dlock(done_mutex);
                         done_queue.push(std::move(result));
                     }
                     done_cv.notify_one();
-                    budget_release(acquired);
-                });
-        }
-        for (const auto& batch_indices : tiny_batches) {
-            budget_acquire(1);
-            std::vector<const Taxon*> batch_taxa;
-            batch_taxa.reserve(batch_indices.size());
-            for (size_t i : batch_indices)
-                batch_taxa.push_back(&taxa[i]);
-            pool.detach_task(
-                [batch_taxa, &cfg,
-                 gpk_reader_ptr, gunc_scores_ptr, run_state_ptr, grd_writer_ptr,
-                 &done_queue, &done_mutex, &done_cv,
-                 &budget_release] {
-                    auto results = process_tiny_batch(batch_taxa, cfg,
-                                                      gunc_scores_ptr, gpk_reader_ptr,
-                                                      run_state_ptr, grd_writer_ptr);
-                    {
-                        std::lock_guard lock(done_mutex);
-                        for (auto& r : results)
-                            done_queue.push(std::move(r));
-                    }
-                    done_cv.notify_all();
-                    budget_release(1);
+                    budget_release(*held);
                 });
         }
     });
@@ -392,6 +381,10 @@ void process_taxa_parallel(
     }
 
     scheduler.join();
+
+    // Sort taxa by taxonomy for deterministic emission across runs (workers push
+    // in completion order). Must be done after join() and before any reader.
+    run_state.finalize_sort();
 
     // Release SKCH buffers now that all taxa are done with sketch loading.
     if (gpk_reader_ptr) {
@@ -534,6 +527,7 @@ int run_pipeline(Config& cfg) {
                        taxa.end());
             spdlog::info("genopack filter: {}/{} genomes in taxa after archive filter",
                          n_after, n_before);
+
         } catch (const std::exception& e) {
             spdlog::warn("Failed to open genopack archive at {}: {} — proceeding without",
                          cfg.pack_dir->string(), e.what());
@@ -548,10 +542,149 @@ int run_pipeline(Config& cfg) {
         spdlog::info("GRD output: {}", cfg.grd_output.string());
     }
 
-    // 10. Parallel processing
-    process_taxa_parallel(taxa, cfg, run_state,
-                          gpk_reader.get(), gunc_scores_ptr,
-                          grd_writer.get());
+    // 10. Parallel processing — bucketed by archive, preloading all available
+    //     k's per archive so adaptive k (maybe_reselect_k) stays RAM-resident.
+    //     Set GEODESIC_NO_PRELOAD=1 to bypass.
+    const char* no_pre = std::getenv("GEODESIC_NO_PRELOAD");
+    const bool bypass_preload = (no_pre && no_pre[0] == '1');
+
+    if (bypass_preload || !gpk_reader) {
+        process_taxa_parallel(taxa, cfg, run_state,
+                              gpk_reader.get(), gunc_scores_ptr,
+                              grd_writer.get());
+    } else {
+        auto wrapped = std::make_unique<PreloadedPackReader>(std::move(gpk_reader));
+        IPackReader* raw_inner = wrapped->inner();
+
+        uint32_t stored_sz = raw_inner->sketch_sketch_size();
+        uint32_t pre_sz = static_cast<uint32_t>(cfg.sketch_size);
+        if (stored_sz > 0 && pre_sz > stored_sz) pre_sz = stored_sz;
+
+        const std::vector<uint32_t> avail_ks = raw_inner->available_kmer_sizes();
+
+        struct ArchBucket {
+            std::vector<size_t> taxa_indices;
+            std::vector<std::string> accs;
+            size_t total_genomes = 0;
+        };
+        std::map<uint16_t, ArchBucket> per_arch;
+        ArchBucket cross;
+
+        for (size_t ti = 0; ti < taxa.size(); ++ti) {
+            const auto& tx = taxa[ti];
+            std::unordered_set<uint16_t> arcs;
+            for (const auto& g : tx.genomes) {
+                uint16_t a = raw_inner->archive_idx_for_accession(g.accession);
+                if (a != UINT16_MAX) arcs.insert(a);
+            }
+            if (arcs.size() == 1) {
+                auto& b = per_arch[*arcs.begin()];
+                b.taxa_indices.push_back(ti);
+                for (const auto& g : tx.genomes) b.accs.push_back(g.accession);
+                b.total_genomes += tx.genomes.size();
+            } else {
+                for (const auto& g : tx.genomes) cross.accs.push_back(g.accession);
+                cross.taxa_indices.push_back(ti);
+                cross.total_genomes += tx.genomes.size();
+            }
+        }
+
+        std::vector<std::pair<uint16_t, ArchBucket>> ordered(
+            std::make_move_iterator(per_arch.begin()),
+            std::make_move_iterator(per_arch.end()));
+        std::sort(ordered.begin(), ordered.end(),
+                  [](const auto& a, const auto& b){ return a.second.total_genomes > b.second.total_genomes; });
+
+        spdlog::info("BUCKET: {} per-archive buckets ({} cross-archive taxa, {} genomes); ks=[{}] sz={}",
+                     ordered.size(), cross.taxa_indices.size(), cross.total_genomes,
+                     [&]{ std::string s; for (auto k : avail_ks) { if(!s.empty()) s+=','; s+=std::to_string(k);} return s; }(),
+                     pre_sz);
+
+        // Wave-budgeted bucket processing: split each per-archive bucket into
+        // memory-budgeted waves so peak RSS stays bounded regardless of how
+        // many genomes the bucket contains. Taxa are kept atomic — never
+        // split across waves — so process_taxa_parallel sees complete taxa.
+        //
+        // Budget: GEODESIC_BUCKET_RAM_GB caps the resident sketch buffers per
+        //         wave (default 64 GB; tune down on smaller nodes).
+        const char* env_budget = std::getenv("GEODESIC_BUCKET_RAM_GB");
+        const uint64_t budget_gb = (env_budget && *env_budget)
+            ? std::strtoull(env_budget, nullptr, 10)
+            : 64ull;
+        // GEODESIC_BUCKET_RAM_MB overrides for fine-grained testing.
+        const char* env_budget_mb = std::getenv("GEODESIC_BUCKET_RAM_MB");
+        uint64_t budget_bytes = (env_budget_mb && *env_budget_mb)
+            ? (std::strtoull(env_budget_mb, nullptr, 10) << 20)
+            : (budget_gb << 30);
+        if (budget_bytes < (1ull << 20)) budget_bytes = 1ull << 30;  // 1 GB floor on missing/zero
+        const uint64_t mask_words   = (pre_sz + 63u) / 64u;
+        const uint64_t per_genome_bytes = static_cast<uint64_t>(avail_ks.size())
+            * (static_cast<uint64_t>(pre_sz) * 2ull * sizeof(uint16_t)   // sigs+sig2s
+               + mask_words * sizeof(uint64_t));                          // mask
+        const size_t wave_max_genomes = std::max<size_t>(
+            1, static_cast<size_t>(budget_bytes / std::max<uint64_t>(1, per_genome_bytes)));
+
+        spdlog::info("BUCKET wave budget: {} MB → {} genomes/wave ({} bytes/genome × {} ks)",
+                     budget_bytes >> 20, wave_max_genomes,
+                     per_genome_bytes / avail_ks.size(), avail_ks.size());
+
+        for (auto& [arch, b] : ordered) {
+            // Pack taxa into waves preserving original order (disk locality).
+            struct Wave {
+                std::vector<size_t> taxa_indices;
+                std::vector<std::string> accs;
+                size_t total_genomes = 0;
+            };
+            std::vector<Wave> waves;
+            Wave cur;
+            for (size_t idx : b.taxa_indices) {
+                const auto& tx = taxa[idx];
+                const size_t tx_sz = tx.genomes.size();
+                if (!cur.taxa_indices.empty()
+                    && cur.total_genomes + tx_sz > wave_max_genomes) {
+                    waves.push_back(std::move(cur));
+                    cur = Wave{};
+                }
+                cur.taxa_indices.push_back(idx);
+                for (const auto& g : tx.genomes) cur.accs.push_back(g.accession);
+                cur.total_genomes += tx_sz;
+            }
+            if (!cur.taxa_indices.empty()) waves.push_back(std::move(cur));
+
+            spdlog::info("BUCKET arch={}: {} taxa, {} genomes → {} wave(s)",
+                         arch, b.taxa_indices.size(), b.total_genomes, waves.size());
+
+            for (size_t wi = 0; wi < waves.size(); ++wi) {
+                auto& w = waves[wi];
+                spdlog::info("BUCKET arch={} wave {}/{}: {} taxa, {} genomes — preloading all ks",
+                             arch, wi + 1, waves.size(),
+                             w.taxa_indices.size(), w.total_genomes);
+                try {
+                    wrapped->preload_multi(w.accs, avail_ks, pre_sz, cfg.threads);
+                } catch (const std::exception& e) {
+                    spdlog::warn("BUCKET preload failed: {} — processing without preload", e.what());
+                }
+                std::vector<Taxon> sub_taxa;
+                sub_taxa.reserve(w.taxa_indices.size());
+                for (size_t idx : w.taxa_indices) sub_taxa.push_back(taxa[idx]);
+                process_taxa_parallel(sub_taxa, cfg, run_state, wrapped.get(),
+                                      gunc_scores_ptr, grd_writer.get());
+                wrapped->release_sketches();
+            }
+        }
+
+        if (!cross.taxa_indices.empty()) {
+            spdlog::info("BUCKET cross-archive: {} taxa, {} genomes — processing via inner reader (no preload)",
+                         cross.taxa_indices.size(), cross.total_genomes);
+            std::vector<Taxon> cross_taxa;
+            cross_taxa.reserve(cross.taxa_indices.size());
+            for (size_t idx : cross.taxa_indices) cross_taxa.push_back(taxa[idx]);
+            process_taxa_parallel(cross_taxa, cfg, run_state, raw_inner,
+                                  gunc_scores_ptr, grd_writer.get());
+        }
+
+        gpk_reader = std::move(wrapped);
+    }
 
     // 11. Summary and output
     ResultsWriter writer(results_dir, cfg.prefix);
@@ -619,6 +752,142 @@ int run_pipeline(Config& cfg) {
             grd_writer->close();
         } catch (const std::exception& e) {
             spdlog::warn("GRD finalize failed: {}", e.what());
+        }
+    }
+
+    // Emit derep archive (.gpd) — best-effort; TSVs already written, run still succeeds on failure.
+    if (!cfg.gpd_output.empty()) {
+        if (!cfg.pack_dir.has_value()) {
+            spdlog::warn("--emit-gpd requires --pack; skipping .gpd emission");
+        } else {
+            try {
+                fs::path gpd_path = cfg.gpd_output;
+
+                genopack::ArchiveSetReader src;
+                src.open(*cfg.pack_dir);
+
+                geodesic::DerepArchiveBuilderConfig gcfg;
+                gcfg.output_path      = gpd_path;
+                gcfg.embedding_dim    = static_cast<uint16_t>(cfg.embedding_dim);
+                gcfg.embedding_dtype  = 1; // f16
+                gcfg.emit_armp        = true;
+                gcfg.zstd_level       = 6;
+                gcfg.geodesic_version = "geodesic 1.0.0";
+
+                geodesic::DerepArchiveBuilder ab(gcfg);
+                ab.set_source_pack(src);
+                ab.set_params({static_cast<uint8_t>(cfg.kmer_size)},
+                              static_cast<uint32_t>(cfg.sketch_size),
+                              cfg.seed, cfg.seed + 1,
+                              static_cast<float>(cfg.ani_threshold / 100.0));
+
+                auto f32_to_f16 = [](float fv) -> uint16_t {
+                    uint32_t f;
+                    std::memcpy(&f, &fv, 4);
+                    uint32_t sign = (f >> 16) & 0x8000u;
+                    int32_t  exp  = static_cast<int32_t>((f >> 23) & 0xFF) - 127 + 15;
+                    uint32_t mant = f & 0x7FFFFFu;
+                    if (exp <= 0) {
+                        if (exp < -10) return static_cast<uint16_t>(sign);
+                        mant |= 0x800000u;
+                        uint32_t shift = static_cast<uint32_t>(14 - exp);
+                        uint32_t halfm = mant >> shift;
+                        if ((mant >> (shift - 1)) & 1) ++halfm;
+                        return static_cast<uint16_t>(sign | halfm);
+                    }
+                    if (exp >= 31) return static_cast<uint16_t>(sign | 0x7C00u);
+                    uint32_t out = sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13);
+                    if (mant & 0x1000u) ++out;
+                    return static_cast<uint16_t>(out);
+                };
+
+                auto get_locator = [&](std::string_view acc) -> uint64_t {
+                    if (!gpk_reader) return 0ULL;
+                    auto m = gpk_reader->genome_meta_by_accession(acc);
+                    return m ? static_cast<uint64_t>(m->genome_id) : 0ULL;
+                };
+
+                std::unordered_set<std::string> excluded_accs;
+                for (const auto& taxon : run_state.taxa()) {
+                    for (const auto& o : taxon.outliers)
+                        if (o.excluded) excluded_accs.insert(o.accession);
+                    for (const auto& f : taxon.failed_genomes)
+                        excluded_accs.insert(f.accession);
+                }
+
+                std::vector<uint16_t> emb_f16(cfg.embedding_dim, 0);
+                size_t n_reps_total = 0, n_genomes_total = 0;
+
+                for (const auto& taxon : run_state.taxa()) {
+                    if (taxon.result.status == TaxonStatus::FAILED) continue;
+
+                    const std::unordered_set<std::string> rep_set(
+                        taxon.representatives.begin(), taxon.representatives.end());
+                    std::unordered_map<std::string, size_t> rep_idx;
+                    rep_idx.reserve(taxon.representatives.size());
+                    for (size_t i = 0; i < taxon.representatives.size(); ++i)
+                        rep_idx[taxon.representatives[i]] = i;
+
+                    const uint16_t kmer_used =
+                        taxon.sketch_kmer_used > 0
+                            ? static_cast<uint16_t>(taxon.sketch_kmer_used)
+                            : static_cast<uint16_t>(cfg.kmer_size);
+
+                    for (const auto& acc : taxon.all_accessions) {
+                        const uint64_t loc = get_locator(acc);
+                        if (excluded_accs.count(acc)) {
+                            ab.add(acc,
+                                   geodesic::DerepArchiveBuilder::Kind::Unclustered,
+                                   {}, loc, kmer_used, 0, nullptr);
+                            ++n_genomes_total;
+                            continue;
+                        }
+                        auto rit = rep_idx.find(acc);
+                        if (rit != rep_idx.end()) {
+                            const auto& vec = (rit->second < taxon.rep_embeddings.size())
+                                ? taxon.rep_embeddings[rit->second]
+                                : std::vector<float>();
+                            for (int d = 0; d < cfg.embedding_dim; ++d) {
+                                float fv = (d < static_cast<int>(vec.size())) ? vec[d] : 0.0f;
+                                emb_f16[d] = f32_to_f16(fv);
+                            }
+                            uint32_t cs = 1;
+                            auto csit = taxon.rep_cluster_size.find(acc);
+                            if (csit != taxon.rep_cluster_size.end()) cs = csit->second;
+                            ab.add(acc,
+                                   geodesic::DerepArchiveBuilder::Kind::Representative,
+                                   acc, loc, kmer_used, cs, emb_f16.data());
+                            ++n_reps_total;
+                            ++n_genomes_total;
+                        } else {
+                            std::string rep_acc;
+                            auto mit = taxon.member_to_rep.find(acc);
+                            if (mit != taxon.member_to_rep.end()) {
+                                rep_acc = mit->second;
+                            } else if (!taxon.representatives.empty()) {
+                                rep_acc = taxon.representatives.front();
+                            }
+                            if (rep_acc.empty()) {
+                                ab.add(acc,
+                                       geodesic::DerepArchiveBuilder::Kind::Unclustered,
+                                       {}, loc, kmer_used, 0, nullptr);
+                            } else {
+                                ab.add(acc,
+                                       geodesic::DerepArchiveBuilder::Kind::Member,
+                                       rep_acc, loc, kmer_used, 0, nullptr);
+                            }
+                            ++n_genomes_total;
+                        }
+                    }
+                }
+
+                ab.finalize();
+                spdlog::info("[info] wrote derep archive: {} (n_reps={}, n_genomes={}, dim={})",
+                             gpd_path.string(), n_reps_total, n_genomes_total,
+                             static_cast<int>(cfg.embedding_dim));
+            } catch (const std::exception& e) {
+                spdlog::warn("GPD emission failed: {} — TSV outputs unaffected", e.what());
+            }
         }
     }
 

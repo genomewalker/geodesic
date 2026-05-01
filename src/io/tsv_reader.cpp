@@ -96,11 +96,11 @@ std::vector<GenomeRow> read_genomes_tsv(const std::filesystem::path& path,
 
         if (col_acc < 0) col_acc = 0;
         if (col_tax < 0) col_tax = 1;
-        if (col_file < 0) col_file = 2;
+        // col_file stays -1 if the header has no file column (pack-only TSV)
     } else {
         col_acc = 0;
         col_tax = 1;
-        col_file = 2;
+        col_file = 2;  // positional: backward compat with 3-column TSVs
     }
 
     std::vector<GenomeRow> rows;
@@ -115,17 +115,19 @@ std::vector<GenomeRow> read_genomes_tsv(const std::filesystem::path& path,
             for (auto& f : fields) f = trim(f);
         }
 
-        int max_col = std::max({col_acc, col_tax, col_file});
-        if (static_cast<int>(fields.size()) <= max_col) {
+        int req_col = std::max(col_acc, col_tax);
+        if (col_file >= 0) req_col = std::max(req_col, col_file);
+        if (static_cast<int>(fields.size()) <= req_col) {
             spdlog::warn("{}:{}: expected at least {} fields, got {}",
-                         path.string(), line_num, max_col + 1, fields.size());
+                         path.string(), line_num, req_col + 1, fields.size());
             continue;
         }
 
         GenomeRow row;
         row.accession = std::move(fields[col_acc]);
         row.taxonomy = std::move(fields[col_tax]);
-        row.file_path = std::move(fields[col_file]);
+        if (col_file >= 0 && col_file < static_cast<int>(fields.size()))
+            row.file_path = std::move(fields[col_file]);
 
         if (opts.strict) {
             if (!seen.insert(row.accession).second) {

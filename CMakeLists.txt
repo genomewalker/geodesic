@@ -111,6 +111,15 @@ FetchContent_MakeAvailable(Eigen3)
 find_package(Zstd MODULE QUIET)
 find_package(ZLIB REQUIRED)
 
+# xxhash — required by derep_archive (accession_set_hash, ARMP)
+find_path(Xxhash_INCLUDE_DIR xxhash.h
+    HINTS /usr/local/include /usr/include
+          /maps/projects/fernandezguerra/apps/opt/conda/envs/bioinfo/include)
+if(NOT Xxhash_INCLUDE_DIR)
+    message(FATAL_ERROR "xxhash.h not found. Install xxhash or set Xxhash_INCLUDE_DIR.")
+endif()
+message(STATUS "xxhash include: ${Xxhash_INCLUDE_DIR}")
+
 # libdeflate — required by genopack's gzip decompression path
 find_library(LIBDEFLATE_LIBRARY NAMES deflate libdeflate
     HINTS "${GENOPACK_INCLUDE_DIR}/../.." ENV CONDA_PREFIX
@@ -127,8 +136,6 @@ add_executable(geodesic
     src/pipeline.cpp
     src/update.cpp
     src/io/tsv_reader.cpp
-    src/io/fasta_reader.cpp
-    src/io/gz_reader.cpp
     src/io/lock_writer.cpp
     src/io/results_writer.cpp
     src/io/report_writer.cpp
@@ -140,15 +147,14 @@ add_executable(geodesic
     src/taxonomy/partition.cpp
     src/db/taxdb/ncbi_taxdb.cpp
     src/core/subprocess.cpp
-    src/core/genome_cache.cpp
     src/core/multi_pack_reader.cpp
+    src/core/kmer_probe.cpp
+    src/core/preloaded_pack_reader.cpp
     src/taxonomy/normalize.cpp
-    src/core/similarity/similarity_base.cpp
-    src/core/similarity/skani.cpp
-    src/core/sketch/minhash.cpp
     src/core/geodesic/geodesic.cpp
     src/parallel/taxon_processor.cpp
     src/state/run_state.cpp
+    src/derep/derep_archive.cpp
 )
 
 target_include_directories(geodesic PRIVATE
@@ -158,6 +164,7 @@ target_include_directories(geodesic PRIVATE
     "${rapidgzip_SOURCE_DIR}/src"
     "${eigen3_SOURCE_DIR}"
     "${GENOPACK_INCLUDE_DIR}"
+    "${Xxhash_INCLUDE_DIR}"
 )
 if(Zstd_FOUND)
     target_include_directories(geodesic PRIVATE "${Zstd_INCLUDE_DIRS}")

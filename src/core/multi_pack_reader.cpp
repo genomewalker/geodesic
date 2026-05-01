@@ -1,8 +1,10 @@
 #include "multi_pack_reader.hpp"
 #include <algorithm>
+#include <fcntl.h>
 #include <filesystem>
 #include <numeric>
 #include <stdexcept>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 #include <spdlog/spdlog.h>
@@ -29,17 +31,19 @@ MultiPackReader::open_dir(const fs::path& parts_dir) {
     auto mp = std::unique_ptr<MultiPackReader>(new MultiPackReader());
     const size_t n_arch = gpk_paths.size();
     mp->archives_.resize(n_arch);
+    mp->arch_sketch_mu_ = std::vector<std::mutex>(n_arch);
 
     // Per-archive accession lists; merged serially after the parallel open so
     // the shared acc_to_arch_ map stays lock-free. Each archive file is
     // independent on disk, so open + scan_genome_accessions run concurrently.
     std::vector<std::vector<std::pair<std::string, uint16_t>>> per_arch_accs(n_arch);
 
-    #pragma omp parallel for schedule(dynamic, 1)
+    #pragma omp parallel for schedule(dynamic, 1) num_threads(static_cast<int>(n_arch))
     for (size_t aidx = 0; aidx < n_arch; ++aidx) {
         ArchiveEntry entry;
         entry.reader = std::make_unique<genopack::ArchiveReader>();
         entry.reader->open(gpk_paths[aidx]);
+        entry.path              = gpk_paths[aidx];
         entry.has_sketches_flag = entry.reader->has_sketches();
 
         const auto aidx16 = static_cast<uint16_t>(aidx);
@@ -88,6 +92,12 @@ MultiPackReader::genome_meta_by_accession(std::string_view acc) const {
     if (!meta) return std::nullopt;
     meta->genome_id = encode_virt(aidx, meta->genome_id);
     return meta;
+}
+
+uint16_t MultiPackReader::archive_idx_for_accession(std::string_view acc) const {
+    auto it = acc_to_arch_.find(std::string(acc));
+    if (it == acc_to_arch_.end()) return UINT16_MAX;
+    return it->second;
 }
 
 bool MultiPackReader::has_sketches() const {
@@ -149,6 +159,18 @@ uint32_t MultiPackReader::sketch_sketch_size() const {
         if (sz > 0) return sz;
     }
     return 0;
+}
+
+const float* MultiPackReader::kmer_profile(genopack::GenomeId virt_id) const {
+    auto [aidx, local_id] = decode_virt(virt_id);
+    if (aidx >= archives_.size()) return nullptr;
+    return archives_[aidx].reader->kmer_profile(local_id);
+}
+
+const float* MultiPackReader::kmer_profile_by_accession(std::string_view acc) const {
+    auto it = acc_to_arch_.find(std::string(acc));
+    if (it == acc_to_arch_.end()) return nullptr;
+    return archives_[it->second].reader->kmer_profile_by_accession(acc);
 }
 
 void MultiPackReader::visit_shard_batches(
@@ -228,10 +250,31 @@ void MultiPackReader::visit_sketch_batches(
             sorted_gidx[i] = sl.global_idx[ord[i]];
         }
 
-        archives_[aidx].reader->sketch_for_ids(sorted_ids, k, sz,
-            [&](size_t local_idx, const genopack::SketchResult& sk) {
-                cb(sorted_gidx[local_idx], sk);
-            });
+        {
+            std::lock_guard<std::mutex> lk(arch_sketch_mu_[aidx]);
+            archives_[aidx].reader->sketch_for_ids(sorted_ids, k, sz,
+                [&](size_t local_idx, const genopack::SketchResult& sk) {
+                    cb(sorted_gidx[local_idx], sk);
+                });
+            archives_[aidx].reader->release_sketches();
+            fadvise_dontneed_(archives_[aidx].path);
+        }
+    }
+}
+
+void MultiPackReader::fadvise_dontneed_(const fs::path& p) const noexcept {
+    auto advise_file = [](const fs::path& fp) noexcept {
+        int fd = ::open(fp.c_str(), O_RDONLY);
+        if (fd < 0) return;
+        ::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+        ::close(fd);
+    };
+    std::error_code ec;
+    if (fs::is_directory(p, ec)) {
+        for (const auto& e : fs::directory_iterator(p, ec))
+            if (e.is_regular_file()) advise_file(e.path());
+    } else {
+        advise_file(p);
     }
 }
 

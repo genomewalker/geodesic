@@ -1,5 +1,4 @@
 #include "core/geodesic/geodesic.hpp"
-#include "core/sketch/minhash.hpp"
 #include "core/progress.hpp"
 #include "core/logging.hpp"
 #include "core/pack_reader.hpp"

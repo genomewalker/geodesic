@@ -54,6 +54,15 @@ struct IPackReader {
 
     virtual void release_sketches() const {}
     virtual size_t sketch_memory_bytes() const { return 0; }
+
+    // TNF profile access (KMRX section — mmap'd, no decompression cost).
+    // Returns pointer to float[136] L2-normalised k=4 tetranucleotide vector,
+    // or nullptr if the archive has no KMRX section.
+    virtual const float* kmer_profile(genopack::GenomeId id) const { return nullptr; }
+    virtual const float* kmer_profile_by_accession(std::string_view acc) const { return nullptr; }
+
+    virtual uint16_t archive_idx_for_accession(std::string_view acc) const = 0;
+    virtual size_t n_archives() const = 0;
 };
 
 // Thin wrapper over a single ArchiveReader.
@@ -124,6 +133,16 @@ public:
 
     void release_sketches() const override { reader_->release_sketches(); }
     size_t sketch_memory_bytes() const override { return reader_->sketch_memory_bytes(); }
+
+    const float* kmer_profile(genopack::GenomeId id) const override {
+        return reader_->kmer_profile(id);
+    }
+    const float* kmer_profile_by_accession(std::string_view acc) const override {
+        return reader_->kmer_profile_by_accession(acc);
+    }
+
+    uint16_t archive_idx_for_accession(std::string_view /*acc*/) const override { return 0; }
+    size_t n_archives() const override { return 1; }
 
 private:
     std::unique_ptr<genopack::ArchiveReader> reader_;

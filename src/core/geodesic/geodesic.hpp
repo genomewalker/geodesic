@@ -1,9 +1,11 @@
 #pragma once
 #include "core/types.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <memory>
 #include <random>
@@ -37,7 +39,26 @@ struct AlignedAllocator {
     struct rebind { using other = AlignedAllocator<U, Alignment>; };
 };
 
-// Structure-of-Arrays (SoA) embedding storage for cache-friendly SIMD access
+// Lightweight non-owning view over a contiguous array — replaces per-genome
+// std::vector members in GenomeEmbedding to eliminate thousands of small heap
+// allocations that glibc retains in the brk arena after free.
+template<typename T>
+struct SpanView {
+    const T* ptr = nullptr;
+    uint32_t n   = 0;
+    bool     empty()                    const noexcept { return n == 0 || ptr == nullptr; }
+    uint32_t size()                     const noexcept { return n; }
+    const T* data()                     const noexcept { return ptr; }
+    const T* begin()                    const noexcept { return ptr; }
+    const T* end()                      const noexcept { return ptr + n; }
+    const T& operator[](size_t i)       const noexcept { return ptr[i]; }
+};
+
+// Structure-of-Arrays (SoA) embedding storage for cache-friendly SIMD access.
+// Also owns the flat sketch arrays (sigs_flat / sigs2_flat / masks_flat) so that
+// sketch data for an entire taxon lives in ONE large mmap'd allocation — returned
+// to the OS immediately when the GeodesicDerep object is destroyed, instead of
+// leaving thousands of 20 KB heap fragments that glibc never reclaims.
 struct SoAStore {
     size_t n = 0;
     size_t dim = 512;
@@ -48,7 +69,14 @@ struct SoAStore {
     std::vector<float> isolation_scores;
     std::vector<float> quality_scores;
     std::vector<uint64_t> genome_sizes;
-    std::vector<std::filesystem::path> paths;
+    std::vector<std::string> accessions;
+
+    // Flat sketch storage — one large allocation per taxon (replaces per-genome vectors).
+    uint32_t sketch_size_flat = 0;
+    uint32_t mask_words_flat  = 0;
+    std::vector<uint16_t> sigs_flat;   // n × sketch_size_flat, row-major
+    std::vector<uint16_t> sigs2_flat;  // n × sketch_size_flat, row-major
+    std::vector<uint64_t> masks_flat;  // n × mask_words_flat,  row-major
 
     void resize(size_t count, size_t dimension) {
         n = count;
@@ -58,7 +86,61 @@ struct SoAStore {
         isolation_scores.resize(n);
         quality_scores.resize(n);
         genome_sizes.resize(n);
-        paths.resize(n);
+        accessions.resize(n);
+    }
+
+    void init_sketches(uint32_t sk, uint32_t mw) {
+        sketch_size_flat = sk;
+        mask_words_flat  = mw;
+        sigs_flat.assign(n * sk, 0xFFFFu);
+        sigs2_flat.assign(n * sk, 0xFFFFu);
+        masks_flat.assign(n * mw, 0u);
+    }
+
+    // Compact flat sketch rows to match a valid[] mask, then shrink_to_fit.
+    void compact_sketches(const std::vector<uint8_t>& valid, size_t new_n) {
+        size_t dst = 0;
+        for (size_t src = 0; src < n; ++src) {
+            if (!valid[src]) continue;
+            if (dst != src) {
+                std::copy_n(sigs_flat.data()  + src * sketch_size_flat, sketch_size_flat,
+                            sigs_flat.data()  + dst * sketch_size_flat);
+                std::copy_n(sigs2_flat.data() + src * sketch_size_flat, sketch_size_flat,
+                            sigs2_flat.data() + dst * sketch_size_flat);
+                std::copy_n(masks_flat.data() + src * mask_words_flat,  mask_words_flat,
+                            masks_flat.data() + dst * mask_words_flat);
+            }
+            ++dst;
+        }
+        sigs_flat.resize(new_n * sketch_size_flat);  sigs_flat.shrink_to_fit();
+        sigs2_flat.resize(new_n * sketch_size_flat); sigs2_flat.shrink_to_fit();
+        masks_flat.resize(new_n * mask_words_flat);  masks_flat.shrink_to_fit();
+    }
+
+    bool has_sketch_data() const noexcept { return sketch_size_flat > 0 && !sigs_flat.empty(); }
+
+          uint16_t* sig(size_t i)        noexcept { return sigs_flat.data()  + i * sketch_size_flat; }
+    const uint16_t* sig(size_t i)  const noexcept { return sigs_flat.data()  + i * sketch_size_flat; }
+          uint16_t* sig2(size_t i)       noexcept { return sigs2_flat.data() + i * sketch_size_flat; }
+    const uint16_t* sig2(size_t i) const noexcept { return sigs2_flat.data() + i * sketch_size_flat; }
+          uint64_t* mask(size_t i)       noexcept { return masks_flat.data() + i * mask_words_flat; }
+    const uint64_t* mask(size_t i) const noexcept { return masks_flat.data() + i * mask_words_flat; }
+
+    SpanView<uint16_t> sig_span(size_t i)  const noexcept { return {sig(i),  sketch_size_flat}; }
+    SpanView<uint16_t> sig2_span(size_t i) const noexcept { return {sig2(i), sketch_size_flat}; }
+    SpanView<uint64_t> mask_span(size_t i) const noexcept { return {mask(i), mask_words_flat}; }
+
+    // Expand or shrink embedding dimension in-place (copies existing data row-by-row).
+    void resize_dim(size_t new_dim) {
+        if (new_dim == dim) return;
+        std::vector<float, AlignedAllocator<float, 64>> new_data(n * new_dim, 0.0f);
+        const size_t copy_dim = std::min(dim, new_dim);
+        for (size_t i = 0; i < n; ++i)
+            std::copy(data.data() + i * dim,
+                      data.data() + i * dim + copy_dim,
+                      new_data.data() + i * new_dim);
+        data = std::move(new_data);
+        dim = new_dim;
     }
 
     float* row(size_t i) { return data.data() + i * dim; }
@@ -69,13 +151,11 @@ struct SoAStore {
 struct GenomeEmbedding {
     uint64_t genome_id;
     std::vector<float> vector;        // CountSketch unit vector (dim=256)
-    std::vector<uint16_t> oph_sig;         // 16-bit OPH signature (2× RAM vs uint32; bias-corrected Jaccard)
-    std::vector<uint16_t> oph_sig2;        // Second OPH sketch (seed=1337) for variance reduction
-    std::vector<uint64_t> real_bins_mask;  // Bitmask: bit t=1 iff bin t has a real k-mer (pre-densification)
+    // oph_sig / oph_sig2 / real_bins_mask live in SoAStore flat arrays (not here).
     float isolation_score;            // Mean distance to k nearest neighbors
     float quality_score;              // completeness - 5*contamination (0-100)
     uint64_t genome_size;
-    std::filesystem::path path;
+    std::string accession;            // genopack archive accession (unique id)
     uint32_t n_real_bins = 0;         // non-empty OPH bins before densification
     uint32_t n_contigs = 0;           // Number of sequences (FASTA '>' headers)
 };
@@ -195,56 +275,39 @@ public:
     explicit GeodesicDerep(Config cfg);
     ~GeodesicDerep();
 
-    // Auto-calibrate embedding parameters from random genome sample
-    struct CalibratedParams {
-        int kmer_size;
-        int embedding_dim;
-        int sketch_size;
-    };
-    static CalibratedParams auto_calibrate(
-        const std::vector<std::filesystem::path>& genomes,
-        int sample_pairs = 50,
-        int threads = 4,
-        uint64_t seed = 42);
-
-    // Phase 1-2: Embed all genomes and build spatial index
-    // quality_scores: path.string() → quality (completeness - 5*contamination)
-    void build_index(const std::vector<std::filesystem::path>& genomes,
-                     const std::unordered_map<std::string, double>& quality_scores = {});
-
-    // genopack v2 build: load raw FASTA from pack reader by accession.
-    void build_index_from_gpk(
-        const std::vector<std::string>& accessions,
-        const std::vector<std::filesystem::path>& genomes,
-        IPackReader& gpk,
-        const std::unordered_map<std::string, double>& quality_scores = {});
-
-    // GPK sketch-accelerated build: load pre-computed OPH sketches from SKCH section.
-    // Zero decompression, zero re-sketching — ~100× faster than build_index_from_gpk.
+    // GPK sketch-accelerated build: load pre-computed OPH sketches (sig + sig2) from
+    // the SKCH section of a V4 genopack archive. Zero decompression, zero re-sketching.
+    // quality_scores: accession → quality (completeness - 5*contamination)
     void build_index_from_gpk_sketches(
         const std::vector<std::string>& accessions,
-        const std::vector<std::filesystem::path>& genomes,
         IPackReader& gpk,
         const std::unordered_map<std::string, double>& quality_scores = {});
 
     // Get representative genome IDs (after select_representatives)
     std::vector<uint64_t> get_representative_ids() const { return last_representative_ids_; }
 
-    // Exclude paths from being selected as representatives (sets quality score to 0).
-    // Call after build_index and detect_outlier_candidates, before select_representatives.
-    void exclude_from_reps(const std::unordered_set<std::string>& paths);
+    // Exclude accessions from being selected as representatives (sets quality score to 0).
+    // Call after build_index_from_gpk_sketches and detect_outlier_candidates,
+    // before select_representatives.
+    void exclude_from_reps(const std::unordered_set<std::string>& accessions);
 
     // Compute ad-hoc quality scores for genomes without CheckM2 data.
     // Uses centrality (inverse isolation) and kmer density as proxy for assembly quality.
     // Call after compute_isolation_scores(), before select_representatives.
     void compute_adhoc_quality_scores();
 
-    // Pre-seed paths as representatives before FPS runs.
-    // Call after build_index and before select_representatives.
-    void set_pinned_representatives(const std::unordered_set<std::string>& paths);
+    // Pre-seed accessions as representatives before FPS runs.
+    // Call after build_index_from_gpk_sketches and before select_representatives.
+    void set_pinned_representatives(const std::unordered_set<std::string>& accessions);
 
     // Phase 4: Select representatives with lazy certified ANI
     std::vector<SimilarityEdge> select_representatives();
+
+    // Optional: invoked once at the start of the serial cert_reps pruning phase.
+    // Pipeline uses this to release most of the taxon's thread budget back to the
+    // scheduler while the serial loop runs — boosts aggregate occupancy without
+    // blocking correctness (the current taxon continues on its own thread).
+    void set_on_serial_phase(std::function<void()> cb) { on_serial_phase_ = std::move(cb); }
 
     // Get all embeddings
     const std::vector<GenomeEmbedding>& embeddings() const { return embeddings_; }
@@ -285,13 +348,13 @@ public:
         float kmer_div_zscore = 0.0f; // k-mer diversity z-score (n_real_bins/kbp vs population; informational)
         float margin_to_threshold = 0.0f; // isolation_score - nn_threshold (positive = above threshold)
         std::string flag_reason;    // "nn_outlier", "size_outlier", or "nn_outlier+size_outlier"
-        std::filesystem::path path;
+        std::string accession;      // genopack archive accession
         uint32_t n_contigs = 0;
         uint64_t genome_length_bp = 0;
         bool excluded = true;   // false = flagged only, still participates in rep selection
     };
     std::vector<OutlierCandidate> detect_outlier_candidates(
-        float z_threshold = 2.0f) const;
+        float z_threshold = 2.0f);
 
     // NN distance distribution from HNSW.
     struct NNDistStats {
@@ -311,22 +374,26 @@ public:
         int k_stable = -1;  // k chosen by bottleneck stability probe (smallest k within 3% of B(K_cap))
         int k_cap    = 0;   // K_cap used as HNSW query budget
         // Instability flags: when set, mst_max_edge may not reflect intra-species scale.
-        bool low_pair_count      = false;  // < 20 non-outlier genomes in MST
-        bool pathological_bridge = false;  // tiny-side AND isolated terminal merge
-        bool disconnected_mst    = false;  // k-NN graph has > 1 component at K_cap
+        bool low_pair_count        = false;  // < 20 non-outlier genomes in MST
+        bool pathological_bridge   = false;  // tiny-side AND isolated terminal merge
+        bool disconnected_mst      = false;  // k-NN graph has > 1 component at K_cap
+        bool nystrom_taxon_applied = false;  // per-taxon Nyström re-embedding succeeded
     };
 
     // Phase 3: Compute isolation scores AND return NN distance stats in one HNSW pass.
     // Replaces the old void compute_isolation_scores() + separate compute_nn_distance_stats().
     NNDistStats compute_isolation_scores();
 
-    // Update thresholds after build_index (allows data-driven calibration).
+    // Update thresholds after build_index_from_gpk_sketches (allows data-driven calibration).
     void set_min_rep_distance(float d) { cfg_.min_rep_distance = d; }
     void set_diversity_threshold(float d) { cfg_.diversity_threshold = d; }
+    void set_nystrom_applied(bool v) { nystrom_applied_ = v; }
+    float nystrom_scaled_j_floor() const { return nystrom_scaled_j_floor_; }
+    bool nystrom_oph_sphere_applied() const { return nystrom_oph_sphere_applied_; }
 
-    // Returns (path, genome_length_bp) for all embedded genomes after build_index.
-    // Used to persist genome_length to the DB (OPH sketch computes it; input TSV doesn't have it).
-    std::vector<std::pair<std::filesystem::path, uint64_t>> get_genome_sizes() const;
+    // Returns (accession, genome_length_bp) for all embedded genomes after
+    // build_index_from_gpk_sketches. Used to persist genome_length to the DB.
+    std::vector<std::pair<std::string, uint64_t>> get_genome_sizes() const;
 
     // Adaptive k-selection: pick the k that best matches this taxon's NN-distance diversity.
     // If the GPK has that k and it differs from current cfg_.kmer_size, re-embeds everything
@@ -337,8 +404,8 @@ public:
     // Select best k based on P95 NN distance (clonal→31, moderate→21, diverse→16).
     static int select_best_k_for_diversity(float p95_nn_dist);
 
-    // Genomes that permanently failed to read (all retries exhausted) during build_index.
-    // Each entry: (file_path, error_reason). Caller should record these in jobs_failed.
+    // Genomes that were absent or unreadable during build_index_from_gpk_sketches.
+    // Each entry: (accession, error_reason). Caller should record these in jobs_failed.
     const std::vector<std::pair<std::string, std::string>>& failed_reads() const {
         return failed_reads_;
     }
@@ -366,6 +433,7 @@ public:
         const std::vector<uint64_t>& representative_ids) const;
 
 private:
+    std::function<void()> on_serial_phase_;
     Config cfg_;
     int runtime_dim_ = 0;  // Actual embedding dim after Nystrom (may differ from cfg_.embedding_dim)
     std::vector<GenomeEmbedding> embeddings_;
@@ -379,8 +447,19 @@ private:
     std::unique_ptr<HNSWIndex> index_;
 
     // Per-genome component label from K_cap Kruskal (-1 = MST outlier).
-    // Set by compute_isolation_scores(), read by detect_outlier_candidates().
+    // Set by compute_isolation_scores(), updated by detect_outlier_candidates()
+    // when a genuine bimodal taxon is detected (Otsu split on isolation scores).
     std::vector<int> component_ids_;
+
+    // Smaller side of the final MST merge (bridge_min_side from NNDistStats).
+    // Stored as member so detect_outlier_candidates() can access it.
+    uint32_t bridge_min_side_ = 0;
+
+    // True when detect_outlier_candidates() detected a genuine bimodal taxon
+    // (bridge_min_side_/n > 5%). Signals FPS to reset max_sim_to_rep to
+    // same-cluster-only values after pre-seeding, preventing cross-cluster
+    // coverage from suppressing within-cluster FPS diversity selection.
+    bool genuine_bimodal_ = false;
 
     // Last selected representatives (for incremental workflows)
     std::vector<uint64_t> last_representative_ids_;
@@ -390,6 +469,12 @@ private:
 
     // Whether Nyström embedding was applied (false → exact Jaccard FPS for small n)
     bool nystrom_applied_ = false;
+    bool nystrom_taxon_applied_ = false;  // set by apply_nystrom_taxon on success
+    bool nystrom_multicomp_applied_ = false;  // set by apply_nystrom_multicomp on success
+    float nystrom_multicomp_s_max_ = 0.0f;   // max bridge Jaccard used in multi-component embedding
+    bool nystrom_percomp_applied_ = false;    // set by apply_nystrom_percomp (ANN recall gap path)
+    float nystrom_scaled_j_floor_ = 0.0f;    // > 0 when kernel-scaled Nyström active (ANN recall gap)
+    bool nystrom_oph_sphere_applied_ = false; // OPH token sphere used (ANN recall gap path)
 
     // Set by maybe_reselect_k before calling build_index_from_gpk_sketches to
     // suppress the internal k pre-probe (which would otherwise override the
@@ -401,42 +486,53 @@ private:
     // identifiers after sorting) are never used as direct array indices.
     std::unordered_map<uint64_t, size_t> gid_to_row_;
 
-    // Genomes that failed to read after retries: (file_path, reason).
-    // Written from OMP threads (mutex-protected); read by taxon_processor after build_index.
+    // Genomes that were absent or unreadable during build: (accession, reason).
+    // Written from OMP threads (mutex-protected); read by taxon_processor.
     std::vector<std::pair<std::string, std::string>> failed_reads_;
     std::mutex failed_reads_mutex_;
 
-    // Decompressed FASTA buffers cached during embed_genome() for reuse in
-    // materialize_sig2_for_indices() — avoids NFS re-read for anchor sig2 sketching.
-    // Indexed by genome id (== embeddings_ index). Freed after Nyström step.
-    static constexpr size_t kBufCacheLimitBytes = 2'500'000'000ULL;
-    std::vector<std::vector<char>> buf_cache_;
-    std::atomic<size_t> buf_cache_bytes_{0};
-
-    // Pack reader for sig2 materialization (avoids NFS re-reads).
-    // Set by build_index_from_gpk(), null otherwise.
+    // Pack reader retained for adaptive k re-embedding via maybe_reselect_k().
+    // Set by build_index_from_gpk_sketches(), null otherwise.
     IPackReader* gpk_reader_ = nullptr;
-    std::vector<std::string>           gpk_accessions_;  // index-parallel to embeddings_
-    std::vector<std::filesystem::path> gpk_paths_;       // index-parallel to gpk_accessions_
-
-    // Generate embedding for single genome (reads from NFS)
-    GenomeEmbedding embed_genome(const std::filesystem::path& path, uint64_t id);
-
-    // Generate embedding from pre-decompressed FASTA buffer (producer-consumer path)
-    GenomeEmbedding embed_genome_from_buffer(const char* data, size_t len,
-                                              uint64_t id, const std::filesystem::path& path);
+    std::vector<std::string> gpk_accessions_;  // index-parallel to embeddings_
 
     // Nyström spectral embedding: replace placeholder vectors with data-adapted
     // projections onto the top eigenvectors of the OPH Jaccard kernel.
     void apply_nystrom_embeddings();
 
-    // Lazily materialize oph_sig2 for a subset of genome indices by re-reading
-    // their FASTA files. Used for anchors (Gram matrix) and borderline candidates
-    // (Phase 7 verification). Skips indices that already have sig2 or lack a path.
-    void materialize_sig2_for_indices(const std::vector<size_t>& indices);
+    // Re-run Nyström for a subset of rows (bridge-connected components) with bridge
+    // endpoints as pinned anchors. Called after bridge detection when HNSW is
+    // disconnected. Writes to embeddings_[row].vector and store_.row(row) in-place.
+    // Returns true on success; false if numerically degenerate (caller keeps global coords).
+    bool apply_nystrom_taxon(const std::vector<uint32_t>& taxon_rows,
+                             const std::vector<uint32_t>& forced_anchor_rows,
+                             float j_floor = 0.0f);
 
-    // Shared tail of build_index / build_index_from_gpk:
-    // SoA copy, Nyström embedding, HNSW build.
+    // Per-component local Nyström stitched via bridge Jaccards into a global unit-sphere
+    // embedding ("multi-component"). comp_labels[li] is the HNSW component label for taxon_ei[li].
+    // Returns false (→ caller falls back to apply_nystrom_taxon) when s_max >= cos_diversity
+    // (ANN recall gap: components are within diversity distance, exact Jaccard FPS is correct).
+    bool apply_nystrom_multicomp(const std::vector<uint32_t>& taxon_ei,
+                                    const std::vector<uint32_t>& forced_ei,
+                                    const std::vector<std::pair<uint32_t,uint32_t>>& bridge_pairs_ei,
+                                    const std::vector<float>& bridge_jaccards,
+                                    const std::vector<int>& comp_labels);
+
+    // ANN recall gap path: per-component independent Nyström (no planet block).
+    // Component c occupies dims [c*d_per, (c+1)*d_per]; cross-component dot = 0
+    // so FPS runs independently within each component. Phase 3 uses exact Jaccard
+    // (nystrom_applied_ reset after FPS) to prune cross-component redundancy.
+    bool apply_nystrom_percomp(const std::vector<uint32_t>& taxon_ei,
+                               const std::vector<uint32_t>& forced_ei,
+                               const std::vector<int>& comp_labels);
+
+    // ANN recall gap fallback: direct OPH token sphere embedding.
+    // φ(x)[b] = (1/√m) Σ_t sign(hash(t, x_t, b)).  E[⟨φ(x),φ(y)⟩] = Jaccard(x,y),
+    // approximation error σ ≈ √(K(1-K)/m) ≈ 0.005 for m=10000.
+    // Sets nystrom_oph_sphere_applied_=true; cos_diversity threshold unchanged.
+    bool apply_oph_sphere(const std::vector<uint32_t>& taxon_ei);
+
+    // SoA copy, Nyström embedding, HNSW build. Called from build_index_from_gpk_sketches.
     void finalize_embeddings_();
 
     // Brute-force O(n²) isolation scores for small n (no HNSW needed)

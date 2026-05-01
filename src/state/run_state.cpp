@@ -1,4 +1,5 @@
 #include "state/run_state.hpp"
+#include <algorithm>
 
 namespace derep {
 
@@ -52,6 +53,14 @@ size_t RunState::total_contaminated() const {
 const std::vector<TaxonOutput>& RunState::taxa() const {
     std::lock_guard lock(mutex_);
     return taxa_;
+}
+
+void RunState::finalize_sort() {
+    std::lock_guard lock(mutex_);
+    std::sort(taxa_.begin(), taxa_.end(),
+              [](const TaxonOutput& a, const TaxonOutput& b) {
+                  return a.result.taxonomy < b.result.taxonomy;
+              });
 }
 
 } // namespace derep

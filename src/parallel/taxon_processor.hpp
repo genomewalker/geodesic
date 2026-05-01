@@ -2,6 +2,7 @@
 #include "config.hpp"
 #include "core/types.hpp"
 #include "io/tsv_reader.hpp"
+#include <functional>
 #include <unordered_map>
 
 namespace derep { class IPackReader; }
@@ -23,16 +24,21 @@ TaxonResult process_taxon(
     const std::unordered_map<std::string, GuncQuality>* gunc_scores = nullptr,
     IPackReader* gpk_reader = nullptr,
     RunState* run_state = nullptr,
-    grd::GrdWriter* grd_writer = nullptr);
+    grd::GrdWriter* grd_writer = nullptr,
+    std::function<void()> on_serial_phase = {});
 
-// Process a batch of tiny taxa (n <= TINY_BATCH_N) in a single thread slot.
-// Returns results in the same order as input.
+// Process a batch of tiny taxa (n <= TINY_BATCH_N).
+// acquired_threads: OMP parallelism cap (matches budget actually acquired by caller).
+// on_result: invoked once per taxon as soon as it finishes (thread-safe callback);
+//            if null, results accumulate and are returned at the end.
 std::vector<TaxonResult> process_tiny_batch(
     const std::vector<const Taxon*>& taxa,
     const Config& cfg,
+    int acquired_threads,
     const std::unordered_map<std::string, GuncQuality>* gunc_scores = nullptr,
     IPackReader* gpk_reader = nullptr,
     RunState* run_state = nullptr,
-    grd::GrdWriter* grd_writer = nullptr);
+    grd::GrdWriter* grd_writer = nullptr,
+    std::function<void(TaxonResult&&)> on_result = {});
 
 } // namespace derep
