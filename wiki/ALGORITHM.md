@@ -54,7 +54,7 @@ h = wymix(canonical XOR (seed + P0),  canonical XOR P1)
     wymix(a, b) = lo64(a*b) XOR hi64(a*b)
 ```
 
-sig1 uses seed = 42, sig2 uses seed = 1337. Both the bin index and the per-bin value are derived from this one hash:
+sig1 uses seed = `--seed`, sig2 uses seed = `--seed + 1` (defaults: 42 and 43). Both the bin index and the per-bin value are derived from this one hash:
 
 $$
 t = \left\lfloor \frac{h \cdot m}{2^{64}} \right\rfloor, \qquad \mathrm{sig}[t] = \min\!\left(\mathrm{sig}[t],\ \mathrm{hi32}(h)\right)
@@ -91,7 +91,7 @@ where $m_{\mathrm{real}}$ is the number of bins that are real in at least one of
 
 ### Dual OPH sketches
 
-Two independent OPH signatures (sig1, sig2) are computed per genome using seeds 42 and 1337. The anchor Gram matrix uses dual-sketch averaged Jaccard (see Phase 2):
+Two independent OPH signatures (sig1, sig2) are computed per genome using seeds `--seed` and `--seed + 1` (defaults: 42 and 43). The anchor Gram matrix uses dual-sketch averaged Jaccard (see Phase 2):
 
 $$
 K[i,j] = \frac{J_1(\mathrm{anchor}_i, \mathrm{anchor}_j) + J_2(\mathrm{anchor}_i, \mathrm{anchor}_j)}{2}
@@ -132,17 +132,7 @@ The default is $k = 21$. The k-mer size determines how quickly Jaccard drops wit
 | 95%  | 0.282 | 0.205 | 0.114 |
 | 99%  | 0.741 | 0.680 | 0.578 |
 
-At 95–99% ANI (typical bacterial species), $k=21$ gives $J \in [0.205, 0.680]$, sufficient for reliable ranking. Use `--sketch-k 16` for highly diverse taxa (ANI < 95%) where $k=21$ gives $J < 0.02$ and loses signal; use `--sketch-k 31` for clonal taxa (ANI > 99%) to spread compressed $J$ values apart.
-
-**Auto-calibration tiers.** When `--auto-calibrate` is active (default), a first-pass sketch at $m=4{,}096$, $k=21$ is computed for up to 50 sampled genome pairs. The P95 pairwise ANI determines the final tier:
-
-| P95 ANI of sample | Tier | $k$ | $m$ | $d_{\mathrm{cfg}}$ |
-|-------------------|------|-----|-----|---------------------|
-| ≥ 99%             | Very clonal | 31 | 20,000 | 512 |
-| 95–99%            | Typical (default) | 21 | 10,000 | 256 |
-| < 95%             | Very diverse | 16 | 5,000 | 128 |
-
-When auto-calibration is disabled or the taxon has fewer than 50 genomes, the defaults from config apply (typically $k=21$, $m=10{,}000$, $d=256$).
+At 95–99% ANI (typical bacterial species), $k=21$ gives $J \in [0.205, 0.680]$, sufficient for reliable ranking. Use `--geodesic-kmer-size 16` for highly diverse taxa (ANI < 95%) where $k=21$ gives $J < 0.02$ and loses signal; use `--geodesic-kmer-size 31` for clonal taxa (ANI > 99%) to spread compressed $J$ values apart.
 
 The OPH direct Jaccard estimator (used in Phase 7) has standard deviation $\sqrt{J(1-J)/m}$, giving sub-0.2% ANI error at $m=10{,}000$ across the 90–99% ANI range:
 

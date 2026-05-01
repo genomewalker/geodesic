@@ -8,7 +8,7 @@
 
 ## Algorithm
 
-1. **Sketch** -- compute two independent [One-Permutation Hash (OPH)](https://files.ifi.uzh.ch/dbtg/sdbs13/T17.0.pdf) signatures per genome ($k=21$, $m=10{,}000$ bins, seeds 42 and 1337). Each bin holds the minimum hash of all k-mers mapping to it, giving $\Pr[\mathrm{sig}_A[t] = \mathrm{sig}_B[t]] \approx J(A,B)$ (equality holds before densification; after densification, filled bins introduce correlation). Averaging two independent signatures halves Jaccard estimation variance. The per-bin occupancy bitmask enables containment estimation for sparse assemblies.
+1. **Sketch** -- compute two independent [One-Permutation Hash (OPH)](https://files.ifi.uzh.ch/dbtg/sdbs13/T17.0.pdf) signatures per genome ($k=21$, $m=10{,}000$ bins, seeds `--seed` and `--seed + 1`, default 42 and 43). Each bin holds the minimum hash of all k-mers mapping to it, giving $\Pr[\mathrm{sig}_A[t] = \mathrm{sig}_B[t]] \approx J(A,B)$ (equality holds before densification; after densification, filled bins introduce correlation). Averaging two independent signatures halves Jaccard estimation variance. The per-bin occupancy bitmask enables containment estimation for sparse assemblies.
 
 2. **Embed** -- place all genomes in a low-dimensional similarity space using a small set of landmark genomes (anchors):
    - *Anchor selection*: anchors are drawn across the full range of assembly completeness so sparse MAGs and complete genomes are equally represented as landmarks.
@@ -57,7 +57,9 @@ geodesic derep -t genomes.tsv --threads 24 -p my_run
 
 ### Input
 
-Tab-separated file with header:
+`--tax-file` (TSV) is required; `--pack` is optional and reads sequences from a local genopack archive instead of NFS. When both are given, the TSV restricts which accessions are processed.
+
+**Plain TSV** (with header):
 
 ```
 accession	taxonomy	file
@@ -67,30 +69,78 @@ GCA_000001405	d__Bacteria;...;s__Escherichia coli	/path/to/genome.fna.gz
 - `taxonomy`: GTDB-style semicolon-separated lineage (`d__;p__;c__;o__;f__;g__;s__`)
 - `file`: absolute path to FASTA (plain or gzip)
 
+**genopack archive** (`--pack <dir>`): a single `.gpk` archive directory or a directory containing one or more `part_*.gpk` parts (multipart set). Sequences (and OPH sketches when present) are served from the local pack instead of opening FASTA files over NFS.
+
 ### Output
 
-Results written to the working directory (or `--out-dir`):
-- `<prefix>_derep_genomes.tsv` -- all genomes with representative assignment and ANI to rep
-- `<prefix>_results.tsv` -- per-taxon summary (n_genomes, n_reps, method, runtime)
-- `<prefix>_diversity_stats.tsv` -- coverage and diversity metrics per taxon
-- `<prefix>_outliers.tsv` -- flagged anomalous genomes (isolation score outliers)
+Results written to the working directory (or `--out-dir`). TSV outputs are always written; binary archives are opt-in.
+
+| File | When | Contents |
+|---|---|---|
+| `<prefix>_derep_genomes.tsv` | always | `accession`, `taxonomy`, `file`, `representative` (0/1) — one row per genome |
+| `<prefix>_results.tsv`       | always | Per-taxon summary (`taxonomy`, `method`, `n_genomes`, `n_genomes_derep`, `communities`, `weight`) |
+| `<prefix>_diversity_stats.tsv` | always | Coverage and diversity metrics per taxon |
+| `<prefix>_stats.tsv`         | always | Per-taxon pipeline stats (preflight/quality/outlier counts, MST edges, ANI threshold used) |
+| `<prefix>_outliers.tsv`      | always | Flagged anomalous genomes (isolation score outliers) |
+| `<prefix>_failed.tsv`        | always | Genomes that failed sketching/embedding (`accession`, `taxonomy`, `file`, `reason`) |
+| `<path>.grd`                 | `--grd-output` | GRD archive: per-genome OPH sketches + Nyström embeddings + indexes (TIDX/ACCX/STRT). Required for `gather` merging across distributed shards. |
+| `<path>.gpd`                 | `--emit-gpd`   | Geodesic Derep Archive consumed by `genopack::DerepView` (see [Derep Output](wiki/Derep-Output)). Requires `--pack`. |
+| `<path>.geodf`               | `--geodf-output` | Binary results file (rep set + per-genome embeddings); referenced by the `--lock-output` JSON. |
+| `<path>.lock` (JSON)         | `--lock-output` | Provenance file recording rep set, parameters, and the `.geodf` path; input to `geodesic update --lock`. |
 
 ### Key options
+
+**Inputs / outputs**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-t, --tax-file` | required | Taxonomy TSV (`accession\ttaxonomy\tfile_path`) |
+| `--pack` | -- | genopack archive (single `.gpk` directory or directory of `part_*.gpk` parts) |
+| `-o, --out-dir` | -- | Output directory for representative FASTA copies (only when `--copy-reps` is set) |
+| `-p, --prefix` | -- | Prefix for `<prefix>_*.tsv` outputs |
+| `--tmp-dir` | `.` | Temporary directory |
+| `--selected-taxa` | -- | File restricting which taxa to process |
+| `--fixed-taxa` | -- | File with fixed representative assignments (skip selection for those taxa) |
+| `--fixed-reps` | -- | File of accessions (one per line) to always include as representatives |
+| `--grd-output` | -- | Path for `.grd` archive (sketches + embeddings); required for `gather` |
+| `--emit-gpd` | -- | Path for `.gpd` derep archive (requires `--pack`); empty string = `<out-dir>/<prefix>.gpd` |
+| `--geodf-output` | -- | Path for `.geodf` binary results file |
+| `--lock-output` | -- | Path for the JSON lock file consumed by `geodesic update` |
+| `--copy-reps` | off | Copy representative FASTA files into `--out-dir` (requires `--out-dir`) |
+| `--checkm2` | -- | CheckM2 TSV for quality-weighted selection |
+| `--gunc-scores` | -- | GUNC TSV to exclude chimeric assemblies from selection |
+| `-v, --verbose` / `-q, --quiet` / `--debug` | info | Logging verbosity |
+| `--keep-intermediates` | off | Keep intermediate files in `--tmp-dir` |
+
+**Compute / parallelism**
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--threads` | 1 | Total CPU threads |
-| `--ani-threshold` | 95.0 | ANI threshold (%) -- acts as cap; actual threshold inferred from data |
+| `-w, --workers` | 1 | Worker pool (advanced; overrides `total_budget = workers * threads`) |
+| `--io-threads` | 0 (auto) | Max concurrent NFS file readers (`0` = auto = `--threads`) |
+| `--seed` | 42 | Master RNG seed; OPH sketch uses `seed` and `seed+1` |
+
+**Algorithm**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--ani-threshold` | 95.0 | ANI threshold (%) — acts as cap; actual threshold inferred from data |
+| `-z, --z-threshold` | 2.0 | Z-score threshold for contamination/outlier flagging |
 | `--geodesic-dim` | 256 | Nyström embedding dimension |
 | `--geodesic-kmer-size` | 21 | k-mer size for OPH sketching |
 | `--geodesic-sketch-size` | 10000 | OPH sketch size (bins) |
-| `--geodesic-auto-calibrate` | on | Auto-select embedding tier from random ANI sample |
-| `--geodesic-calibration-pairs` | 50 | Pairs sampled for tier selection |
-| `--checkm2` | -- | CheckM2 TSV for quality-weighted selection |
-| `--gunc-scores` | -- | GUNC TSV to exclude chimeric assemblies from selection |
-| `-z` | 2.0 | Z-score threshold for contamination detection |
+| `--geodesic-syncmer-s` | 0 | Open-syncmer prefilter `s` (0 = disabled) |
+| `--geodesic-diversity-threshold` | 0.02 | Minimum FPS step gain (relative) before stopping |
+| `--geodesic-max-rep-fraction` | 0.2 | Hard cap on rep set size as fraction of `n` |
+| `--geodesic-auto-calibrate / --geodesic-no-auto-calibrate` | on | Auto-pick k/m from a small calibration sample |
+| `--geodesic-calibration-pairs` | 50 | Pair count used by auto-calibration |
+| `--k-cap-max` | 256 | Max `K_cap` retry value when k-NN graph fails to connect at 64 |
 | `--nystrom-diagonal-loading` | 0.01 | Tikhonov regularisation fraction |
-| `--nystrom-degree-normalize` | on | Symmetric Laplacian normalisation of Gram matrix |
+| `--nystrom-degree-normalize / --no-nystrom-degree-normalize` | on | Symmetric Laplacian normalisation of Gram matrix |
+| `--ncbi-taxdump` | -- | Directory with `nodes.dmp`+`names.dmp` for Eukaryote/Virus taxonomy resolution (auto-downloaded if absent) |
+
+**Determinism.** geodesic pins Eigen to a single thread (`Eigen::setNbThreads(1)`) at startup and derives every per-phase RNG seed from `--seed`, so a fixed `--seed` (and identical input ordering) yields bit-identical derep results across runs and machines.
 
 ### Distributed mode
 
@@ -115,21 +165,30 @@ Each worker runs an independent `geodesic derep` on its partition. No shared sta
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `scatter -n` | -- | Number of partitions |
-| `scatter --rank` | `g` | Taxonomy rank for LPT partitioning (`g`=genus, `f`=family) |
+| `scatter -t, --tax-file` | required | Input taxonomy TSV |
+| `scatter -n, --partitions` | required | Number of partitions |
+| `scatter -o, --output-dir` | required | Output directory for partition files and worker script |
+| `scatter --rank` | `g` | Taxonomy rank for LPT partitioning (`g`=genus, `f`=family, `s`=species) |
+| `scatter --pack` | -- | genopack archive path (passed through to worker commands) |
 | `scatter --tmp-dir` | scatter dir | Temporary directory for workers |
-| `gather -d` | -- | Directory containing shard results |
-| `gather -o` | -- | Output path for merged GRD file |
+| `scatter --threads` | 4 | Threads per worker (baked into generated `run.sh`) |
+| `gather -d, --shard-dir` | required | Directory containing shard results |
+| `gather -o, --output` | required | Output path for merged GRD file |
+| `gather -p, --prefix` | `merged` | Prefix for merged TSV files |
 
-### Resuming
+See [Distributed Mode](wiki/Distributed-Mode.md) for the full workflow.
 
-`geodesic` writes progress to a `.geodf` file as it runs. Resume an interrupted run by pointing to the same output directory:
+### Incremental updates
+
+`geodesic update` extends a previous run with new genomes without redoing work:
 
 ```bash
-geodesic derep -t genomes.tsv --threads 24 -p my_run
+geodesic update -t new_genomes.tsv --lock prev_run.lock \
+    --geodf-output updated.geodf --lock-output updated.lock \
+    --pack mydb.gpk --threads 24
 ```
 
-Already-completed taxa are skipped automatically.
+`--lock` takes the JSON lock file written by `--lock-output` (it points to the prior run's `.geodf`); `update` only sketches new genomes and re-runs FPS / certification on the diff.
 
 ## Performance
 

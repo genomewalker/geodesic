@@ -12,3 +12,4 @@ It does this by sketching genomes with OPH, placing them in an approximate simil
 | [Algorithm](ALGORITHM) | Full algorithm reference: OPH, Nyström spectral embedding, HNSW, Farthest Point Sampling, ANI chain, parameter choices |
 | [Outlier Detection](Outlier-Detection) | NN-outlier flagging, k-mer diversity z-score, CheckM2 and GUNC integration |
 | [Distributed Mode](Distributed-Mode) | Scatter/gather for multi-node execution |
+| [Derep Output](Derep-Output) | Byte-level spec of the `.gpd` Geodesic Derep Archive |

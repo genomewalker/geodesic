@@ -1,0 +1,249 @@
+# Derep output (`.gpd` archive)
+
+When `geodesic derep --pack <gpk> --emit-gpd <path>` is given, geodesic writes a **Geodesic Derep Archive** (`.gpd`). The file is the durable record of a derep run: rep set, rep→cluster membership, rep-only embeddings, and a fingerprint of the source genopack archive that lets a reader detect when the underlying pack has drifted.
+
+The reader is `genopack::DerepView`. Geodesic is the only writer.
+
+This page is the byte-level spec; for the consumer-side API see the [genopack format / API docs](https://github.com/genomewalker/genopack).
+
+---
+
+## File layout
+
+A `.gpd` is a **single file**, not a directory:
+
+```
+[GpdFileHeader               64 B]
+[Section blobs ...] (HDR · ASTR · ASOF · ARMP · RTBL · G2RM · EMBD · [CSTAT])
+[TOC                                ]
+[GpdTailLocator             16 B   ]
+```
+
+All multi-byte integers are little-endian; section payloads are 8-byte aligned (zero padding). Sections may be zstd-compressed (`flags & 1`); the reader transparently decompresses on first access.
+
+### `GpdFileHeader` — 64 bytes (offset 0)
+
+| Offset | Size | Field | Description |
+|---|---|---|---|
+| 0  | 4 B  | `magic`        | `'GPDF'` (`0x46445047`) |
+| 4  | 2 B  | `format_major` | 1 |
+| 6  | 2 B  | `format_minor` | 0 |
+| 8  | 8 B  | `toc_offset`   | Byte offset of TOC section |
+| 16 | 8 B  | `toc_size`     | TOC byte size |
+| 24 | 40 B | _reserved_     | Zero-padded |
+
+### `GpdTailLocator` — 16 bytes (last bytes of file)
+
+| Offset | Size | Field | Description |
+|---|---|---|---|
+| 0  | 8 B | `toc_offset` | Duplicate of header `toc_offset` (corruption check) |
+| 8  | 4 B | `magic`      | `'GPDT'` (`0x54445047`) |
+| 12 | 4 B | `crc32`      | crc32 of TOC descriptor array (same value as `crc32_of_following_descs` in the TOC payload header) |
+
+### Section magics
+
+| Magic | Name | Description |
+|---|---|---|
+| `GHDR` | HDR  | Identity, params, source-part fingerprints (always uncompressed) |
+| `GAST` | ASTR | Concatenated accession string pool, ASCIIbetically sorted |
+| `GASO` | ASOF | `uint32_t offsets[n_genomes+1]` boundaries into ASTR |
+| `GARM` | ARMP | Optional open-addressed accession→ordinal hash map |
+| `GRTB` | RTBL | Rep table (one entry per representative) |
+| `G2RM` | G2RM | `uint32_t rep_id[n_genomes]` (sentinels: `0xFFFFFFFE` unclustered, `0xFFFFFFFF` tombstoned) |
+| `GEMB` | EMBD | Rep-only embedding matrix (default f16 × dim, typically 256) |
+| `GCST` | CSTAT| Optional per-cluster QC statistics |
+| `GTOC` | TOC  | Section descriptor table |
+
+### TOC section
+
+```c
+struct GpdSectionDesc {           // 56 bytes
+    uint32_t type;                // GPD_SEC_*
+    uint32_t flags;               // bit0 = zstd-compressed payload
+    uint64_t file_offset;         // absolute byte offset to section payload
+    uint64_t compressed_size;
+    uint64_t uncompressed_size;
+    uint64_t section_id;          // unique within file, monotonic, starts at 1
+    uint64_t reserved[2];
+};
+
+// TOC payload layout:
+//   uint32_t magic = 'GTOC'
+//   uint32_t n_sections
+//   uint32_t crc32_of_following_descs   // crc32 over the descriptor array bytes only
+//   uint32_t pad
+//   GpdSectionDesc descs[n_sections]
+```
+
+---
+
+## HDR section (always present, always uncompressed)
+
+```c
+struct GpdHeader {
+    uint32_t magic;            // 'GPDH' = 0x48445047
+    uint16_t format_major;     // 1
+    uint16_t format_minor;     // 0
+    uint64_t created_at_unix;
+    uint8_t  run_id[16];       // UUID v4 — unique per derep run
+    uint16_t n_parts;          // source pack parts at derep time
+    uint16_t embedding_dim;    // typically 256
+    uint8_t  embedding_dtype;  // 0=f32, 1=f16
+    uint8_t  has_cstats;       // 1 if CSTAT section is present
+    uint8_t  pad0[2];
+    uint64_t n_genomes;        // total genomes covered (= sum of part live_counts)
+    uint64_t n_reps;
+    uint64_t n_unclustered;
+    // followed by:
+    //   GpdSourcePart parts[n_parts];
+    //   GpdDerepParams params;
+};
+
+struct GpdSourcePart {           // 48 bytes
+    uint8_t  archive_uuid[16];   // from genopack archive header
+    uint64_t generation;
+    uint64_t n_genomes_total;
+    uint64_t n_genomes_live;
+    uint64_t accession_set_hash; // xxh3-64 of '\n'-joined sorted live accessions
+};
+
+struct GpdDerepParams {
+    uint8_t  n_kmer_sizes;
+    uint8_t  kmer_sizes[7];      // up to 7; tail zero-padded
+    uint32_t sketch_size;
+    uint64_t sig1_seed;          // = --seed   (default 42)
+    uint64_t sig2_seed;          // = --seed+1 (default 43)
+    float    jaccard_thresh;
+    uint16_t geodesic_ver_len;
+    uint8_t  pad1[2];
+    char     geodesic_ver[];     // not null-terminated; padded to 8
+};
+```
+
+### `accession_set_hash`
+
+The operational identity of a source part: take all **live** (non-tombstoned) accessions, sort ASCIIbetically, join with `\n` (no trailing newline), hash with xxh3-64. Geodesic computes this from the `ArchiveSetReader` at derep time; `DerepView::check(pack)` recomputes it from the live pack to validate. Both implementations must produce identical bytes for the same live set — be careful about UTF-8 normalisation, trailing newlines, and locale-dependent sorting.
+
+---
+
+## ASTR section — accession string pool
+
+Concatenated accession strings, sorted ASCIIbetically, no separators (offsets give boundaries). Includes all genomes live at derep time (reps + members + unclustered). zstd-compressed when `flags & 1`.
+
+## ASOF section — accession offsets
+
+```c
+uint32_t magic = 'GASO';
+uint32_t n_genomes;
+uint64_t pad;
+uint32_t offsets[n_genomes + 1];   // offsets[i+1] - offsets[i] = length of accession i
+```
+
+`acc_string(ord)` = `string_view(astr + offsets[ord], offsets[ord+1] - offsets[ord])`.
+
+`acc_to_ord(s)`: binary search over `[0, n_genomes)` comparing against `acc_string(mid)`. ~22 comparisons for 5M genomes.
+
+## ARMP section — accession hash map (optional but recommended)
+
+Open-addressed hash table for O(1) `acc_to_ord`. Geodesic emits this when `cfg.emit_armp = true` (default).
+
+```c
+uint32_t magic = 'GARM';
+uint32_t n_buckets;       // power of two, load factor target 0.7
+uint32_t hash_seed;       // reserved; currently always 0 (XXH3_128bits is called unseeded)
+uint32_t pad;
+struct GpdArmpEntry {
+    uint64_t hash;        // high 64 bits of XXH3_128bits(accession)
+    uint32_t ordinal;     // index into ASOF; 0xFFFFFFFF = empty bucket
+    uint32_t pad;
+} entries[n_buckets];
+```
+
+Lookup: bucket = `hash & (n_buckets - 1)`. Linear probe on collision. Verify by comparing the accession string at the candidate ordinal. If absent, reader falls back to ASOF binary search.
+
+## RTBL section — rep table
+
+```c
+uint32_t magic = 'GRTB';
+uint32_t n_reps;
+uint64_t pad;
+struct GpdRepEntry {           // 24 bytes
+    uint32_t rep_acc_ord;      // index into ASOF (the rep is itself a genome)
+    uint32_t cluster_size;     // including the rep itself; ≥ 1
+    uint64_t source_locator;   // (part_idx<<48)|local_genome_id at derep time, advisory
+    uint16_t sketch_kmer;      // which k-mer size produced the winning sketch
+    uint8_t  flags;            // bit0=has_embedding (must be 1 in v1)
+    uint8_t  pad;
+    uint32_t cstat_offset;     // index into CSTAT, or 0xFFFFFFFF if absent
+} entries[n_reps];
+```
+
+Reps are sorted by `rep_acc_ord` ascending so `rep_id ↔ rep_acc_ord` is strictly monotonic and embedding-row order matches rep-id order for cache locality in cosine-similarity sweeps.
+
+## G2RM section — genome→rep map
+
+```c
+uint32_t magic = 'G2RM';
+uint32_t n_genomes;
+uint64_t pad;
+uint32_t rep_id[n_genomes];    // sentinels: 0xFFFFFFFE = unclustered
+                               //            0xFFFFFFFF = tombstoned-at-derep-time
+```
+
+Indexed by genome ordinal (= index into ASOF). For genome `i`, `rep_id[i]` is the index into RTBL; for a rep, `rep_id[rep.rep_acc_ord] == self_rep_id`.
+
+## EMBD section — embeddings (rep-only)
+
+```c
+uint32_t magic = 'GEMB';
+uint16_t dim;                  // typically 256
+uint8_t  dtype;                // 0=f32, 1=f16
+uint8_t  pad0;
+uint32_t n_reps;
+uint32_t pad1;
+// followed by: dtype_bytes(dtype) * dim * n_reps  raw matrix
+//   row i corresponds to rep_id i (RTBL ordering)
+```
+
+Default dtype is **f16** (~270 MB for 546k × 256). Loss is acceptable for cosine search; mapping pipelines that need f32 can request via `--emit-gpd-embedding-dtype f32` at write time (when exposed; currently fixed at f16 from geodesic).
+
+## CSTAT section — cluster stats (optional)
+
+```c
+uint32_t magic = 'GCST';
+uint32_t n_entries;            // ≤ n_reps; sparse if cstat_offset != UINT32_MAX in RTBL
+uint64_t pad;
+struct GpdClusterStat {        // 12 bytes
+    float    mean_jaccard;     // mean pairwise jaccard within cluster
+    float    max_distance;     // max member-to-rep jaccard distance
+    uint16_t n_members_used;   // sample size for the stats above
+    uint8_t  flags;            // bit0=outlier
+    uint8_t  pad;
+} stats[n_entries];
+```
+
+Optional, used for QC reports; mapping pipelines ignore.
+
+---
+
+## Staleness detection (reader side)
+
+`genopack::DerepView::check(pack)` returns one of:
+
+| Level | Trigger |
+|---|---|
+| `Valid`                      | All parts: same `accession_set_hash`, `archive_uuid`, `generation` |
+| `LayoutChangedSameLiveSet`   | Same live accession set, but UUID/generation differs (e.g. pack was repacked) |
+| `StaleNewGenomes`            | Pack contains accessions absent from the .gpd |
+| `StaleTombstones`            | .gpd contains accessions no longer live in the pack |
+| `Mismatch`                   | Structural difference (missing part, etc.) |
+
+Mapping pipelines should treat anything other than `Valid` (and possibly `LayoutChangedSameLiveSet`) as a signal to re-run derep.
+
+---
+
+## Versioning
+
+`format_major` bumps for incompatible changes. `format_minor` bumps for additive changes (e.g. new optional sections). Readers must reject unknown `format_major` and accept higher `format_minor` (ignoring unknown sections).
+
+The format is committed from `1.0`. Pre-1.0 geodesic releases may bump `format_minor` aggressively as new optional sections are added.
