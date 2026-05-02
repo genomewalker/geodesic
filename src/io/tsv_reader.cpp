@@ -4,7 +4,6 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
-#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 
@@ -68,82 +67,23 @@ std::string canonical_accession(std::string_view acc) {
     return std::string(acc);
 }
 
-std::vector<GenomeRow> read_genomes_tsv(const std::filesystem::path& path,
-                                        const TsvReadOptions& opts) {
+std::vector<std::string> read_accession_list(const std::filesystem::path& path) {
     std::ifstream in(path);
-    if (!in) {
-        throw TsvParseError("Cannot open genome TSV: " + path.string());
-    }
+    if (!in)
+        throw TsvParseError("Cannot open accession list: " + path.string());
 
+    std::vector<std::string> accessions;
     std::string line;
-    std::size_t line_num = 0;
-
-    int col_acc = -1, col_tax = -1, col_file = -1;
-
-    if (opts.has_header) {
-        if (!std::getline(in, line)) {
-            throw TsvParseError("Empty genome TSV: " + path.string());
-        }
-        ++line_num;
-        auto headers = split_line(line, opts.delimiter);
-        if (opts.trim_fields) {
-            for (auto& h : headers) h = trim(h);
-        }
-
-        col_acc = find_col(headers, {"accession", "acc"});
-        col_tax = find_col(headers, {"taxonomy", "lineage"});
-        col_file = find_col(headers, {"file", "filepath", "path"});
-
-        if (col_acc < 0) col_acc = 0;
-        if (col_tax < 0) col_tax = 1;
-        // col_file stays -1 if the header has no file column (pack-only TSV)
-    } else {
-        col_acc = 0;
-        col_tax = 1;
-        col_file = 2;  // positional: backward compat with 3-column TSVs
-    }
-
-    std::vector<GenomeRow> rows;
-    std::unordered_set<std::string> seen;
-
     while (std::getline(in, line)) {
-        ++line_num;
-        if (is_comment_or_empty(line, opts)) continue;
-
-        auto fields = split_line(line, opts.delimiter);
-        if (opts.trim_fields) {
-            for (auto& f : fields) f = trim(f);
-        }
-
-        int req_col = std::max(col_acc, col_tax);
-        if (col_file >= 0) req_col = std::max(req_col, col_file);
-        if (static_cast<int>(fields.size()) <= req_col) {
-            spdlog::warn("{}:{}: expected at least {} fields, got {}",
-                         path.string(), line_num, req_col + 1, fields.size());
-            continue;
-        }
-
-        GenomeRow row;
-        row.accession = std::move(fields[col_acc]);
-        row.taxonomy = std::move(fields[col_tax]);
-        if (col_file >= 0 && col_file < static_cast<int>(fields.size()))
-            row.file_path = std::move(fields[col_file]);
-
-        if (opts.strict) {
-            if (!seen.insert(row.accession).second) {
-                throw TsvParseError("Duplicate accession '" + row.accession +
-                                    "' at line " + std::to_string(line_num) +
-                                    " in " + path.string());
-            }
-        }
-
-        // Skip file existence check - too slow on NFS (5.2M stat() calls)
-        // Files will be validated when actually accessed
-        rows.push_back(std::move(row));
+        auto start = line.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) continue;
+        auto end = line.find_last_not_of(" \t\r\n");
+        auto acc = line.substr(start, end - start + 1);
+        if (acc.empty() || acc[0] == '#') continue;
+        accessions.push_back(std::move(acc));
     }
-
-    spdlog::info("Read {} genomes from {}", rows.size(), path.string());
-    return rows;
+    spdlog::info("Read {} accessions from {}", accessions.size(), path.string());
+    return accessions;
 }
 
 std::unordered_map<std::string, CheckM2Quality> read_checkm2_tsv(
@@ -288,19 +228,6 @@ std::unordered_map<std::string, std::string> read_fixed_taxa_tsv(
 
     spdlog::info("Read {} fixed taxa from {}", result.size(), path.string());
     return result;
-}
-
-std::size_t count_checkm2_matches(
-    const std::vector<GenomeRow>& genomes,
-    const std::unordered_map<std::string, CheckM2Quality>& quality) {
-    std::size_t count = 0;
-    for (const auto& g : genomes) {
-        auto acc = canonical_accession(g.accession);
-        if (quality.find(acc) != quality.end()) {
-            ++count;
-        }
-    }
-    return count;
 }
 
 std::unordered_map<std::string, GuncQuality> read_gunc_tsv(

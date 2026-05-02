@@ -1,12 +1,17 @@
 #include "distributed.hpp"
 #include "taxonomy/partition.hpp"
 #include "db/grd/grd_merge.hpp"
+#include "io/tsv_reader.hpp"
+#include "core/pack_reader.hpp"
+#include "core/multi_pack_reader.hpp"
+#include <genopack/archive.hpp>
 
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <spdlog/spdlog.h>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace derep {
@@ -19,13 +24,37 @@ int run_scatter(const Config& cfg) {
     fs::create_directories(cfg.scatter_dir);
     auto abs_scatter = fs::absolute(cfg.scatter_dir);
 
-    // 1. Partition the input TSV
+    // 1. Open pack to resolve taxonomy per accession
+    if (!cfg.pack_dir.has_value())
+        throw std::runtime_error("scatter: --pack is required");
+    std::unique_ptr<IPackReader> gpk_reader;
+    {
+        const auto& pack_path = *cfg.pack_dir;
+        if (pack_path.extension() == ".gpk") {
+            auto ar = std::make_unique<genopack::ArchiveReader>();
+            ar->open(pack_path);
+            gpk_reader = std::make_unique<SinglePackReader>(std::move(ar));
+        } else {
+            gpk_reader = MultiPackReader::open_dir(pack_path);
+        }
+    }
+
+    auto accessions = read_accession_list(cfg.genomes_file);
+    std::unordered_map<std::string, std::string> acc_to_tax;
+    acc_to_tax.reserve(accessions.size());
+    for (const auto& acc : accessions) {
+        auto tax = gpk_reader->taxonomy_for_accession(acc);
+        if (!tax.empty()) acc_to_tax[acc] = std::move(tax);
+    }
+
+    // 2. Partition the accession list
     taxonomy::PartitionConfig pcfg;
-    pcfg.input_tsv  = cfg.tax_file;
-    pcfg.output_dir = cfg.scatter_dir;
-    pcfg.n_parts    = cfg.n_partitions;
-    pcfg.rank       = cfg.partition_rank;
-    size_t total = taxonomy::partition_tsv(pcfg);
+    pcfg.input_accessions = cfg.genomes_file;
+    pcfg.output_dir       = cfg.scatter_dir;
+    pcfg.n_parts          = cfg.n_partitions;
+    pcfg.rank             = cfg.partition_rank;
+    pcfg.acc_taxonomy     = &acc_to_tax;
+    size_t total = taxonomy::partition_accessions(pcfg);
 
     // 2. Generate worker script (run.sh)
     //    Each line is a self-contained geodesic derep command for one partition.
@@ -60,11 +89,11 @@ int run_scatter(const Config& cfg) {
                               : abs_scatter;
 
         for (int i = 0; i < cfg.n_partitions; ++i) {
-            auto part_tsv = abs_scatter / ("part_" + std::to_string(i) + ".tsv");
+            auto part_txt = abs_scatter / ("part_" + std::to_string(i) + ".txt");
             auto grd_file = abs_scatter / ("shard_" + std::to_string(i) + ".grd");
 
             f << "cd " << abs_scatter.string() << " && " << base_cmd
-              << " -t " << part_tsv.string()
+              << " -g " << part_txt.string()
               << " -p shard_" << i
               << " --threads " << cfg.threads;
 

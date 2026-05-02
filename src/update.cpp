@@ -48,11 +48,39 @@ int run_update(Config& cfg) {
     spdlog::info("update: prior run had {} genomes, {} taxa (timestamp: {})",
                  lock.n_genomes, lock.n_taxa, lock.timestamp);
 
-    // 3. Read new taxonomy TSV
-    auto genome_rows = read_genomes_tsv(cfg.tax_file);
-    spdlog::info("update: {} genomes in new taxonomy file", genome_rows.size());
+    // 3. Read accession list
+    auto accessions = read_accession_list(cfg.genomes_file);
+    spdlog::info("update: {} accessions in genome list", accessions.size());
 
-    // 4. Identify prior accessions from GEODF
+    // 4. Open pack (required — taxonomy resolved from TAXN section)
+    if (!cfg.pack_dir.has_value())
+        throw std::runtime_error("update: --pack is required");
+    std::unique_ptr<IPackReader> gpk_reader;
+    {
+        const auto& pack_path = *cfg.pack_dir;
+        if (pack_path.extension() == ".gpk") {
+            auto ar = std::make_unique<genopack::ArchiveReader>();
+            ar->open(pack_path);
+            gpk_reader = std::make_unique<SinglePackReader>(std::move(ar));
+            spdlog::info("update: genopack single archive opened: {}", pack_path.string());
+        } else {
+            gpk_reader = MultiPackReader::open_dir(pack_path);
+            spdlog::info("update: genopack multi-pack opened: {} archives",
+                         static_cast<MultiPackReader*>(gpk_reader.get())->n_archives());
+        }
+    }
+
+    // 5. Resolve taxonomy from pack and group accessions by taxon
+    std::unordered_map<std::string, std::vector<std::string>> taxon_to_accs;
+    std::unordered_set<std::string> all_accessions;
+    for (const auto& acc : accessions) {
+        auto tax = gpk_reader->taxonomy_for_accession(acc);
+        if (tax.empty()) continue;
+        taxon_to_accs[tax].push_back(acc);
+        all_accessions.insert(acc);
+    }
+
+    // 6. Identify prior accessions from GEODF
     std::unordered_set<std::string> prior_accessions;
     if (!lock.geodf_path.empty() && fs::exists(lock.geodf_path)) {
         geodf::GeodfReader prior_reader(lock.geodf_path);
@@ -63,16 +91,6 @@ int run_update(Config& cfg) {
     }
     spdlog::info("update: {} prior accessions from GEODF", prior_accessions.size());
 
-    // 5. Build per-accession and per-taxon index from new taxonomy
-    std::unordered_map<std::string, std::vector<size_t>> taxon_to_rows;
-    for (size_t i = 0; i < genome_rows.size(); ++i)
-        taxon_to_rows[genome_rows[i].taxonomy].push_back(i);
-
-    // 6. Identify affected taxa (taxa containing at least one new genome)
-    std::unordered_set<std::string> all_accessions;
-    for (const auto& r : genome_rows)
-        all_accessions.insert(r.accession);
-
     std::unordered_set<std::string> new_acc_set;
     for (const auto& acc : all_accessions)
         if (!prior_accessions.count(acc))
@@ -80,67 +98,42 @@ int run_update(Config& cfg) {
     spdlog::info("update: {} new genomes (not in prior run)", new_acc_set.size());
 
     std::unordered_set<std::string> affected_taxa;
-    for (const auto& r : genome_rows)
-        if (new_acc_set.count(r.accession))
-            affected_taxa.insert(r.taxonomy);
+    for (const auto& [tax, accs] : taxon_to_accs)
+        for (const auto& acc : accs)
+            if (new_acc_set.count(acc)) { affected_taxa.insert(tax); break; }
     spdlog::info("update: {} affected taxa to re-dereplicate", affected_taxa.size());
 
-    // 7. Open new .gpk archive if provided (single or multi-pack)
-    std::unique_ptr<IPackReader> gpk_reader;
-    if (cfg.pack_dir.has_value()) {
-        try {
-            const auto& pack_path = *cfg.pack_dir;
-            if (pack_path.extension() == ".gpk") {
-                auto ar = std::make_unique<genopack::ArchiveReader>();
-                ar->open(pack_path);
-                gpk_reader = std::make_unique<SinglePackReader>(std::move(ar));
-                spdlog::info("update: genopack single archive opened: {}", pack_path.string());
-            } else {
-                gpk_reader = MultiPackReader::open_dir(pack_path);
-                spdlog::info("update: genopack multi-pack opened: {} archives",
-                             static_cast<MultiPackReader*>(gpk_reader.get())->n_archives());
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("update: failed to open genopack archive at {}: {} — proceeding without",
-                         cfg.pack_dir->string(), e.what());
-            gpk_reader.reset();
-        }
-    }
-
-    // 8. Load unchanged taxa from prior GEODF into run_state
+    // 7. Load unchanged taxa from prior GEODF into run_state
     RunState run_state;
     if (!lock.geodf_path.empty() && fs::exists(lock.geodf_path)) {
         geodf::GeodfReader prior_reader(lock.geodf_path);
         prior_reader.for_each_complete([&](const geodf::TaxonData& td) {
             if (affected_taxa.count(td.taxonomy))
-                return;  // will be re-processed
+                return;
 
             TaxonOutput to;
-            to.result.taxonomy         = td.taxonomy;
-            to.result.status           = TaxonStatus::SUCCESS;
-            to.result.n_genomes        = static_cast<int>(td.genome_ids.size());
+            to.result.taxonomy          = td.taxonomy;
+            to.result.status            = TaxonStatus::SUCCESS;
+            to.result.n_genomes         = static_cast<int>(td.genome_ids.size());
             to.result.n_representatives = static_cast<int>(td.rep_accessions.size());
-            to.all_accessions          = td.all_accessions;
-            to.representatives         = td.rep_accessions;
+            to.all_accessions           = td.all_accessions;
+            to.representatives          = td.rep_accessions;
             run_state.push(std::move(to));
         });
         spdlog::info("update: {} unchanged taxa copied from prior GEODF",
                      run_state.taxa().size());
     }
 
-    // 9. Build Taxon objects for affected taxa and re-dereplicate them
+    // 8. Build Taxon objects for affected taxa and re-dereplicate them
     std::vector<Taxon> affected_taxa_vec;
-    for (const auto& [tax, row_indices] : taxon_to_rows) {
-        if (!affected_taxa.count(tax))
-            continue;
+    for (const auto& [tax, accs] : taxon_to_accs) {
+        if (!affected_taxa.count(tax)) continue;
         Taxon t;
         t.taxonomy = tax;
-        for (size_t idx : row_indices) {
-            const auto& r = genome_rows[idx];
+        for (const auto& acc : accs) {
             Genome g;
-            g.accession = r.accession;
-            g.taxonomy  = r.taxonomy;
-            g.file_path = r.file_path;
+            g.accession = acc;
+            g.taxonomy  = tax;
             t.genomes.push_back(std::move(g));
         }
         affected_taxa_vec.push_back(std::move(t));
@@ -205,10 +198,13 @@ int run_update(Config& cfg) {
     if (!cfg.prefix.empty() && cfg.out_dir.has_value()) {
         fs::create_directories(*cfg.out_dir);
         ResultsWriter results_writer(*cfg.out_dir, cfg.prefix);
-        results_writer.write_all(run_state, genome_rows);
+        results_writer.write_all(run_state);
         ReportWriter report_writer(*cfg.out_dir, cfg.prefix, cfg.timestamp);
         report_writer.write(run_state);
     }
+
+    // Emit derep archive (.gpd) — best-effort.
+    emit_gpd_archive(cfg, run_state, gpk_reader.get());
 
     // 12. Write new lock file
     if (!cfg.lock_output.empty()) {

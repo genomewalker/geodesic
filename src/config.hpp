@@ -12,12 +12,11 @@ struct Config {
     Command command = Command::Derep;
 
     // I/O
-    std::filesystem::path tax_file;
-    std::optional<std::filesystem::path> selected_taxa_file;
+    std::filesystem::path genomes_file;     // --genomes: single-column accession list
+    std::optional<std::filesystem::path> references_file;  // --references: pin as reps
     std::optional<std::filesystem::path> checkm2_file;
     std::optional<std::filesystem::path> gunc_file;
     std::optional<std::filesystem::path> fixed_taxa_file;
-    std::optional<std::filesystem::path> fixed_reps_file;
     std::optional<std::filesystem::path> out_dir;
     std::string prefix;
     std::filesystem::path tmp_dir{"."};

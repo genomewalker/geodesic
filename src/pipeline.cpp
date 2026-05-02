@@ -13,7 +13,7 @@
 #include "db/geodf/geodf_writer.hpp"
 #include "db/geodf/geodf_reader.hpp"
 #include "db/grd/grd_writer.hpp"
-#include "db/taxdb/ncbi_taxdb.hpp"
+
 #include <genopack/archive.hpp>
 #include "io/lock_writer.hpp"
 #include "io/report_writer.hpp"
@@ -50,31 +50,6 @@ namespace {
 
 namespace fs = std::filesystem;
 
-std::unordered_set<std::string> read_selected_taxa(const fs::path& path) {
-    std::ifstream in(path);
-    if (!in)
-        throw std::runtime_error("Cannot open selected taxa file: " + path.string());
-
-    std::unordered_set<std::string> taxa;
-    std::string line;
-    while (std::getline(in, line)) {
-        auto start = line.find_first_not_of(" \t\r\n");
-        if (start == std::string::npos) continue;
-        auto end = line.find_last_not_of(" \t\r\n");
-        auto trimmed = line.substr(start, end - start + 1);
-        if (trimmed.empty() || trimmed[0] == '#') continue;
-        taxa.insert(std::move(trimmed));
-    }
-    spdlog::info("Read {} selected taxa from {}", taxa.size(), path.string());
-    return taxa;
-}
-
-// Derive a stable species-name stem from an accession, following GTDB convention:
-//   - Strip GTDB prefixes RS_/GB_ first
-//   - For NCBI-style accessions (GCF_/GCA_): strip the version suffix (.N)
-//   - For MAG/other IDs (TARA_*, spire_*, GOMC.*): use as-is
-// e.g. "RS_GCF_003697165.2" → "GCF_003697165", "spire_mag_00498234" → "spire_mag_00498234"
-using derep::taxonomy::normalize_taxonomy;
 using derep::taxonomy::has_accession_species;
 
 std::vector<Taxon> group_by_taxonomy(
@@ -110,25 +85,30 @@ std::vector<Taxon> group_by_taxonomy(
     return taxa;
 }
 
-std::vector<Genome> rows_to_genomes(
-    const std::vector<GenomeRow>& rows,
-    const std::unordered_map<std::string, CheckM2Quality>& checkm2,
-    const NcbiTaxdb* ncbi = nullptr) {
+std::vector<Genome> accessions_to_genomes(
+    const std::vector<std::string>& accessions,
+    IPackReader& pack,
+    const std::unordered_map<std::string, CheckM2Quality>& checkm2) {
     std::vector<Genome> genomes;
-    genomes.reserve(rows.size());
-    for (const auto& row : rows) {
+    genomes.reserve(accessions.size());
+    size_t n_missing_tax = 0;
+    for (const auto& acc : accessions) {
         Genome g;
-        g.accession = row.accession;
-        g.taxonomy = normalize_taxonomy(row.taxonomy, row.accession, ncbi);
-        g.file_path = row.file_path;
-
-        auto acc = canonical_accession(row.accession);
-        if (auto it = checkm2.find(acc); it != checkm2.end()) {
+        g.accession = acc;
+        g.taxonomy = pack.taxonomy_for_accession(acc);
+        if (g.taxonomy.empty()) {
+            ++n_missing_tax;
+            continue;
+        }
+        auto canon = canonical_accession(acc);
+        if (auto it = checkm2.find(canon); it != checkm2.end()) {
             g.completeness = it->second.completeness;
             g.contamination = it->second.contamination;
         }
         genomes.push_back(std::move(g));
     }
+    if (n_missing_tax > 0)
+        spdlog::warn("{} accessions have no taxonomy in pack (skipped)", n_missing_tax);
     return genomes;
 }
 
@@ -397,6 +377,139 @@ void process_taxa_parallel(
                  success, failed, singleton, fixed, skipped);
 }
 
+void emit_gpd_archive(const Config& cfg, const RunState& run_state,
+                      IPackReader* gpk_reader) {
+    if (cfg.gpd_output.empty()) return;
+    if (!cfg.pack_dir.has_value()) {
+        spdlog::warn("--emit-gpd requires --pack; skipping .gpd emission");
+        return;
+    }
+    try {
+        fs::path gpd_path = cfg.gpd_output;
+
+        genopack::ArchiveSetReader src;
+        src.open(*cfg.pack_dir);
+
+        geodesic::DerepArchiveBuilderConfig gcfg;
+        gcfg.output_path      = gpd_path;
+        gcfg.embedding_dim    = static_cast<uint16_t>(cfg.embedding_dim);
+        gcfg.embedding_dtype  = 1; // f16
+        gcfg.emit_armp        = true;
+        gcfg.zstd_level       = 6;
+        gcfg.geodesic_version = "geodesic 1.0.0";
+
+        geodesic::DerepArchiveBuilder ab(gcfg);
+        ab.set_source_pack(src);
+        ab.set_params({static_cast<uint8_t>(cfg.kmer_size)},
+                      static_cast<uint32_t>(cfg.sketch_size),
+                      cfg.seed, cfg.seed + 1,
+                      static_cast<float>(cfg.ani_threshold / 100.0));
+
+        auto f32_to_f16 = [](float fv) -> uint16_t {
+            uint32_t f;
+            std::memcpy(&f, &fv, 4);
+            uint32_t sign = (f >> 16) & 0x8000u;
+            int32_t  exp  = static_cast<int32_t>((f >> 23) & 0xFF) - 127 + 15;
+            uint32_t mant = f & 0x7FFFFFu;
+            if (exp <= 0) {
+                if (exp < -10) return static_cast<uint16_t>(sign);
+                mant |= 0x800000u;
+                uint32_t shift = static_cast<uint32_t>(14 - exp);
+                uint32_t halfm = mant >> shift;
+                if ((mant >> (shift - 1)) & 1) ++halfm;
+                return static_cast<uint16_t>(sign | halfm);
+            }
+            if (exp >= 31) return static_cast<uint16_t>(sign | 0x7C00u);
+            uint32_t out = sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13);
+            if (mant & 0x1000u) ++out;
+            return static_cast<uint16_t>(out);
+        };
+
+        auto get_locator = [&](std::string_view acc) -> uint64_t {
+            if (!gpk_reader) return 0ULL;
+            auto m = gpk_reader->genome_meta_by_accession(acc);
+            return m ? static_cast<uint64_t>(m->genome_id) : 0ULL;
+        };
+
+        std::unordered_set<std::string> excluded_accs;
+        for (const auto& taxon : run_state.taxa()) {
+            for (const auto& o : taxon.outliers)
+                if (o.excluded) excluded_accs.insert(o.accession);
+            for (const auto& f : taxon.failed_genomes)
+                excluded_accs.insert(f.accession);
+        }
+
+        std::vector<uint16_t> emb_f16(cfg.embedding_dim, 0);
+        size_t n_reps_total = 0, n_genomes_total = 0;
+
+        for (const auto& taxon : run_state.taxa()) {
+            if (taxon.result.status == TaxonStatus::FAILED) continue;
+
+            const std::unordered_set<std::string> rep_set(
+                taxon.representatives.begin(), taxon.representatives.end());
+            std::unordered_map<std::string, size_t> rep_idx;
+            rep_idx.reserve(taxon.representatives.size());
+            for (size_t i = 0; i < taxon.representatives.size(); ++i)
+                rep_idx[taxon.representatives[i]] = i;
+
+            const uint16_t kmer_used =
+                taxon.sketch_kmer_used > 0
+                    ? static_cast<uint16_t>(taxon.sketch_kmer_used)
+                    : static_cast<uint16_t>(cfg.kmer_size);
+
+            for (const auto& acc : taxon.all_accessions) {
+                const uint64_t loc = get_locator(acc);
+                if (excluded_accs.count(acc)) {
+                    ab.add(acc, geodesic::DerepArchiveBuilder::Kind::Unclustered,
+                           {}, loc, kmer_used, 0, nullptr);
+                    ++n_genomes_total;
+                    continue;
+                }
+                auto rit = rep_idx.find(acc);
+                if (rit != rep_idx.end()) {
+                    const auto& vec = (rit->second < taxon.rep_embeddings.size())
+                        ? taxon.rep_embeddings[rit->second]
+                        : std::vector<float>();
+                    for (int d = 0; d < cfg.embedding_dim; ++d) {
+                        float fv = (d < static_cast<int>(vec.size())) ? vec[d] : 0.0f;
+                        emb_f16[d] = f32_to_f16(fv);
+                    }
+                    uint32_t cs = 1;
+                    auto csit = taxon.rep_cluster_size.find(acc);
+                    if (csit != taxon.rep_cluster_size.end()) cs = csit->second;
+                    ab.add(acc, geodesic::DerepArchiveBuilder::Kind::Representative,
+                           acc, loc, kmer_used, cs, emb_f16.data());
+                    ++n_reps_total;
+                    ++n_genomes_total;
+                } else {
+                    std::string rep_acc;
+                    auto mit = taxon.member_to_rep.find(acc);
+                    if (mit != taxon.member_to_rep.end()) {
+                        rep_acc = mit->second;
+                    } else if (!taxon.representatives.empty()) {
+                        rep_acc = taxon.representatives.front();
+                    }
+                    if (rep_acc.empty()) {
+                        ab.add(acc, geodesic::DerepArchiveBuilder::Kind::Unclustered,
+                               {}, loc, kmer_used, 0, nullptr);
+                    } else {
+                        ab.add(acc, geodesic::DerepArchiveBuilder::Kind::Member,
+                               rep_acc, loc, kmer_used, 0, nullptr);
+                    }
+                    ++n_genomes_total;
+                }
+            }
+        }
+
+        ab.finalize();
+        spdlog::info("wrote derep archive: {} (n_reps={}, n_genomes={}, dim={})",
+                     gpd_path.string(), n_reps_total, n_genomes_total,
+                     static_cast<int>(cfg.embedding_dim));
+    } catch (const std::exception& e) {
+        spdlog::warn("GPD emission failed: {} — TSV outputs unaffected", e.what());
+    }
+}
+
 int run_pipeline(Config& cfg) {
     // 1. Setup directories
     fs::path results_dir = cfg.out_dir
@@ -419,14 +532,12 @@ int run_pipeline(Config& cfg) {
     spdlog::info("Temp dir: {}", temp_dir.string());
 
     // 3. Load input
-    auto genome_rows = read_genomes_tsv(cfg.tax_file);
+    auto accessions = read_accession_list(cfg.genomes_file);
 
     std::unordered_map<std::string, CheckM2Quality> checkm2;
     if (cfg.checkm2_file) {
         checkm2 = read_checkm2_tsv(*cfg.checkm2_file);
-        auto matched = count_checkm2_matches(genome_rows, checkm2);
-        spdlog::info("CheckM2: {} of {} genomes have quality data",
-                     matched, genome_rows.size());
+        spdlog::info("CheckM2: {} entries loaded", checkm2.size());
     }
 
     std::unordered_map<std::string, GuncQuality> gunc_scores;
@@ -443,97 +554,38 @@ int run_pipeline(Config& cfg) {
         fixed_taxa = read_fixed_taxa_tsv(*cfg.fixed_taxa_file);
     }
 
-    // Load NCBI taxdump for Eukaryote/Virus taxonomy resolution (optional).
-    std::unique_ptr<NcbiTaxdb> ncbi_taxdb;
-    if (cfg.ncbi_taxdump_dir) {
-        NcbiTaxdb::ensure_fresh(*cfg.ncbi_taxdump_dir);
-        auto db = NcbiTaxdb::load(*cfg.ncbi_taxdump_dir);
-        spdlog::info("NCBI taxdump loaded: {} nodes, timestamp: {}",
-                     db.size(),
-                     [&]() -> std::string {
-                         auto ts = NcbiTaxdb::dump_timestamp(*cfg.ncbi_taxdump_dir);
-                         if (!ts) return "unknown";
-                         auto t = std::chrono::system_clock::to_time_t(*ts);
-                         char buf[32];
-                         std::strftime(buf, sizeof(buf), "%Y-%m-%d", std::localtime(&t));
-                         return buf;
-                     }());
-        ncbi_taxdb = std::make_unique<NcbiTaxdb>(std::move(db));
-    }
-
-    auto genomes = rows_to_genomes(genome_rows, checkm2, ncbi_taxdb.get());
-
-    // 5. Group by taxonomy and build Taxon objects
-    auto taxa = group_by_taxonomy(genomes, fixed_taxa);
-
-    // 6. Filter by selected taxa
-    if (cfg.selected_taxa_file) {
-        auto selected = read_selected_taxa(*cfg.selected_taxa_file);
-        std::erase_if(taxa, [&](const Taxon& t) {
-            return selected.find(t.taxonomy) == selected.end();
-        });
-        spdlog::info("Filtered to {} taxa by selected taxa file", taxa.size());
-    }
-
-    // 8. Log stats
-    std::size_t total_genomes = 0;
-    for (const auto& t : taxa) total_genomes += t.size();
-    spdlog::info("{} taxa, {} genomes total", taxa.size(), total_genomes);
-
     // In-memory accumulator: receives a TaxonOutput for every completed taxon.
     RunState run_state;
 
-    // Open genome pack if --pack was provided.
-    // Single .gpk directory → SinglePackReader.
-    // Directory containing multiple .gpk subdirectories → MultiPackReader (no merge needed).
+    // Open genome pack (required — taxonomy, sequences, and sketches are read from pack).
+    if (!cfg.pack_dir.has_value())
+        throw std::runtime_error("--pack is required");
     std::unique_ptr<IPackReader> gpk_reader;
-    if (cfg.pack_dir.has_value()) {
-        try {
-            const auto& pack_path = *cfg.pack_dir;
-            if (pack_path.extension() == ".gpk") {
-                auto ar = std::make_unique<genopack::ArchiveReader>();
-                ar->open(pack_path);
-                gpk_reader = std::make_unique<SinglePackReader>(std::move(ar));
-                spdlog::info("genopack single archive opened: {}", pack_path.string());
-            } else {
-                gpk_reader = MultiPackReader::open_dir(pack_path);
-                spdlog::info("genopack multi-pack opened: {} archives, {} genomes",
-                             static_cast<MultiPackReader*>(gpk_reader.get())->n_archives(),
-                             static_cast<MultiPackReader*>(gpk_reader.get())->n_genomes());
-            }
-
-            // Filter taxa to only genomes indexed in the pack.
-            std::unordered_set<std::string> archive_accessions;
-            archive_accessions.reserve(genome_rows.size());
-            gpk_reader->scan_genome_accessions(
-                [&](std::string_view acc, genopack::GenomeId) {
-                    archive_accessions.emplace(acc);
-                });
-            spdlog::info("genopack: {} genomes in archive", archive_accessions.size());
-
-            size_t n_before = 0, n_after = 0;
-            for (auto& taxon : taxa) {
-                n_before += taxon.size();
-                taxon.genomes.erase(
-                    std::remove_if(taxon.genomes.begin(), taxon.genomes.end(),
-                        [&](const Genome& g) {
-                            return archive_accessions.count(g.accession) == 0;
-                        }),
-                    taxon.genomes.end());
-                n_after += taxon.size();
-            }
-            taxa.erase(std::remove_if(taxa.begin(), taxa.end(),
-                                      [](const Taxon& t) { return t.size() == 0; }),
-                       taxa.end());
-            spdlog::info("genopack filter: {}/{} genomes in taxa after archive filter",
-                         n_after, n_before);
-
-        } catch (const std::exception& e) {
-            spdlog::warn("Failed to open genopack archive at {}: {} — proceeding without",
-                         cfg.pack_dir->string(), e.what());
-            gpk_reader.reset();
+    {
+        const auto& pack_path = *cfg.pack_dir;
+        if (pack_path.extension() == ".gpk") {
+            auto ar = std::make_unique<genopack::ArchiveReader>();
+            ar->open(pack_path);
+            gpk_reader = std::make_unique<SinglePackReader>(std::move(ar));
+            spdlog::info("genopack single archive opened: {}", pack_path.string());
+        } else {
+            gpk_reader = MultiPackReader::open_dir(pack_path);
+            spdlog::info("genopack multi-pack opened: {} archives, {} genomes",
+                         static_cast<MultiPackReader*>(gpk_reader.get())->n_archives(),
+                         static_cast<MultiPackReader*>(gpk_reader.get())->n_genomes());
         }
     }
+
+    // Build Genome objects — taxonomy resolved from pack TAXN section.
+    auto genomes = accessions_to_genomes(accessions, *gpk_reader, checkm2);
+
+    // Group by taxonomy and build Taxon objects.
+    auto taxa = group_by_taxonomy(genomes, fixed_taxa);
+
+    // Log stats
+    std::size_t total_genomes = 0;
+    for (const auto& t : taxa) total_genomes += t.size();
+    spdlog::info("{} taxa, {} genomes total", taxa.size(), total_genomes);
 
     // 9. Open GRD writer if requested (stream-writes per taxon during parallel processing)
     std::unique_ptr<grd::GrdWriter> grd_writer;
@@ -688,7 +740,7 @@ int run_pipeline(Config& cfg) {
 
     // 11. Summary and output
     ResultsWriter writer(results_dir, cfg.prefix);
-    writer.write_all(run_state, genome_rows);
+    writer.write_all(run_state);
 
     ReportWriter report_writer(results_dir, cfg.prefix, cfg.timestamp);
     report_writer.write(run_state);
@@ -755,141 +807,8 @@ int run_pipeline(Config& cfg) {
         }
     }
 
-    // Emit derep archive (.gpd) — best-effort; TSVs already written, run still succeeds on failure.
-    if (!cfg.gpd_output.empty()) {
-        if (!cfg.pack_dir.has_value()) {
-            spdlog::warn("--emit-gpd requires --pack; skipping .gpd emission");
-        } else {
-            try {
-                fs::path gpd_path = cfg.gpd_output;
-
-                genopack::ArchiveSetReader src;
-                src.open(*cfg.pack_dir);
-
-                geodesic::DerepArchiveBuilderConfig gcfg;
-                gcfg.output_path      = gpd_path;
-                gcfg.embedding_dim    = static_cast<uint16_t>(cfg.embedding_dim);
-                gcfg.embedding_dtype  = 1; // f16
-                gcfg.emit_armp        = true;
-                gcfg.zstd_level       = 6;
-                gcfg.geodesic_version = "geodesic 1.0.0";
-
-                geodesic::DerepArchiveBuilder ab(gcfg);
-                ab.set_source_pack(src);
-                ab.set_params({static_cast<uint8_t>(cfg.kmer_size)},
-                              static_cast<uint32_t>(cfg.sketch_size),
-                              cfg.seed, cfg.seed + 1,
-                              static_cast<float>(cfg.ani_threshold / 100.0));
-
-                auto f32_to_f16 = [](float fv) -> uint16_t {
-                    uint32_t f;
-                    std::memcpy(&f, &fv, 4);
-                    uint32_t sign = (f >> 16) & 0x8000u;
-                    int32_t  exp  = static_cast<int32_t>((f >> 23) & 0xFF) - 127 + 15;
-                    uint32_t mant = f & 0x7FFFFFu;
-                    if (exp <= 0) {
-                        if (exp < -10) return static_cast<uint16_t>(sign);
-                        mant |= 0x800000u;
-                        uint32_t shift = static_cast<uint32_t>(14 - exp);
-                        uint32_t halfm = mant >> shift;
-                        if ((mant >> (shift - 1)) & 1) ++halfm;
-                        return static_cast<uint16_t>(sign | halfm);
-                    }
-                    if (exp >= 31) return static_cast<uint16_t>(sign | 0x7C00u);
-                    uint32_t out = sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13);
-                    if (mant & 0x1000u) ++out;
-                    return static_cast<uint16_t>(out);
-                };
-
-                auto get_locator = [&](std::string_view acc) -> uint64_t {
-                    if (!gpk_reader) return 0ULL;
-                    auto m = gpk_reader->genome_meta_by_accession(acc);
-                    return m ? static_cast<uint64_t>(m->genome_id) : 0ULL;
-                };
-
-                std::unordered_set<std::string> excluded_accs;
-                for (const auto& taxon : run_state.taxa()) {
-                    for (const auto& o : taxon.outliers)
-                        if (o.excluded) excluded_accs.insert(o.accession);
-                    for (const auto& f : taxon.failed_genomes)
-                        excluded_accs.insert(f.accession);
-                }
-
-                std::vector<uint16_t> emb_f16(cfg.embedding_dim, 0);
-                size_t n_reps_total = 0, n_genomes_total = 0;
-
-                for (const auto& taxon : run_state.taxa()) {
-                    if (taxon.result.status == TaxonStatus::FAILED) continue;
-
-                    const std::unordered_set<std::string> rep_set(
-                        taxon.representatives.begin(), taxon.representatives.end());
-                    std::unordered_map<std::string, size_t> rep_idx;
-                    rep_idx.reserve(taxon.representatives.size());
-                    for (size_t i = 0; i < taxon.representatives.size(); ++i)
-                        rep_idx[taxon.representatives[i]] = i;
-
-                    const uint16_t kmer_used =
-                        taxon.sketch_kmer_used > 0
-                            ? static_cast<uint16_t>(taxon.sketch_kmer_used)
-                            : static_cast<uint16_t>(cfg.kmer_size);
-
-                    for (const auto& acc : taxon.all_accessions) {
-                        const uint64_t loc = get_locator(acc);
-                        if (excluded_accs.count(acc)) {
-                            ab.add(acc,
-                                   geodesic::DerepArchiveBuilder::Kind::Unclustered,
-                                   {}, loc, kmer_used, 0, nullptr);
-                            ++n_genomes_total;
-                            continue;
-                        }
-                        auto rit = rep_idx.find(acc);
-                        if (rit != rep_idx.end()) {
-                            const auto& vec = (rit->second < taxon.rep_embeddings.size())
-                                ? taxon.rep_embeddings[rit->second]
-                                : std::vector<float>();
-                            for (int d = 0; d < cfg.embedding_dim; ++d) {
-                                float fv = (d < static_cast<int>(vec.size())) ? vec[d] : 0.0f;
-                                emb_f16[d] = f32_to_f16(fv);
-                            }
-                            uint32_t cs = 1;
-                            auto csit = taxon.rep_cluster_size.find(acc);
-                            if (csit != taxon.rep_cluster_size.end()) cs = csit->second;
-                            ab.add(acc,
-                                   geodesic::DerepArchiveBuilder::Kind::Representative,
-                                   acc, loc, kmer_used, cs, emb_f16.data());
-                            ++n_reps_total;
-                            ++n_genomes_total;
-                        } else {
-                            std::string rep_acc;
-                            auto mit = taxon.member_to_rep.find(acc);
-                            if (mit != taxon.member_to_rep.end()) {
-                                rep_acc = mit->second;
-                            } else if (!taxon.representatives.empty()) {
-                                rep_acc = taxon.representatives.front();
-                            }
-                            if (rep_acc.empty()) {
-                                ab.add(acc,
-                                       geodesic::DerepArchiveBuilder::Kind::Unclustered,
-                                       {}, loc, kmer_used, 0, nullptr);
-                            } else {
-                                ab.add(acc,
-                                       geodesic::DerepArchiveBuilder::Kind::Member,
-                                       rep_acc, loc, kmer_used, 0, nullptr);
-                            }
-                            ++n_genomes_total;
-                        }
-                    }
-                }
-
-                ab.finalize();
-                spdlog::info("[info] wrote derep archive: {} (n_reps={}, n_genomes={}, dim={})",
-                             gpd_path.string(), n_reps_total, n_genomes_total,
-                             static_cast<int>(cfg.embedding_dim));
-            } catch (const std::exception& e) {
-                spdlog::warn("GPD emission failed: {} — TSV outputs unaffected", e.what());
-            }
-        }
-    }
+    // Emit derep archive (.gpd) — best-effort; TSVs already written.
+    emit_gpd_archive(cfg, run_state, gpk_reader.get());
 
     // Write lock file if requested
     if (!cfg.lock_output.empty()) {

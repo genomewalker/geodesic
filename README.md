@@ -52,24 +52,22 @@ Binary at `build/geodesic`. RPATH is embedded -- no `LD_LIBRARY_PATH` needed.
 ## Usage
 
 ```bash
-geodesic derep -t genomes.tsv --threads 24 -p my_run
+geodesic derep -g genomes.txt --pack mydb.gpk --threads 24 -p my_run
 ```
 
 ### Input
 
-`--tax-file` (TSV) is required; `--pack` is optional and reads sequences from a local genopack archive instead of NFS. When both are given, the TSV restricts which accessions are processed.
+`--genomes` and `--pack` are both required. Taxonomy is read from the pack's TAXN section — no taxonomy column needed.
 
-**Plain TSV** (with header):
+**Accession list** (`--genomes <file>`): one accession per line, `#` comments allowed.
 
 ```
-accession	taxonomy	file
-GCA_000001405	d__Bacteria;...;s__Escherichia coli	/path/to/genome.fna.gz
+# E. coli collection
+GCA_000001405
+GCA_000005845
 ```
 
-- `taxonomy`: GTDB-style semicolon-separated lineage (`d__;p__;c__;o__;f__;g__;s__`)
-- `file`: absolute path to FASTA (plain or gzip)
-
-**genopack archive** (`--pack <dir>`): a single `.gpk` archive directory or a directory containing one or more `part_*.gpk` parts (multipart set). Sequences (and OPH sketches when present) are served from the local pack instead of opening FASTA files over NFS.
+**genopack archive** (`--pack <dir>`): a single `.gpk` archive directory or a directory containing one or more `part_*.gpk` parts (multipart set). Genome sequences, OPH sketches, and taxonomy are all read from the pack — no FASTA files needed.
 
 ### Output
 
@@ -77,12 +75,12 @@ Results written to the working directory (or `--out-dir`). TSV outputs are alway
 
 | File | When | Contents |
 |---|---|---|
-| `<prefix>_derep_genomes.tsv` | always | `accession`, `taxonomy`, `file`, `representative` (0/1) — one row per genome |
+| `<prefix>_derep_genomes.tsv` | always | `accession`, `taxonomy`, `representative` (0/1) — one row per genome |
 | `<prefix>_results.tsv`       | always | Per-taxon summary (`taxonomy`, `method`, `n_genomes`, `n_genomes_derep`, `communities`, `weight`) |
 | `<prefix>_diversity_stats.tsv` | always | Coverage and diversity metrics per taxon |
 | `<prefix>_stats.tsv`         | always | Per-taxon pipeline stats (preflight/quality/outlier counts, MST edges, ANI threshold used) |
 | `<prefix>_outliers.tsv`      | always | Flagged anomalous genomes (isolation score outliers) |
-| `<prefix>_failed.tsv`        | always | Genomes that failed sketching/embedding (`accession`, `taxonomy`, `file`, `reason`) |
+| `<prefix>_failed.tsv`        | always | Genomes that failed sketching/embedding (`accession`, `taxonomy`, `reason`) |
 | `<path>.grd`                 | `--grd-output` | GRD archive: per-genome OPH sketches + Nyström embeddings + indexes (TIDX/ACCX/STRT). Required for `gather` merging across distributed shards. |
 | `<path>.gpd`                 | `--emit-gpd`   | Geodesic Derep Archive consumed by `genopack::DerepView` (see [Derep Output](wiki/Derep-Output)). Requires `--pack`. |
 | `<path>.geodf`               | `--geodf-output` | Binary results file (rep set + per-genome embeddings); referenced by the `--lock-output` JSON. |
@@ -94,14 +92,13 @@ Results written to the working directory (or `--out-dir`). TSV outputs are alway
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-t, --tax-file` | required | Taxonomy TSV (`accession\ttaxonomy\tfile_path`) |
-| `--pack` | -- | genopack archive (single `.gpk` directory or directory of `part_*.gpk` parts) |
+| `-g, --genomes` | required | Accession list (one per line; taxonomy read from pack TAXN section) |
+| `--pack` | required | genopack archive (single `.gpk` directory or directory of `part_*.gpk` parts) |
 | `-o, --out-dir` | -- | Output directory for representative FASTA copies (only when `--copy-reps` is set) |
 | `-p, --prefix` | -- | Prefix for `<prefix>_*.tsv` outputs |
 | `--tmp-dir` | `.` | Temporary directory |
-| `--selected-taxa` | -- | File restricting which taxa to process |
+| `--references` | -- | File of accessions (one per line) to always include as representatives |
 | `--fixed-taxa` | -- | File with fixed representative assignments (skip selection for those taxa) |
-| `--fixed-reps` | -- | File of accessions (one per line) to always include as representatives |
 | `--grd-output` | -- | Path for `.grd` archive (sketches + embeddings); required for `gather` |
 | `--emit-gpd` | -- | Path for `.gpd` derep archive (requires `--pack`); empty string = `<out-dir>/<prefix>.gpd` |
 | `--geodf-output` | -- | Path for `.geodf` binary results file |
@@ -138,7 +135,6 @@ Results written to the working directory (or `--out-dir`). TSV outputs are alway
 | `--k-cap-max` | 256 | Max `K_cap` retry value when k-NN graph fails to connect at 64 |
 | `--nystrom-diagonal-loading` | 0.01 | Tikhonov regularisation fraction |
 | `--nystrom-degree-normalize / --no-nystrom-degree-normalize` | on | Symmetric Laplacian normalisation of Gram matrix |
-| `--ncbi-taxdump` | -- | Directory with `nodes.dmp`+`names.dmp` for Eukaryote/Virus taxonomy resolution (auto-downloaded if absent) |
 
 **Determinism.** geodesic pins Eigen to a single thread (`Eigen::setNbThreads(1)`) at startup and derives every per-phase RNG seed from `--seed`, so a fixed `--seed` (and identical input ordering) yields bit-identical derep results across runs and machines.
 
@@ -148,7 +144,7 @@ For large collections across multiple nodes, use scatter/gather:
 
 ```bash
 # 1. Partition input across N workers
-geodesic scatter -t genomes.tsv -n 4 -o dist/ --threads 24
+geodesic scatter -g genomes.txt --pack mydb.gpk -n 4 -o dist/ --threads 24
 
 # 2. Run each partition (via sbatch, ssh, GNU parallel, etc.)
 bash dist/run.sh                    # sequential
@@ -165,11 +161,11 @@ Each worker runs an independent `geodesic derep` on its partition. No shared sta
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `scatter -t, --tax-file` | required | Input taxonomy TSV |
+| `scatter -g, --genomes` | required | Accession list (one per line) |
+| `scatter --pack` | required | genopack archive (taxonomy resolved from TAXN section) |
 | `scatter -n, --partitions` | required | Number of partitions |
 | `scatter -o, --output-dir` | required | Output directory for partition files and worker script |
 | `scatter --rank` | `g` | Taxonomy rank for LPT partitioning (`g`=genus, `f`=family, `s`=species) |
-| `scatter --pack` | -- | genopack archive path (passed through to worker commands) |
 | `scatter --tmp-dir` | scatter dir | Temporary directory for workers |
 | `scatter --threads` | 4 | Threads per worker (baked into generated `run.sh`) |
 | `gather -d, --shard-dir` | required | Directory containing shard results |
@@ -180,15 +176,16 @@ See [Distributed Mode](wiki/Distributed-Mode.md) for the full workflow.
 
 ### Incremental updates
 
-`geodesic update` extends a previous run with new genomes without redoing work:
+`geodesic update` extends a previous run with new genomes without redoing work. The pack is the source of truth — add new genomes with `genopack reindex`, then point `update` at the grown pack and an updated accession list:
 
 ```bash
-geodesic update -t new_genomes.tsv --lock prev_run.lock \
+geodesic update -g new_genomes.txt --lock prev_run.lock \
+    --pack mydb_v2.gpk \
     --geodf-output updated.geodf --lock-output updated.lock \
-    --pack mydb.gpk --threads 24
+    --threads 24
 ```
 
-`--lock` takes the JSON lock file written by `--lock-output` (it points to the prior run's `.geodf`); `update` only sketches new genomes and re-runs FPS / certification on the diff.
+`--lock` takes the JSON lock file written by `--lock-output`. `update` diffs accessions in the new list against the prior GEODF, identifies which taxa gained members (taxonomy resolved from pack TAXN), and re-runs only those taxa. Unchanged taxa are copied from the prior GEODF without recomputation.
 
 ## Performance
 

@@ -96,6 +96,14 @@ public:
     }
     size_t n_archives() const override { return inner_->n_archives(); }
 
+    std::string taxonomy_for_accession(std::string_view acc) const override {
+        return inner_->taxonomy_for_accession(acc);
+    }
+    void scan_taxonomy(
+        const std::function<void(std::string_view, std::string_view)>& cb) const override {
+        inner_->scan_taxonomy(cb);
+    }
+
     IPackReader* inner() const { return inner_.get(); }
 
 private:

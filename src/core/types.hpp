@@ -1,6 +1,5 @@
 #pragma once
 #include <cstdint>
-#include <filesystem>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -11,7 +10,6 @@ namespace derep {
 struct Genome {
     std::string accession;
     std::string taxonomy;
-    std::filesystem::path file_path;
     uint64_t genome_length = 0;
     std::optional<double> completeness;
     std::optional<double> contamination;

@@ -102,6 +102,10 @@ public:
 
     uint16_t archive_idx_for_accession(std::string_view acc) const override;
 
+    std::string taxonomy_for_accession(std::string_view acc) const override;
+    void scan_taxonomy(
+        const std::function<void(std::string_view, std::string_view)>& cb) const override;
+
 private:
     struct ArchiveEntry {
         std::unique_ptr<genopack::ArchiveReader> reader;

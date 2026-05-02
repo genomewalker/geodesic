@@ -730,10 +730,10 @@ TaxonResult process_taxon(
         geodesic.exclude_from_reps(contaminated_accessions);
 
         // Pre-seed fixed representatives (--fixed-reps) before FPS
-        if (cfg.fixed_reps_file) {
+        if (cfg.references_file) {
             const auto fixed_accessions = [&]() {
                 std::unordered_set<std::string> s;
-                std::ifstream f(*cfg.fixed_reps_file);
+                std::ifstream f(*cfg.references_file);
                 std::string line;
                 while (std::getline(f, line)) {
                     if (!line.empty()) s.insert(line);

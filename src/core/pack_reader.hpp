@@ -63,6 +63,12 @@ struct IPackReader {
 
     virtual uint16_t archive_idx_for_accession(std::string_view acc) const = 0;
     virtual size_t n_archives() const = 0;
+
+    // Taxonomy access (TAXN section).
+    virtual std::string taxonomy_for_accession(std::string_view acc) const = 0;
+    virtual void scan_taxonomy(
+        const std::function<void(std::string_view acc,
+                                 std::string_view taxonomy)>& cb) const = 0;
 };
 
 // Thin wrapper over a single ArchiveReader.
@@ -143,6 +149,15 @@ public:
 
     uint16_t archive_idx_for_accession(std::string_view /*acc*/) const override { return 0; }
     size_t n_archives() const override { return 1; }
+
+    std::string taxonomy_for_accession(std::string_view acc) const override {
+        auto t = reader_->taxonomy_for_accession(acc);
+        return t ? std::string(*t) : std::string{};
+    }
+    void scan_taxonomy(
+        const std::function<void(std::string_view, std::string_view)>& cb) const override {
+        reader_->scan_taxonomy(cb);
+    }
 
 private:
     std::unique_ptr<genopack::ArchiveReader> reader_;

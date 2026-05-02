@@ -12,10 +12,7 @@ namespace derep::taxonomy {
 
 namespace {
 
-// Extract the rank key (e.g., "g__Escherichia") from a taxonomy string.
-// rank_prefix is "g__" for genus, "f__" for family, etc.
 std::string extract_rank_key(std::string_view taxonomy, std::string_view rank_prefix) {
-    // Search for ";g__" or start-of-string "g__"
     std::string needle = ";";
     needle += rank_prefix;
     auto pos = taxonomy.find(needle);
@@ -26,7 +23,6 @@ std::string extract_rank_key(std::string_view taxonomy, std::string_view rank_pr
                            end == std::string_view::npos ? std::string_view::npos
                                                          : end - start));
     }
-    // Check if it starts with the rank_prefix directly
     if (taxonomy.starts_with(rank_prefix)) {
         auto end = taxonomy.find(';');
         return std::string(taxonomy.substr(0,
@@ -37,46 +33,42 @@ std::string extract_rank_key(std::string_view taxonomy, std::string_view rank_pr
 
 } // namespace
 
-size_t partition_tsv(const PartitionConfig& cfg) {
+size_t partition_accessions(const PartitionConfig& cfg) {
     if (cfg.n_parts <= 0)
         throw std::runtime_error("n_parts must be >= 1");
+    if (!cfg.acc_taxonomy)
+        throw std::runtime_error("partition_accessions: acc_taxonomy map required");
 
     const std::string rank_prefix = cfg.rank + "__";
     std::filesystem::create_directories(cfg.output_dir);
 
-    // Read header + all rows
-    std::ifstream fin(cfg.input_tsv);
-    if (!fin) throw std::runtime_error("Cannot open: " + cfg.input_tsv.string());
+    std::ifstream fin(cfg.input_accessions);
+    if (!fin) throw std::runtime_error("Cannot open: " + cfg.input_accessions.string());
 
-    std::string header;
-    std::getline(fin, header);
-
-    // Group rows by rank key
-    // Using map (sorted) so output is deterministic
-    std::map<std::string, std::vector<std::string>> rank_rows;
+    std::map<std::string, std::vector<std::string>> rank_accs;
     std::string line;
     size_t total = 0;
     while (std::getline(fin, line)) {
-        if (line.empty()) continue;
-        // taxonomy is column index 1
-        std::string_view sv(line);
-        auto t1 = sv.find('\t');
-        if (t1 == std::string_view::npos) { rank_rows["__unknown__"].push_back(line); ++total; continue; }
-        auto t2 = sv.find('\t', t1 + 1);
-        std::string_view tax = (t2 == std::string_view::npos)
-                               ? sv.substr(t1 + 1)
-                               : sv.substr(t1 + 1, t2 - t1 - 1);
-        rank_rows[extract_rank_key(tax, rank_prefix)].push_back(std::move(line));
+        auto s = line.find_first_not_of(" \t\r\n");
+        if (s == std::string::npos) continue;
+        auto e = line.find_last_not_of(" \t\r\n");
+        auto acc = line.substr(s, e - s + 1);
+        if (acc.empty() || acc[0] == '#') continue;
+
+        std::string rank_key = "__unknown__";
+        auto it = cfg.acc_taxonomy->find(acc);
+        if (it != cfg.acc_taxonomy->end())
+            rank_key = extract_rank_key(it->second, rank_prefix);
+
+        rank_accs[rank_key].push_back(std::move(acc));
         ++total;
     }
-    fin.close();
 
-    spdlog::info("taxonomy partition: {} genomes, {} unique {} groups",
-                 total, rank_rows.size(), rank_prefix);
+    spdlog::info("taxonomy partition: {} accessions, {} unique {} groups",
+                 total, rank_accs.size(), rank_prefix);
 
-    // LPT: sort rank groups descending by size, assign to least-loaded bin
     std::vector<std::pair<std::string, std::vector<std::string>>> groups(
-        rank_rows.begin(), rank_rows.end());
+        rank_accs.begin(), rank_accs.end());
     std::sort(groups.begin(), groups.end(),
               [](const auto& a, const auto& b) {
                   return a.second.size() > b.second.size();
@@ -92,24 +84,20 @@ size_t partition_tsv(const PartitionConfig& cfg) {
         bin_counts[target] += it->second.size();
     }
 
-    // Write part TSVs (sort by taxonomy key within each part for better compression)
     for (int i = 0; i < cfg.n_parts; ++i) {
-        auto out_path = cfg.output_dir / ("part_" + std::to_string(i) + ".tsv");
+        auto out_path = cfg.output_dir / ("part_" + std::to_string(i) + ".txt");
         std::ofstream fout(out_path);
         if (!fout) throw std::runtime_error("Cannot write: " + out_path.string());
-        fout << header << '\n';
-        // Sort bins[i] by rank key (already sorted since groups came from a map)
         std::sort(bins[i].begin(), bins[i].end(),
                   [](auto a, auto b) { return a->first < b->first; });
         for (auto it : bins[i])
-            for (const auto& row : it->second)
-                fout << row << '\n';
+            for (const auto& acc : it->second)
+                fout << acc << '\n';
         spdlog::info("  part_{}: {} genomes, {} {} groups → {}",
                      i, bin_counts[i], bins[i].size(), rank_prefix,
                      out_path.string());
     }
 
-    // Log load balance
     std::vector<size_t> sorted_counts = bin_counts;
     std::sort(sorted_counts.begin(), sorted_counts.end());
     spdlog::info("taxonomy partition: load balance min={} max={} ({}% imbalance)",

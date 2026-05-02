@@ -16,11 +16,12 @@ Config parse_args(int argc, char** argv) {
     // ── derep subcommand ────────────────────────────────────────────────────
     auto* derep = app.add_subcommand("derep", "Run dereplication pipeline");
 
-    derep->add_option("-t,--tax-file", cfg.tax_file, "Taxonomy file (TSV: accession, taxonomy, file_path)")
+    derep->add_option("-g,--genomes", cfg.genomes_file, "Accession list (one per line; taxonomy read from pack)")
         ->required()
         ->check(CLI::ExistingFile);
 
-    derep->add_option("--selected-taxa", cfg.selected_taxa_file, "File with selected taxa to process")
+    derep->add_option("--references", cfg.references_file,
+        "Accessions to pin as representatives (one per line)")
         ->check(CLI::ExistingFile);
 
     derep->add_option("--checkm2", cfg.checkm2_file, "CheckM2 quality report file")
@@ -31,10 +32,6 @@ Config parse_args(int argc, char** argv) {
         ->check(CLI::ExistingFile);
 
     derep->add_option("--fixed-taxa", cfg.fixed_taxa_file, "File with fixed representative assignments")
-        ->check(CLI::ExistingFile);
-
-    derep->add_option("--fixed-reps", cfg.fixed_reps_file,
-        "File with accessions (one per line) to always include as representatives")
         ->check(CLI::ExistingFile);
 
     derep->add_option("-o,--out-dir", cfg.out_dir, "Output directory for representative copies");
@@ -124,8 +121,8 @@ Config parse_args(int argc, char** argv) {
     auto* update_cmd = app.add_subcommand("update",
         "Incrementally re-dereplicate: sketch new genomes, re-run only affected taxa");
 
-    update_cmd->add_option("-t,--tax-file", cfg.tax_file,
-        "New taxonomy file (TSV: accession, taxonomy, file_path)")
+    update_cmd->add_option("-g,--genomes", cfg.genomes_file,
+        "Accession list (one per line; taxonomy read from pack)")
         ->required()
         ->check(CLI::ExistingFile);
 
@@ -139,6 +136,9 @@ Config parse_args(int argc, char** argv) {
 
     update_cmd->add_option("--geodf-output", cfg.geodf_output,
         "Path to write updated GEODF results file");
+
+    update_cmd->add_option("--emit-gpd", cfg.gpd_output,
+        "Path to write updated derep archive (.gpd)");
 
     update_cmd->add_option("--lock-output", cfg.lock_output,
         "Write updated geodesic.lock provenance file");
@@ -172,8 +172,8 @@ Config parse_args(int argc, char** argv) {
     auto* scatter_cmd = app.add_subcommand("scatter",
         "Partition input TSV for distributed execution across nodes");
 
-    scatter_cmd->add_option("-t,--tax-file", cfg.tax_file,
-        "Input taxonomy file (TSV: accession, taxonomy, file_path)")
+    scatter_cmd->add_option("-g,--genomes", cfg.genomes_file,
+        "Accession list (one per line; taxonomy read from pack)")
         ->required()
         ->check(CLI::ExistingFile);
 

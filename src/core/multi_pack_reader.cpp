@@ -278,4 +278,17 @@ void MultiPackReader::fadvise_dontneed_(const fs::path& p) const noexcept {
     }
 }
 
+std::string MultiPackReader::taxonomy_for_accession(std::string_view acc) const {
+    auto it = acc_to_arch_.find(std::string(acc));
+    if (it == acc_to_arch_.end()) return {};
+    auto t = archives_[it->second].reader->taxonomy_for_accession(acc);
+    return t ? std::string(*t) : std::string{};
+}
+
+void MultiPackReader::scan_taxonomy(
+    const std::function<void(std::string_view, std::string_view)>& cb) const {
+    for (const auto& e : archives_)
+        e.reader->scan_taxonomy(cb);
+}
+
 } // namespace derep

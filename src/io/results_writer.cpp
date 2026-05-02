@@ -13,30 +13,19 @@ namespace derep {
 ResultsWriter::ResultsWriter(std::filesystem::path output_dir, std::string prefix)
     : output_dir_(std::move(output_dir)), prefix_(std::move(prefix)) {}
 
-void ResultsWriter::write_derep_genomes(const RunState& state,
-                                        const std::vector<GenomeRow>& all_genomes) const {
-    // Build accession → file_path lookup from input rows
-    std::unordered_map<std::string, std::string> acc_to_file;
-    acc_to_file.reserve(all_genomes.size());
-    for (const auto& row : all_genomes)
-        acc_to_file[row.accession] = row.file_path.string();
-
+void ResultsWriter::write_derep_genomes(const RunState& state) const {
     auto path = output_dir_ / (prefix_ + "_derep_genomes.tsv");
     std::ofstream out(path);
     if (!out) throw std::runtime_error("Cannot open output file: " + path.string());
 
-    out << "accession\ttaxonomy\tfile\trepresentative\n";
+    out << "accession\ttaxonomy\trepresentative\n";
 
     for (const auto& taxon : state.taxa()) {
         const std::string& taxonomy = taxon.result.taxonomy;
         std::unordered_set<std::string> rep_set(taxon.representatives.begin(),
                                                 taxon.representatives.end());
-        for (const auto& acc : taxon.all_accessions) {
-            auto file_it = acc_to_file.find(acc);
-            const std::string file = (file_it != acc_to_file.end()) ? file_it->second : "";
-            bool is_rep = rep_set.count(acc) > 0;
-            out << acc << '\t' << taxonomy << '\t' << file << '\t' << is_rep << '\n';
-        }
+        for (const auto& acc : taxon.all_accessions)
+            out << acc << '\t' << taxonomy << '\t' << rep_set.count(acc) << '\n';
     }
 
     spdlog::info("Wrote derep genomes to {}", path.string());
@@ -208,10 +197,9 @@ void ResultsWriter::write_outliers(const RunState& state) const {
     spdlog::info("Wrote outliers to {}", path.string());
 }
 
-void ResultsWriter::write_all(const RunState& state,
-                              const std::vector<GenomeRow>& all_genomes) const {
+void ResultsWriter::write_all(const RunState& state) const {
     std::filesystem::create_directories(output_dir_);
-    write_derep_genomes(state, all_genomes);
+    write_derep_genomes(state);
     write_stats(state);
     write_diversity_stats(state);
     write_results(state);

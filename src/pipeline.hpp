@@ -24,4 +24,9 @@ void process_taxa_parallel(
     const std::unordered_map<std::string, GuncQuality>* gunc_scores = nullptr,
     grd::GrdWriter* grd_writer = nullptr);
 
+// Emit derep archive (.gpd) — best-effort, does not throw.
+// cfg.gpd_output must be non-empty; cfg.pack_dir must be set.
+void emit_gpd_archive(const Config& cfg, const RunState& run_state,
+                      IPackReader* gpk_reader);
+
 } // namespace derep
