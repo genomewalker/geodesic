@@ -245,8 +245,6 @@ Config parse_args(int argc, char** argv) {
     if (cfg.command == Command::Derep) {
         if (cfg.copy_reps && !cfg.out_dir)
             throw std::runtime_error("--copy-reps requires --out-dir");
-        if (cfg.out_dir && !cfg.copy_reps)
-            throw std::runtime_error("--out-dir requires --copy-reps");
         if (!user_set_workers)
             cfg.workers = 1;
     }

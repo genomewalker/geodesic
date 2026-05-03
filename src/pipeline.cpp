@@ -100,6 +100,7 @@ std::vector<Genome> accessions_to_genomes(
             ++n_missing_tax;
             continue;
         }
+        g.taxonomy = taxonomy::normalize_taxonomy(g.taxonomy, acc);
         auto canon = canonical_accession(acc);
         if (auto it = checkm2.find(canon); it != checkm2.end()) {
             g.completeness = it->second.completeness;

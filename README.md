@@ -94,7 +94,7 @@ Results written to the working directory (or `--out-dir`). TSV outputs are alway
 |--------|---------|-------------|
 | `-g, --genomes` | required | Accession list (one per line; taxonomy read from pack TAXN section) |
 | `--pack` | required | genopack archive (single `.gpk` directory or directory of `part_*.gpk` parts) |
-| `-o, --out-dir` | -- | Output directory for representative FASTA copies (only when `--copy-reps` is set) |
+| `-o, --out-dir` | `.` | Parent directory for all outputs; TSV files go to `<out-dir>/<prefix>/`; also used for FASTA copies when `--copy-reps` is set |
 | `-p, --prefix` | -- | Prefix for `<prefix>_*.tsv` outputs |
 | `--tmp-dir` | `.` | Temporary directory |
 | `--references` | -- | File of accessions (one per line) to always include as representatives |
