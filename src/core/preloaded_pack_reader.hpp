@@ -35,7 +35,7 @@ public:
 
     bool has_preload(uint32_t k, uint32_t sz) const noexcept {
         auto it = k_stores_.find(k);
-        return it != k_stores_.end() && it->second.sz == sz && !acc_to_idx_.empty();
+        return it != k_stores_.end() && it->second.sz >= sz && !acc_to_idx_.empty();
     }
     size_t   preloaded_count() const noexcept { return acc_to_idx_.size(); }
     size_t   bytes() const noexcept;

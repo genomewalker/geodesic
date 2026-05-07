@@ -141,8 +141,10 @@ void PreloadedPackReader::visit_sketch_batches(
                              const genopack::SketchResult& sk)>& cb) const {
 
     auto it = k_stores_.find(k);
-    if (it != k_stores_.end() && it->second.sz == sz && !acc_to_idx_.empty()) {
+    if (it != k_stores_.end() && it->second.sz >= sz && !acc_to_idx_.empty()) {
         const KStore& st = it->second;
+        const uint32_t use_sz         = sz;
+        const uint32_t use_mask_words = (use_sz + 63) / 64;
         std::vector<std::string> miss_accs;
         std::vector<size_t>      miss_orig;
         miss_accs.reserve(accessions.size() / 32);
@@ -160,10 +162,10 @@ void PreloadedPackReader::visit_sketch_batches(
             r.sig         = st.sigs.data()  + static_cast<size_t>(j) * st.sz;
             r.sig2        = st.sig2s.data() + static_cast<size_t>(j) * st.sz;
             r.mask        = st.masks.data() + static_cast<size_t>(j) * st.mask_words;
-            r.n_real_bins = st.n_real_bins[j];
-            r.mask_words  = st.mask_words;
+            r.n_real_bins = std::min(st.n_real_bins[j], use_sz);
+            r.mask_words  = use_mask_words;
             r.genome_length = st.genome_lengths[j];
-            r.sketch_size = st.sz;
+            r.sketch_size = use_sz;
             r.kmer_size   = st.k;
             cb(i, r);
         }

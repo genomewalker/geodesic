@@ -617,6 +617,7 @@ void GeodesicDerep::build_index_from_gpk_sketches(
         }
         spdlog::info("GEODESIC: GPK sketch params: k={} size={}", cfg_.kmer_size, cfg_.sketch_size);
     }
+    auto t_after_probe = std::chrono::steady_clock::now();
 
     // Resolve accessions to genome_ids, then fetch sketches from SKCH.
     // Genomes not found in SKCH are excluded (treated as failed reads) rather than
@@ -639,6 +640,7 @@ void GeodesicDerep::build_index_from_gpk_sketches(
         if (gpk.genome_meta_by_accession(accessions[i]))
             in_archive[i] = 1;
     }
+    auto t_after_meta = std::chrono::steady_clock::now();
 
     const uint32_t req_k  = use_param_aware ? static_cast<uint32_t>(cfg_.kmer_size)  : 0;
     const uint32_t req_sz = use_param_aware ? static_cast<uint32_t>(cfg_.sketch_size) : 0;
@@ -650,6 +652,7 @@ void GeodesicDerep::build_index_from_gpk_sketches(
         const uint32_t pre_sk = (req_sz > 0) ? req_sz : static_cast<uint32_t>(cfg_.sketch_size);
         store_.init_sketches(pre_sk, (pre_sk + 63) / 64);
     }
+    auto t_after_init = std::chrono::steady_clock::now();
 
     // Callback runs CONCURRENTLY under OMP from SkchReader::sketch_for_ids.
     // Each i is unique → embeddings_[i]/store_.sig(i)/valid[i] writes are race-free.
@@ -705,6 +708,7 @@ void GeodesicDerep::build_index_from_gpk_sketches(
             emb.quality_score = (it != quality_scores.end())
                 ? static_cast<float>(it->second) : 50.0f;
         });
+    auto t_after_visit = std::chrono::steady_clock::now();
 
     const size_t hits = hits_atomic.load(std::memory_order_relaxed);
     if (params_seen.load(std::memory_order_acquire)) {
@@ -744,7 +748,13 @@ void GeodesicDerep::build_index_from_gpk_sketches(
 
     auto t1 = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    spdlog::info("GEODESIC: gpk-sketch timing: {}ms ({} hits, {} misses)", ms, hits, misses);
+    auto ms_probe = std::chrono::duration_cast<std::chrono::milliseconds>(t_after_probe - t0).count();
+    auto ms_meta  = std::chrono::duration_cast<std::chrono::milliseconds>(t_after_meta  - t_after_probe).count();
+    auto ms_init  = std::chrono::duration_cast<std::chrono::milliseconds>(t_after_init  - t_after_meta).count();
+    auto ms_visit = std::chrono::duration_cast<std::chrono::milliseconds>(t_after_visit - t_after_init).count();
+    auto ms_rest  = std::chrono::duration_cast<std::chrono::milliseconds>(t1            - t_after_visit).count();
+    spdlog::info("GEODESIC: gpk-sketch timing: {}ms ({} hits, {} misses) [probe={}ms meta={}ms init={}ms visit={}ms rest={}ms]",
+                 ms, hits, misses, ms_probe, ms_meta, ms_init, ms_visit, ms_rest);
     // Diagnostic: n_real_bins distribution (helps detect densification inflation)
     if (!embeddings_.empty()) {
         uint32_t nrb_min = UINT32_MAX, nrb_max = 0;
