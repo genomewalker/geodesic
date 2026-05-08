@@ -546,6 +546,7 @@ private:
     // Angular distance between two embeddings (works with any dimension)
     static float angular_distance(const std::vector<float>& a,
                                   const std::vector<float>& b);
+    static float angular_distance(const float* a, const float* b, size_t d);
 
 };
 

@@ -595,7 +595,7 @@ int run_pipeline(Config& cfg) {
         spdlog::info("GRD output: {}", cfg.grd_output.string());
     }
 
-    // 10. Parallel processing — bucketed by archive, preloading all available
+    // 10. Parallel processing — bucketed by archive, preloading dominant k
     //     k's per archive so adaptive k (maybe_reselect_k) stays RAM-resident.
     //     Set GEODESIC_NO_PRELOAD=1 to bypass.
     const char* no_pre = std::getenv("GEODESIC_NO_PRELOAD");
@@ -671,15 +671,15 @@ int run_pipeline(Config& cfg) {
             : (budget_gb << 30);
         if (budget_bytes < (1ull << 20)) budget_bytes = 1ull << 30;  // 1 GB floor on missing/zero
         const uint64_t mask_words   = (pre_sz + 63u) / 64u;
-        const uint64_t per_genome_bytes = static_cast<uint64_t>(avail_ks.size())
-            * (static_cast<uint64_t>(pre_sz) * 2ull * sizeof(uint16_t)   // sigs+sig2s
-               + mask_words * sizeof(uint64_t));                          // mask
+        // Budget for a single k (probe selects dominant k per wave; others fall through to disk).
+        const uint64_t per_genome_bytes =
+            static_cast<uint64_t>(pre_sz) * 2ull * sizeof(uint16_t)   // sigs+sig2s
+            + mask_words * sizeof(uint64_t);                           // mask
         const size_t wave_max_genomes = std::max<size_t>(
             1, static_cast<size_t>(budget_bytes / std::max<uint64_t>(1, per_genome_bytes)));
 
-        spdlog::info("BUCKET wave budget: {} MB → {} genomes/wave ({} bytes/genome × {} ks)",
-                     budget_bytes >> 20, wave_max_genomes,
-                     per_genome_bytes / avail_ks.size(), avail_ks.size());
+        spdlog::info("BUCKET wave budget: {} MB → {} genomes/wave ({} bytes/genome, single-k preload)",
+                     budget_bytes >> 20, wave_max_genomes, per_genome_bytes);
 
         for (auto& [arch, b] : ordered) {
             // Pack taxa into waves preserving original order (disk locality).
@@ -709,11 +709,21 @@ int run_pipeline(Config& cfg) {
 
             for (size_t wi = 0; wi < waves.size(); ++wi) {
                 auto& w = waves[wi];
-                spdlog::info("BUCKET arch={} wave {}/{}: {} taxa, {} genomes — preloading all ks",
+                // Probe a small sample to pick the dominant k for this wave.
+                // Preloading a single k keeps peak RSS ~3× lower than all ks.
+                const uint32_t dominant_k = [&]() -> uint32_t {
+                    if (avail_ks.size() < 2) return avail_ks.empty()
+                        ? static_cast<uint32_t>(cfg.kmer_size) : avail_ks[0];
+                    const int probed = derep::probe_taxon_kmer(
+                        w.accs, *raw_inner, cfg.kmer_size, pre_sz);
+                    return probed > 0 ? static_cast<uint32_t>(probed)
+                                     : static_cast<uint32_t>(cfg.kmer_size);
+                }();
+                spdlog::info("BUCKET arch={} wave {}/{}: {} taxa, {} genomes — preloading k={}",
                              arch, wi + 1, waves.size(),
-                             w.taxa_indices.size(), w.total_genomes);
+                             w.taxa_indices.size(), w.total_genomes, dominant_k);
                 try {
-                    wrapped->preload_multi(w.accs, avail_ks, pre_sz, cfg.threads);
+                    wrapped->preload_multi(w.accs, {dominant_k}, pre_sz, cfg.threads);
                 } catch (const std::exception& e) {
                     spdlog::warn("BUCKET preload failed: {} — processing without preload", e.what());
                 }

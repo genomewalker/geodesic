@@ -470,11 +470,14 @@ float GeodesicDerep::angular_distance(const std::vector<float>& a,
                                        const std::vector<float>& b) {
     const size_t d = std::min(a.size(), b.size());
     if (a.size() != b.size()) spdlog::warn("angular_distance: dim mismatch {} vs {}", a.size(), b.size());
-    // Cosine similarity → angular distance
     float dot = dot_product_simd(a.data(), b.data(), d);
-    // Clamp for numerical stability
     dot = std::max(-1.0f, std::min(1.0f, dot));
-    // Angular distance in [0, 1] range
+    return std::acos(dot) / static_cast<float>(M_PI);
+}
+
+float GeodesicDerep::angular_distance(const float* a, const float* b, size_t d) {
+    float dot = dot_product_simd(a, b, d);
+    dot = std::max(-1.0f, std::min(1.0f, dot));
     return std::acos(dot) / static_cast<float>(M_PI);
 }
 
@@ -554,9 +557,10 @@ void GeodesicDerep::finalize_embeddings_() {
                      embeddings_.size(), eff_m, eff_ef);
     }
 
-    // Dual-seed sketches (oph_sig + oph_sig2) are loaded directly from SKCH in
-    // build_index_from_gpk_sketches() and remain resident for Phase 7c certification.
-    // Freed by the GeodesicDerep destructor.
+    // sigs2_flat (dual-seed) was only needed for Nyström projection above.
+    // Phase 7c uses only sig_span() (sigs_flat), so we can free ~1/3 of sketch RAM here.
+    store_.sigs2_flat.clear();
+    store_.sigs2_flat.shrink_to_fit();
 }
 
 void GeodesicDerep::build_index_from_gpk_sketches(
@@ -3952,6 +3956,12 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         }
     }
 
+    // HNSW index last used in Phase 7c / pruning above; free ~5–8 GB now.
+    index_.reset();
+    // Embedding vectors stamped into store_ (last copy at compute_isolation_scores*).
+    // Downstream code uses store_.row(i) directly; free per-genome heap vectors (~600 MB).
+    for (auto& emb : embeddings_) { emb.vector.clear(); emb.vector.shrink_to_fit(); }
+
     // Phase 4: Build edges (genome → nearest representative)
     // weight_raw = ANI fraction derived from Jaccard via Mash formula.
     auto jaccard_to_ani_frac = [&](double J) -> float {
@@ -4310,9 +4320,11 @@ GeodesicDerep::detect_outlier_candidates(float z_threshold) {
 
     // Centroid for informational centroid_distance field only
     std::vector<float> centroid(dim, 0.0f);
-    for (const auto& emb : embeddings_)
+    for (size_t i = 0; i < n; ++i) {
+        const float* row = store_.row(i);
         for (size_t d = 0; d < dim; ++d)
-            centroid[d] += emb.vector[d];
+            centroid[d] += row[d];
+    }
     float cn = static_cast<float>(n);
     for (float& v : centroid) v /= cn;
     float cnorm = dot_product_simd(centroid.data(), centroid.data(), dim);
@@ -4360,7 +4372,7 @@ GeodesicDerep::detect_outlier_candidates(float z_threshold) {
 
         OutlierCandidate c;
         c.genome_id            = embeddings_[i].genome_id;
-        c.centroid_distance    = angular_distance(embeddings_[i].vector, centroid);
+        c.centroid_distance    = angular_distance(store_.row(i), centroid.data(), dim);
         c.isolation_score      = embeddings_[i].isolation_score;
         c.anomaly_score        = embeddings_[i].isolation_score;
         c.genome_size_zscore   = sz_z;
