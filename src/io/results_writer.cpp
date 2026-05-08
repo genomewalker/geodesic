@@ -18,14 +18,29 @@ void ResultsWriter::write_derep_genomes(const RunState& state) const {
     std::ofstream out(path);
     if (!out) throw std::runtime_error("Cannot open output file: " + path.string());
 
-    out << "accession\ttaxonomy\trepresentative\n";
+    out << "accession\ttaxonomy\trepresentative\tcluster_rep\tnn_dist\n";
 
     for (const auto& taxon : state.taxa()) {
         const std::string& taxonomy = taxon.result.taxonomy;
         std::unordered_set<std::string> rep_set(taxon.representatives.begin(),
                                                 taxon.representatives.end());
-        for (const auto& acc : taxon.all_accessions)
-            out << acc << '\t' << taxonomy << '\t' << rep_set.count(acc) << '\n';
+        for (const auto& acc : taxon.all_accessions) {
+            bool is_rep = rep_set.count(acc) > 0;
+            std::string cluster_rep = is_rep ? acc : "";
+            double nn_dist_val = 0.0;
+            if (!is_rep) {
+                auto mit = taxon.member_to_rep.find(acc);
+                if (mit != taxon.member_to_rep.end()) cluster_rep = mit->second;
+                auto dit = taxon.member_nn_dist.find(acc);
+                if (dit != taxon.member_nn_dist.end()) nn_dist_val = dit->second;
+            }
+            out << acc << '\t' << taxonomy << '\t' << is_rep << '\t'
+                << cluster_rep << '\t';
+            if (is_rep)
+                out << "0\n";
+            else
+                out << nn_dist_val << '\n';
+        }
     }
 
     spdlog::info("Wrote derep genomes to {}", path.string());

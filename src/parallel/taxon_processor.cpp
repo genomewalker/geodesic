@@ -265,6 +265,7 @@ TaxonResult process_taxon(
             std::unordered_map<std::string, double> ani_to_rep_map;
             std::vector<double> genome_to_rep_ani(n);
             std::unordered_map<std::string, std::string> tiny_member_to_rep;
+            std::unordered_map<std::string, double>      tiny_member_nn_dist;
             std::unordered_map<std::string, uint32_t>    tiny_cluster_size;
             for (size_t ri : rep_indices) tiny_cluster_size[all_accessions[ri]] = 1u;
             for (size_t i = 0; i < n; ++i) {
@@ -280,6 +281,7 @@ TaxonResult process_taxon(
                 genome_to_rep_ani[i] = ani;
                 if (best_ri != SIZE_MAX && !excluded_indices.count(i)) {
                     tiny_member_to_rep[all_accessions[i]] = all_accessions[best_ri];
+                    tiny_member_nn_dist[all_accessions[i]] = 1.0 - best_j;
                     ++tiny_cluster_size[all_accessions[best_ri]];
                 }
             }
@@ -357,7 +359,8 @@ TaxonResult process_taxon(
                 out.ani_map         = ani_to_rep_map;
                 out.outliers        = gunc_contam_records;
                 out.failed_genomes  = std::move(tiny_failed_records);
-                out.member_to_rep   = std::move(tiny_member_to_rep);
+                out.member_to_rep    = std::move(tiny_member_to_rep);
+                out.member_nn_dist   = std::move(tiny_member_nn_dist);
                 out.rep_cluster_size = std::move(tiny_cluster_size);
                 out.rep_embeddings.assign(representatives.size(),
                                           std::vector<float>(cfg.embedding_dim, 0.0f));
@@ -919,6 +922,7 @@ TaxonResult process_taxon(
         }
 
         std::unordered_map<std::string, std::string> geo_member_to_rep;
+        std::unordered_map<std::string, double>      geo_member_nn_dist;
         std::unordered_map<std::string, uint32_t>    geo_cluster_size;
         for (const auto& acc : all_representatives) geo_cluster_size[acc] = 1u;
         {
@@ -937,6 +941,8 @@ TaxonResult process_taxon(
                 (void)m;
                 ++geo_cluster_size[r2];
             }
+            for (const auto& [m, w] : best_w)
+                geo_member_nn_dist[m] = 1.0 - w;
         }
 
         std::vector<std::vector<float>> geo_rep_embeddings(all_representatives.size());
@@ -964,7 +970,8 @@ TaxonResult process_taxon(
             out.ani_map         = ani_to_rep_map;
             out.outliers        = contam_records;
             out.failed_genomes  = std::move(geodesic_failed_records);
-            out.member_to_rep   = std::move(geo_member_to_rep);
+            out.member_to_rep    = std::move(geo_member_to_rep);
+            out.member_nn_dist   = std::move(geo_member_nn_dist);
             out.rep_cluster_size = std::move(geo_cluster_size);
             out.rep_embeddings  = std::move(geo_rep_embeddings);
             out.sketch_kmer_used = cfg.kmer_size;
