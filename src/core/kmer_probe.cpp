@@ -28,11 +28,7 @@ int probe_taxon_kmer(const std::vector<std::string>& accessions,
 
     const size_t probe_n  = std::min(kProbeN, n / 5);
     const size_t stride   = n / probe_n;
-    // Use the smallest available k for probing — it's the preloaded/cached k (avail_ks
-    // is sorted ascending). Probing with the largest k reads from NFS on every taxon
-    // when only the smallest k is preloaded, adding ~5s of NFS latency per taxon.
-    // Clonal vs. diverse signal is direction-identical across k values.
-    const uint32_t probe_k  = avail_ks.front();
+    const uint32_t probe_k  = avail_ks.back();
     const uint32_t probe_sz = static_cast<uint32_t>(
         std::min(kProbeBins, static_cast<size_t>(sketch_size)));
 
@@ -72,6 +68,7 @@ int probe_taxon_kmer(const std::vector<std::string>& accessions,
     const float p95 = nn[static_cast<size_t>(m * 0.95)];
 
     int best_k = select_best_k_for_diversity(p95);
+    if (best_k < 21 && p5 < 0.010f) best_k = 21;
 
     spdlog::info("GEODESIC: k pre-probe (n={} sample, bins={}): p5_nn={:.4f} p95_nn={:.4f} → k={}",
                  m, probe_sz, p5, p95, best_k);
