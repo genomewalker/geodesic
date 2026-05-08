@@ -28,7 +28,11 @@ int probe_taxon_kmer(const std::vector<std::string>& accessions,
 
     const size_t probe_n  = std::min(kProbeN, n / 5);
     const size_t stride   = n / probe_n;
-    const uint32_t probe_k  = avail_ks.back();
+    // Use the smallest available k for probing — it's the preloaded/cached k (avail_ks
+    // is sorted ascending). Probing with the largest k reads from NFS on every taxon
+    // when only the smallest k is preloaded, adding ~5s of NFS latency per taxon.
+    // Clonal vs. diverse signal is direction-identical across k values.
+    const uint32_t probe_k  = avail_ks.front();
     const uint32_t probe_sz = static_cast<uint32_t>(
         std::min(kProbeBins, static_cast<size_t>(sketch_size)));
 
