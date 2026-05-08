@@ -72,7 +72,6 @@ int probe_taxon_kmer(const std::vector<std::string>& accessions,
     const float p95 = nn[static_cast<size_t>(m * 0.95)];
 
     int best_k = select_best_k_for_diversity(p95);
-    if (best_k < 21 && p5 < 0.010f) best_k = 21;
 
     spdlog::info("GEODESIC: k pre-probe (n={} sample, bins={}): p5_nn={:.4f} p95_nn={:.4f} → k={}",
                  m, probe_sz, p5, p95, best_k);
