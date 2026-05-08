@@ -709,16 +709,11 @@ int run_pipeline(Config& cfg) {
 
             for (size_t wi = 0; wi < waves.size(); ++wi) {
                 auto& w = waves[wi];
-                // Probe a small sample to pick the dominant k for this wave.
-                // Preloading a single k keeps peak RSS ~3× lower than all ks.
-                const uint32_t dominant_k = [&]() -> uint32_t {
-                    if (avail_ks.size() < 2) return avail_ks.empty()
-                        ? static_cast<uint32_t>(cfg.kmer_size) : avail_ks[0];
-                    const int probed = derep::probe_taxon_kmer(
-                        w.accs, *raw_inner, cfg.kmer_size, pre_sz);
-                    return probed > 0 ? static_cast<uint32_t>(probed)
-                                     : static_cast<uint32_t>(cfg.kmer_size);
-                }();
+                // Preload the smallest available k (typically k=16 for R232; ~82% of taxa use it).
+                // Per-taxon probe inside build_index_from_gpk_sketches handles the minority
+                // that need a larger k via disk fallback — cheaper than loading all ks.
+                const uint32_t dominant_k = avail_ks.empty()
+                    ? static_cast<uint32_t>(cfg.kmer_size) : avail_ks.front();
                 spdlog::info("BUCKET arch={} wave {}/{}: {} taxa, {} genomes — preloading k={}",
                              arch, wi + 1, waves.size(),
                              w.taxa_indices.size(), w.total_genomes, dominant_k);
