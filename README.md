@@ -189,13 +189,13 @@ geodesic update -g new_genomes.txt --lock prev_run.lock \
 
 ## Performance
 
-| Dataset | Genomes | Representatives | Reduction | Runtime | Cov. mean ANI | Cov. min ANI | Threads |
-|---------|---------|-----------------|-----------|---------|---------------|--------------|---------|
-| *E. coli* | 233,166 | 607 | 99.7% | 17 min | 99.92% | 99.79% | 24 |
-| *S. enterica* | 367,440 | 444 | 99.9% | 24 min | 99.96% | 99.77% | 24 |
-| Full GTDB r232 | 5,238,926 | 886,507 | 83.1% | 42 min | -- | -- | 88 |
+| Dataset | Genomes | Representatives | Reduction | Runtime | ANI threshold | Threads |
+|---------|---------|-----------------|-----------|---------|---------------|---------|
+| *E. coli* | 233,166 | 1,142 | 99.5% | 6 min | 98.6% (auto) | 16 |
+| *S. enterica* | 367,440 | 8,347 | 97.7% | 11 min | 99.9% (auto) | 16 |
+| Full GTDB r232 | 5,238,926 | 886,507 | 83.1% | 42 min | per-taxon (auto) | 88 |
 
-Throughput: ~250 genomes/sec (600k genomes processed in 41 min at 24 threads); ~2,080 genomes/sec at 88 threads on the full GTDB r232 dataset.
+Throughput: ~630 genomes/sec at 16 threads (single large taxon); ~2,080 genomes/sec at 88 threads across full GTDB diversity. ANI thresholds are inferred per taxon from the MST bottleneck edge — no user tuning required.
 
 Coverage: Phase 8 OPH certification guarantees every genome is within the ANI threshold of its assigned representative in sketch space. Near the default 95% ANI threshold, OPH estimation error is typically well below 0.1 ANI points for dense assemblies.
 
