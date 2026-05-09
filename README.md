@@ -189,15 +189,17 @@ geodesic update -g new_genomes.txt --lock prev_run.lock \
 
 ## Performance
 
-| Species | Genomes | Representatives | Reduction | Runtime | Cov. mean ANI | Cov. min ANI | Threads |
+| Dataset | Genomes | Representatives | Reduction | Runtime | Cov. mean ANI | Cov. min ANI | Threads |
 |---------|---------|-----------------|-----------|---------|---------------|--------------|---------|
 | *E. coli* | 233,166 | 607 | 99.7% | 17 min | 99.92% | 99.79% | 24 |
 | *S. enterica* | 367,440 | 444 | 99.9% | 24 min | 99.96% | 99.77% | 24 |
-| Full GTDB | 5,195,094 | -- | -- | -- | -- | -- | 24 |
+| Full GTDB r232 | 5,238,926 | 886,507 | 83.1% | 42 min | -- | -- | 88 |
 
-Throughput: ~250 genomes/sec (600k genomes processed in 41 min total on 24 threads).
+Throughput: ~250 genomes/sec (600k genomes processed in 41 min at 24 threads); ~2,080 genomes/sec at 88 threads on the full GTDB r232 dataset.
 
 Coverage: Phase 8 OPH certification guarantees every genome is within the ANI threshold of its assigned representative in sketch space. Near the default 95% ANI threshold, OPH estimation error is typically well below 0.1 ANI points for dense assemblies.
+
+**Fragmented genomes (MAGs)**: sketches built with open syncmer OPH (`--sketch-syncmer auto`, targeting ~6% k-mer density, default since genopack v2) store only locally-minimal k-mer positions. For assemblies with fewer hashed positions than the sketch size, geodesic automatically switches from Jaccard to containment-based ANI estimation, preserving accuracy for fragmented MAGs without affecting full assemblies.
 
 ## License
 
