@@ -276,12 +276,24 @@ TaxonResult process_taxon(
                 for (size_t ri : rep_indices) {
                     if (jac[i][ri] >= best_j) { best_j = jac[i][ri]; best_ri = ri; }
                 }
-                double ani = GeodesicDerep::jaccard_to_ani(best_j, cfg.kmer_size);
+                // For fragmented MAGs (n_real_bins < sketch_size/2), Jaccard is deflated
+                // because the union denominator includes target's dense bins while the
+                // query has few real bins. Use containment (matches/n_real_bins_query)
+                // and the simpler ANI formula ANI = C^(1/k) instead.
+                const bool is_mag_query = n_real_vec[i] > 0 &&
+                    n_real_vec[i] < static_cast<uint32_t>(cfg.sketch_size) / 2;
+                double best_score = (is_mag_query && best_ri != SIZE_MAX)
+                    ? coverage_score(i, best_ri)
+                    : best_j;
+                double ani = is_mag_query
+                    ? std::max(70.0, std::min(100.0,
+                          std::pow(best_score, 1.0 / cfg.kmer_size) * 100.0))
+                    : GeodesicDerep::jaccard_to_ani(best_j, cfg.kmer_size);
                 ani_to_rep_map[all_accessions[i]] = ani;
                 genome_to_rep_ani[i] = ani;
                 if (best_ri != SIZE_MAX && !excluded_indices.count(i)) {
                     tiny_member_to_rep[all_accessions[i]] = all_accessions[best_ri];
-                    tiny_member_nn_dist[all_accessions[i]] = 1.0 - best_j;
+                    tiny_member_nn_dist[all_accessions[i]] = 1.0 - best_score;
                     ++tiny_cluster_size[all_accessions[best_ri]];
                 }
             }
