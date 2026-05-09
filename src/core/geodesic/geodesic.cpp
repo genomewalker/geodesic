@@ -4009,11 +4009,31 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         }
         J_est = std::clamp(J_est, 0.0, 1.0);
 
+        // For fragmented MAGs, Jaccard underestimates ANI because the union
+        // denominator includes the target's dense bins while the query has few
+        // real bins. Use containment (matches/n_real_bins_query) + C^(1/k).
+        const uint32_t nr_i = embeddings_[i].n_real_bins;
+        const bool is_mag_i = has_oph && nr_i > 0 &&
+            nr_i < static_cast<uint32_t>(cfg_.sketch_size) / 2;
+        float ani_frac;
+        if (is_mag_i) {
+            const auto sa = store_.sig_span(i);
+            const auto sb = store_.sig_span(rep_idx);
+            size_t matches = 0;
+            for (size_t t = 0; t < sa.size(); ++t)
+                if (sa[t] != 0xFFFFu && sa[t] == sb[t]) ++matches;
+            double c = static_cast<double>(matches) / static_cast<double>(nr_i);
+            ani_frac = static_cast<float>(std::pow(std::clamp(c, 0.0, 1.0),
+                                                   1.0 / cfg_.kmer_size));
+        } else {
+            ani_frac = jaccard_to_ani_frac(J_est);
+        }
+
         SimilarityEdge edge;
         edge.source   = path_strings[i];
         edge.target   = path_strings[rep_idx];
-        edge.weight_raw = jaccard_to_ani_frac(J_est);
-        edge.weight     = jaccard_to_ani_frac(J_est);
+        edge.weight_raw = ani_frac;
+        edge.weight     = ani_frac;
         edge.aln_frac   = 1.0;
         edges.push_back(edge);
     }
