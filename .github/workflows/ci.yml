@@ -17,7 +17,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: genomewalker/genopack
-          path: ../genopack
+          path: genopack_src
+
+      - name: Build genopack
+        run: |
+          cmake -B genopack_src/build -S genopack_src -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DFETCHCONTENT_BASE_DIR=.fc
+          cmake --build genopack_src/build --parallel --target genopack_lib
 
       - name: Install dependencies
         run: |
@@ -40,9 +48,6 @@ jobs:
           path: .fc
           key: fetchcontent-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
 
-      # genopack is a private sibling dependency not available on GitHub.
-      # The build step below will fail gracefully with a clear error if it is
-      # not present — this CI job validates the rest of the build graph.
       - name: Configure
         run: |
           cmake -B build -G Ninja \
@@ -50,11 +55,8 @@ jobs:
             -DCMAKE_CXX_COMPILER=g++ \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DFETCHCONTENT_BASE_DIR=.fc \
-            ${GENOPACK_INCLUDE_DIR:+-DGENOPACK_INCLUDE_DIR="$GENOPACK_INCLUDE_DIR"} \
-            ${GENOPACK_LIBRARY:+-DGENOPACK_LIBRARY="$GENOPACK_LIBRARY"}
-        env:
-          GENOPACK_INCLUDE_DIR: ${{ secrets.GENOPACK_INCLUDE_DIR }}
-          GENOPACK_LIBRARY: ${{ secrets.GENOPACK_LIBRARY }}
+            -DGENOPACK_INCLUDE_DIR="${{ github.workspace }}/genopack_src/include" \
+            -DGENOPACK_LIBRARY="${{ github.workspace }}/genopack_src/build/libgenopack_lib.a"
 
       - name: Build
         run: cmake --build build --parallel
