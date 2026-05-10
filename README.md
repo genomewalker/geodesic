@@ -75,7 +75,7 @@ Results written to the working directory (or `--out-dir`). TSV outputs are alway
 
 | File | When | Contents |
 |---|---|---|
-| `<prefix>_derep_genomes.tsv` | always | `accession`, `taxonomy`, `representative` (0/1) — one row per genome |
+| `<prefix>_derep_genomes.tsv` | always | `accession`, `taxonomy`, `representative` (0/1), `cluster_rep`, `nn_dist`, `sketch_fill` — one row per genome |
 | `<prefix>_results.tsv`       | always | Per-taxon summary (`taxonomy`, `method`, `n_genomes`, `n_genomes_derep`, `communities`, `weight`) |
 | `<prefix>_diversity_stats.tsv` | always | Coverage and diversity metrics per taxon |
 | `<prefix>_stats.tsv`         | always | Per-taxon pipeline stats (preflight/quality/outlier counts, MST edges, ANI threshold used) |
