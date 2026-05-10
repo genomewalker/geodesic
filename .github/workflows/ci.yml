@@ -24,7 +24,8 @@ jobs:
           cmake -B genopack_src/build -S genopack_src -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DFETCHCONTENT_BASE_DIR=.fc
+            -DFETCHCONTENT_BASE_DIR=.fc \
+            -DXxhash_INCLUDE_DIR=/usr/include
           cmake --build genopack_src/build --parallel --target genopack_lib
 
       - name: Install dependencies
