@@ -2,6 +2,7 @@
 #include "distributed.hpp"
 #include "pipeline.hpp"
 #include <Eigen/Core>
+#include <omp.h>
 #include <spdlog/spdlog.h>
 
 int main(int argc, char** argv) {
@@ -12,6 +13,12 @@ int main(int argc, char** argv) {
     Eigen::setNbThreads(1);
     try {
         auto cfg = derep::parse_args(argc, argv);
+
+        // Cap the global OMP pool to --threads. Without this, libraries that
+        // use #pragma omp parallel without an explicit num_threads() clause
+        // (e.g. genopack's sketch_for_ids) default to hardware_concurrency and
+        // create far more OS threads than requested.
+        omp_set_num_threads(cfg.threads);
 
         switch (cfg.command) {
         case derep::Command::Derep:
