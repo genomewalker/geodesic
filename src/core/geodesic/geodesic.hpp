@@ -1,5 +1,6 @@
 #pragma once
 #include "core/types.hpp"
+namespace BS { class thread_pool; }
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -229,6 +230,7 @@ public:
 
         // Parallelism
         int threads = 4;
+        BS::thread_pool* pool = nullptr;  // if non-null, used instead of OMP
         // Max concurrent NFS file readers during genome embedding.
         // 0 = auto: threads (total budget for this taxon caps NFS readers).
         int io_threads = 0;
@@ -336,6 +338,51 @@ public:
 
     // ANI from exact Jaccard via Mash formula (calibration-free)
     static double jaccard_to_ani(double J, int kmer_size);
+
+    // Unified per-pair ANI fraction [0,1].
+    // Uses Jaccard ANI when both sketches are dense (≥70% fill) and similarly sized
+    // (fill ratio ≥0.7); otherwise uses containment ANI from sparser to denser.
+    // J_hint: pre-computed Jaccard estimate for the dense path (<0 = re-scan raw bins).
+    // 0xFFFF bins are densification sentinels (not real k-mer evidence).
+    static float score_pair(const uint16_t* sa, const uint16_t* sb, uint32_t S,
+                            uint32_t nr_a, uint32_t nr_b, int k, double J_hint = -1.0) {
+        const double dense_thr = 0.7 * static_cast<double>(S);
+        const bool both_dense = static_cast<double>(nr_a) >= dense_thr &&
+                                static_cast<double>(nr_b) >= dense_thr;
+        const bool similar_density = both_dense && nr_a > 0 && nr_b > 0 &&
+            static_cast<double>(std::min(nr_a, nr_b)) >=
+            0.7 * static_cast<double>(std::max(nr_a, nr_b));
+
+        if (similar_density) {
+            double J = J_hint;
+            if (J < 0.0) {
+                size_t matches = 0, total = 0;
+                for (uint32_t t = 0; t < S; ++t) {
+                    if (sa[t] == 0xFFFFu && sb[t] == 0xFFFFu) continue;
+                    ++total;
+                    if (sa[t] == sb[t]) ++matches;
+                }
+                J = total > 0 ? static_cast<double>(matches) / total : 0.0;
+            }
+            if (J <= 0.0) return 0.0f;
+            return static_cast<float>(std::pow(2.0 * J / (1.0 + J), 1.0 / k));
+        }
+
+        // Containment: orient from sparser (smaller nr) to denser
+        const uint16_t* sq = (nr_a <= nr_b) ? sa : sb;
+        const uint16_t* sr = (nr_a <= nr_b) ? sb : sa;
+        const uint32_t  nr_q = std::min(nr_a, nr_b);
+        if (nr_q == 0) {
+            if (J_hint > 0.0)
+                return static_cast<float>(std::pow(2.0 * J_hint / (1.0 + J_hint), 1.0 / k));
+            return 0.0f;
+        }
+        size_t matches = 0;
+        for (uint32_t t = 0; t < S; ++t)
+            if (sq[t] != 0xFFFFu && sq[t] == sr[t]) ++matches;
+        double c = static_cast<double>(matches) / static_cast<double>(nr_q);
+        return static_cast<float>(std::pow(std::clamp(c, 0.0, 1.0), 1.0 / k));
+    }
 
     // Contamination detection: returns genome IDs with anomalous embedding patterns
     struct OutlierCandidate {

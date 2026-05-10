@@ -8,6 +8,7 @@
 namespace derep { class IPackReader; }
 namespace derep { class RunState; }
 namespace grd { class GrdWriter; }
+namespace BS { class thread_pool; }
 
 namespace derep {
 
@@ -25,7 +26,8 @@ TaxonResult process_taxon(
     IPackReader* gpk_reader = nullptr,
     RunState* run_state = nullptr,
     grd::GrdWriter* grd_writer = nullptr,
-    std::function<void()> on_serial_phase = {});
+    std::function<void()> on_serial_phase = {},
+    BS::thread_pool* pool = nullptr);
 
 // Process a batch of tiny taxa (n <= TINY_BATCH_N).
 // acquired_threads: OMP parallelism cap (matches budget actually acquired by caller).

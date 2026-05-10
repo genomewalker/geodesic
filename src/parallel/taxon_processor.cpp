@@ -48,7 +48,8 @@ TaxonResult process_taxon(
     IPackReader* gpk_reader,
     RunState* run_state,
     grd::GrdWriter* grd_writer,
-    std::function<void()> on_serial_phase) {
+    std::function<void()> on_serial_phase,
+    BS::thread_pool* pool) {
     try {
         const int threads = (thread_budget > 0) ? thread_budget : cfg.threads;
 
@@ -193,26 +194,14 @@ TaxonResult process_taxon(
                 }
             }
 
-            // Coverage score: Jaccard for WGS; containment for MAGs (n_real_bins < sketch/2).
-            // Containment = matches in query's real bins / n_real_bins_query.
             auto coverage_score = [&](size_t query, size_t target) -> double {
                 if (sigs[query].empty() || sigs[target].empty()) return 0.0;
-                const uint32_t nr = n_real_vec[query];
-                const bool is_mag = (nr > 0 && nr < static_cast<uint32_t>(cfg.sketch_size) / 2);
-                if (is_mag && !real_masks[query].empty()) {
-                    const auto& qs = sigs[query];
-                    const auto& ts = sigs[target];
-                    const auto& mask = real_masks[query];
-                    size_t m = std::min(qs.size(), ts.size());
-                    size_t matches = 0;
-                    for (size_t t = 0; t < m; ++t) {
-                        size_t word = t / 64, bit = t % 64;
-                        if (word < mask.size() && (mask[word] >> bit) & 1ULL)
-                            if (qs[t] == ts[t]) ++matches;
-                    }
-                    return static_cast<double>(matches) / static_cast<double>(nr);
-                }
-                return GeodesicDerep::refine_jaccard(sigs[query], sigs[target]);
+                return GeodesicDerep::score_pair(
+                    sigs[query].data(), sigs[target].data(),
+                    static_cast<uint32_t>(cfg.sketch_size),
+                    n_real_vec[query], n_real_vec[target],
+                    cfg.kmer_size,
+                    GeodesicDerep::refine_jaccard(sigs[query], sigs[target]));
             };
 
             // Compute all pairwise Jaccard (between non-failed genomes)
@@ -247,7 +236,7 @@ TaxonResult process_taxon(
                 if (excluded_indices.count(idx)) continue;  // never a rep
                 bool covered = false;
                 for (size_t ri : rep_indices) {
-                    if (coverage_score(idx, ri) >= jaccard_threshold) { covered = true; break; }
+                    if (coverage_score(idx, ri) >= static_cast<double>(ani_threshold_frac)) { covered = true; break; }
                 }
                 if (!covered) {
                     rep_indices.push_back(idx);
@@ -266,6 +255,7 @@ TaxonResult process_taxon(
             std::vector<double> genome_to_rep_ani(n);
             std::unordered_map<std::string, std::string> tiny_member_to_rep;
             std::unordered_map<std::string, double>      tiny_member_nn_dist;
+            std::unordered_map<std::string, float>       tiny_member_fill_ratio;
             std::unordered_map<std::string, uint32_t>    tiny_cluster_size;
             for (size_t ri : rep_indices) tiny_cluster_size[all_accessions[ri]] = 1u;
             for (size_t i = 0; i < n; ++i) {
@@ -276,24 +266,18 @@ TaxonResult process_taxon(
                 for (size_t ri : rep_indices) {
                     if (jac[i][ri] >= best_j) { best_j = jac[i][ri]; best_ri = ri; }
                 }
-                // For fragmented MAGs (n_real_bins < sketch_size/2), Jaccard is deflated
-                // because the union denominator includes target's dense bins while the
-                // query has few real bins. Use containment (matches/n_real_bins_query)
-                // and the simpler ANI formula ANI = C^(1/k) instead.
-                const bool is_mag_query = n_real_vec[i] > 0 &&
-                    n_real_vec[i] < static_cast<uint32_t>(cfg.sketch_size) / 2;
-                double best_score = (is_mag_query && best_ri != SIZE_MAX)
+                float best_score = (best_ri != SIZE_MAX && !sigs[i].empty())
                     ? coverage_score(i, best_ri)
-                    : best_j;
-                double ani = is_mag_query
-                    ? std::max(70.0, std::min(100.0,
-                          std::pow(best_score, 1.0 / cfg.kmer_size) * 100.0))
-                    : GeodesicDerep::jaccard_to_ani(best_j, cfg.kmer_size);
+                    : static_cast<float>(best_j);
+                double ani = std::max(70.0, std::min(100.0,
+                    static_cast<double>(best_score) * 100.0));
                 ani_to_rep_map[all_accessions[i]] = ani;
                 genome_to_rep_ani[i] = ani;
                 if (best_ri != SIZE_MAX && !excluded_indices.count(i)) {
                     tiny_member_to_rep[all_accessions[i]] = all_accessions[best_ri];
                     tiny_member_nn_dist[all_accessions[i]] = 1.0 - best_score;
+                    tiny_member_fill_ratio[all_accessions[i]] = cfg.sketch_size > 0
+                        ? static_cast<float>(n_real_vec[i]) / cfg.sketch_size : 1.0f;
                     ++tiny_cluster_size[all_accessions[best_ri]];
                 }
             }
@@ -313,8 +297,13 @@ TaxonResult process_taxon(
             int div_pairs = 0;
             for (size_t a = 0; a < rep_indices.size(); ++a) {
                 for (size_t b = a + 1; b < rep_indices.size(); ++b) {
-                    double ani = GeodesicDerep::jaccard_to_ani(
-                        jac[rep_indices[a]][rep_indices[b]], cfg.kmer_size);
+                    size_t ra = rep_indices[a], rb = rep_indices[b];
+                    double ani = std::max(70.0, std::min(100.0,
+                        static_cast<double>(GeodesicDerep::score_pair(
+                            sigs[ra].data(), sigs[rb].data(),
+                            static_cast<uint32_t>(cfg.sketch_size),
+                            n_real_vec[ra], n_real_vec[rb], cfg.kmer_size,
+                            jac[ra][rb])) * 100.0));
                     div_sum += ani;
                     div_min = std::min(div_min, ani);
                     div_max = std::max(div_max, ani);
@@ -373,6 +362,7 @@ TaxonResult process_taxon(
                 out.failed_genomes  = std::move(tiny_failed_records);
                 out.member_to_rep    = std::move(tiny_member_to_rep);
                 out.member_nn_dist   = std::move(tiny_member_nn_dist);
+                out.member_fill_ratio = std::move(tiny_member_fill_ratio);
                 out.rep_cluster_size = std::move(tiny_cluster_size);
                 out.rep_embeddings.assign(representatives.size(),
                                           std::vector<float>(cfg.embedding_dim, 0.0f));
@@ -440,6 +430,7 @@ TaxonResult process_taxon(
             .nystrom_degree_normalize = cfg.nystrom_degree_normalize,
             .seed = cfg.seed
         };
+        gcfg.pool = pool;
 
         GeodesicDerep geodesic(gcfg);
         if (on_serial_phase) geodesic.set_on_serial_phase(std::move(on_serial_phase));
@@ -935,7 +926,13 @@ TaxonResult process_taxon(
 
         std::unordered_map<std::string, std::string> geo_member_to_rep;
         std::unordered_map<std::string, double>      geo_member_nn_dist;
+        std::unordered_map<std::string, float>       geo_member_fill_ratio;
         std::unordered_map<std::string, uint32_t>    geo_cluster_size;
+        if (cfg.sketch_size > 0) {
+            for (const auto& em : geodesic.embeddings())
+                geo_member_fill_ratio[em.accession] =
+                    static_cast<float>(em.n_real_bins) / cfg.sketch_size;
+        }
         for (const auto& acc : all_representatives) geo_cluster_size[acc] = 1u;
         {
             std::unordered_map<std::string, double> best_w;
@@ -982,9 +979,10 @@ TaxonResult process_taxon(
             out.ani_map         = ani_to_rep_map;
             out.outliers        = contam_records;
             out.failed_genomes  = std::move(geodesic_failed_records);
-            out.member_to_rep    = std::move(geo_member_to_rep);
-            out.member_nn_dist   = std::move(geo_member_nn_dist);
-            out.rep_cluster_size = std::move(geo_cluster_size);
+            out.member_to_rep     = std::move(geo_member_to_rep);
+            out.member_nn_dist    = std::move(geo_member_nn_dist);
+            out.member_fill_ratio = std::move(geo_member_fill_ratio);
+            out.rep_cluster_size  = std::move(geo_cluster_size);
             out.rep_embeddings  = std::move(geo_rep_embeddings);
             out.sketch_kmer_used = cfg.kmer_size;
             // Pipeline health

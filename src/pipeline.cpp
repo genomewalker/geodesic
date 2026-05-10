@@ -1,5 +1,6 @@
 #include "pipeline.hpp"
 #include <iostream>
+#include <malloc.h>
 #include <unordered_set>
 #include "parallel/taxon_processor.hpp"
 #include "state/run_state.hpp"
@@ -156,7 +157,7 @@ void process_taxa_parallel(
     grd::GrdWriter* grd_writer_ptr = grd_writer;
 
     const int total_budget = cfg.workers * cfg.threads;
-    BS::thread_pool pool(static_cast<BS::concurrency_t>(total_budget));
+    BS::thread_pool pool(static_cast<BS::concurrency_t>(total_budget + cfg.workers));
 
     // Single-queue scheduler: absolute launch-width bands, pre-sorted desc by size,
     // first-fit backfill. Avoids head-of-line blocking and serial-phase starvation.
@@ -251,7 +252,7 @@ void process_taxa_parallel(
                 [&taxa, ti, &cfg, gunc_scores_ptr,
                  gpk_reader_ptr, run_state_ptr, grd_writer_ptr,
                  &done_queue, &done_mutex, &done_cv,
-                 &budget_release, acquired] {
+                 &budget_release, acquired, &pool] {
                     // Mid-taxon release: shared int so we know how much is still
                     // held when the task ends (callback may or may not fire).
                     auto held = std::make_shared<int>(acquired);
@@ -269,7 +270,8 @@ void process_taxa_parallel(
                                                gunc_scores_ptr,
                                                gpk_reader_ptr, run_state_ptr,
                                                grd_writer_ptr,
-                                               std::move(on_serial));
+                                               std::move(on_serial),
+                                               &pool);
                     {
                         std::lock_guard dlock(done_mutex);
                         done_queue.push(std::move(result));
@@ -372,6 +374,7 @@ void process_taxa_parallel(
         size_t skch_mb = gpk_reader_ptr->sketch_memory_bytes() / (1024 * 1024);
         gpk_reader_ptr->release_sketches();
         if (skch_mb > 0) spdlog::info("Released {}MB SKCH buffers", skch_mb);
+        malloc_trim(0);
     }
 
     spdlog::info("Done: {} success, {} failed, {} singleton, {} fixed, {} skipped",
@@ -723,6 +726,7 @@ int run_pipeline(Config& cfg) {
                 process_taxa_parallel(sub_taxa, cfg, run_state, wrapped.get(),
                                       gunc_scores_ptr, grd_writer.get());
                 wrapped->release_sketches();
+                malloc_trim(0);
             }
         }
 

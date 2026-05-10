@@ -40,13 +40,14 @@
 #define GEODESIC_USE_FMA 0
 #endif
 
-// OpenMP support
+// OpenMP — kept as fallback for builds without BS pool; pool path is preferred.
 #if defined(_OPENMP)
 #include <omp.h>
 #define GEODESIC_USE_OMP 1
 #else
 #define GEODESIC_USE_OMP 0
 #endif
+#include "pool_parallel.hpp"
 
 namespace derep {
 
@@ -772,6 +773,21 @@ void GeodesicDerep::build_index_from_gpk_sketches(
                      nrb_min, nrb_max,
                      static_cast<double>(nrb_sum) / embeddings_.size(),
                      cfg_.sketch_size);
+        // Adaptive efSearch: sparse queries degrade HNSW recall due to densification
+        // noise. Scale ef proportionally to restore recall without a second index.
+        // Formula: sqrt(S / nrb_min), capped at 8×.
+        if (nrb_min < cfg_.sketch_size) {
+            const double scale = std::clamp(
+                std::sqrt(static_cast<double>(cfg_.sketch_size) /
+                          static_cast<double>(std::max(nrb_min, 1u))),
+                1.0, 8.0);
+            if (scale > 1.05) {
+                const int scaled_ef = static_cast<int>(std::ceil(cfg_.hnsw_ef_search * scale));
+                spdlog::debug("GEODESIC: sparse taxon (nrb_min={}) → efSearch {}→{}",
+                              nrb_min, cfg_.hnsw_ef_search, scaled_ef);
+                cfg_.hnsw_ef_search = scaled_ef;
+            }
+        }
     }
 
     if (misses > 0)
@@ -834,10 +850,8 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
 
     // Lambda: full HNSW query at current K_cap, populates nb_ids/nb_dists/nn_dists/isolation scores.
     auto run_hnsw_query = [&](int query_k_cap) {
-#if GEODESIC_USE_OMP
-        #pragma omp parallel for schedule(dynamic, 100) num_threads(cfg_.threads)
-#endif
-        for (size_t ei = 0; ei < n_emb; ++ei) {
+        par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+        for (size_t ei = static_cast<size_t>(_t); ei < n_emb; ei += static_cast<size_t>(_nt)) {
             auto& emb = embeddings_[ei];
             auto neighbors = index_->search(emb.vector, query_k_cap + 1);
 
@@ -862,6 +876,7 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
 
             emb.isolation_score = (iso_count > 0) ? total_dist / std::min(iso_count, k_iso) : 1.0f;
         }
+        }); // par_workers run_hnsw_query
     };
 
     run_hnsw_query(K_cap);
@@ -1638,10 +1653,8 @@ void GeodesicDerep::apply_nystrom_embeddings() {
     // spectral theory. Containment corrections belong in certification (Phase 7/8),
     // not in the anchor kernel. Pure Jaccard is used here for all genome pairs.
 
-#if GEODESIC_USE_OMP
-    #pragma omp parallel for schedule(dynamic, 4) num_threads(cfg_.threads)
-#endif
-    for (int i = 0; i < static_cast<int>(n_anchors); ++i) {
+    par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+    for (int i = _t; i < static_cast<int>(n_anchors); i += _nt) {
         K_rm(i, i) = 1.0f;
         for (int j = i + 1; j < static_cast<int>(n_anchors); ++j) {
             size_t ai = anchor_idx[static_cast<size_t>(i)];
@@ -1661,6 +1674,7 @@ void GeodesicDerep::apply_nystrom_embeddings() {
             K_rm(i, j) = jac;
         }
     }
+    }); // par_workers anchor Gram (Nyström)
     // Fill lower triangle from upper (sequential)
     for (int i = 0; i < static_cast<int>(n_anchors); ++i)
         for (int j = 0; j < i; ++j)
@@ -1804,19 +1818,17 @@ void GeodesicDerep::apply_nystrom_embeddings() {
     // reduced at parallel-region exit).
     double gemm_seconds = 0.0;
 
-#if GEODESIC_USE_OMP
-    // Eigen's internal parallelism must be disabled inside the OMP parallel region:
-    // each of cfg_.threads workers would otherwise spawn its own Eigen thread pool,
-    // causing cfg_.threads² threads competing for the same cores.
+    // Eigen's internal parallelism disabled: each par_workers worker would otherwise
+    // spawn its own Eigen thread pool, causing threads² threads competing for cores.
     Eigen::setNbThreads(1);
-    #pragma omp parallel num_threads(cfg_.threads) reduction(+:gemm_seconds)
     {
-        // Thread-local batch matrices: allocated once per thread, reused per batch.
-        RowMajMat k_mat(kNysBatch, static_cast<int>(n_anchors));
-        RowMajMat e_mat(kNysBatch, actual_d);
-
-        #pragma omp for schedule(static)
-        for (int b = 0; b < n_batches; ++b) {
+        std::vector<RowMajMat> _k_mats(cfg_.threads, RowMajMat(kNysBatch, static_cast<int>(n_anchors)));
+        std::vector<RowMajMat> _e_mats(cfg_.threads, RowMajMat(kNysBatch, actual_d));
+        std::vector<double> _gemm_t(cfg_.threads, 0.0);
+        par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+        RowMajMat& k_mat = _k_mats[_t];
+        RowMajMat& e_mat = _e_mats[_t];
+        for (int b = _t; b < n_batches; b += _nt) {
             const size_t i0 = static_cast<size_t>(b) * kNysBatch;
             const size_t i1 = std::min(i0 + static_cast<size_t>(kNysBatch), n);
             const int bs = static_cast<int>(i1 - i0);
@@ -1886,7 +1898,7 @@ void GeodesicDerep::apply_nystrom_embeddings() {
             {
                 auto _gemm_t0 = std::chrono::steady_clock::now();
                 e_mat.topRows(bs).noalias() = k_mat.topRows(bs) * W;
-                gemm_seconds += std::chrono::duration<double>(
+                _gemm_t[_t] += std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - _gemm_t0).count();
             }
 
@@ -1900,89 +1912,9 @@ void GeodesicDerep::apply_nystrom_embeddings() {
                           store_.row(i));
             }
         }
+        }); // par_workers Nyström GEMM
+        gemm_seconds = std::accumulate(_gemm_t.begin(), _gemm_t.end(), 0.0);
     }
-#else
-    {
-        RowMajMat k_mat(kNysBatch, static_cast<int>(n_anchors));
-        RowMajMat e_mat(kNysBatch, actual_d);
-        for (int b = 0; b < n_batches; ++b) {
-            const size_t i0 = static_cast<size_t>(b) * kNysBatch;
-            const size_t i1 = std::min(i0 + static_cast<size_t>(kNysBatch), n);
-            const int bs = static_cast<int>(i1 - i0);
-            for (int bi = 0; bi < bs; ++bi) {
-                const size_t i = i0 + static_cast<size_t>(bi);
-                const int32_t ap = anchor_pos[i];
-                if (ap >= 0) {
-                    k_mat.row(bi) = K.row(ap);
-                } else {
-                    if (!store_.has_sketch_data()) { k_mat.row(bi).setZero(); continue; }
-                    const uint16_t* sig_i_ptr = store_.sig(i);
-                    for (size_t a = 0; a < n_anchors; ++a) {
-                        float jac;
-                        if (!anchor_slab.empty()) {
-                            jac = static_cast<float>(
-                                refine_jaccard_ptr(sig_i_ptr,
-                                                  anchor_slab.data() + a * m_sig, m_sig));
-                        } else {
-                            const auto sig_a = store_.sig_span(anchor_idx[a]);
-                            jac = static_cast<float>(
-                                refine_jaccard_ptr(sig_i_ptr, sig_a.data(), m_sig));
-                        }
-                        k_mat(bi, static_cast<int>(a)) = jac;
-                    }
-                    // Fill-fraction correction for sparse genomes (MAGs with low
-                    // completeness). OPH Jaccard between a sparse query (f_i = n_real_i/m)
-                    // and an anchor of fill f_a is deflated by ~f_i relative to a dense
-                    // anchor; after Laplacian degree normalisation the residual bias is
-                    // ~sqrt(f_i). Per-anchor scaling by sqrt(n_real_a / n_real_i) corrects
-                    // each element independently, avoiding over-correction when sparse MAGs
-                    // appear in the anchor set (FPS can select them). Capped at 4× to bound
-                    // noise amplification. Skipped when f_i > 0.85 (negligible correction)
-                    // or n_real_i < 50 (too noisy; earlier quality filters should catch these).
-                    {
-                        const uint32_t n_real_i = embeddings_[i].n_real_bins;
-                        if (m_sig > 0 && n_real_i >= 50 &&
-                            n_real_i < static_cast<uint32_t>(m_sig) * 85 / 100) {
-                            for (size_t a = 0; a < n_anchors; ++a) {
-                                const uint32_t n_real_a =
-                                    embeddings_[anchor_idx[a]].n_real_bins;
-                                // One-sided: uplift sparse-query vs dense-anchor pairs;
-                                // never suppress when anchor is equally/more sparse than
-                                // the query (no theoretical basis for shrinkage there).
-                                const float corr = std::min(
-                                    std::sqrt(static_cast<float>(std::max(n_real_a, n_real_i)) /
-                                              static_cast<float>(n_real_i)),
-                                    4.0f);
-                                k_mat(bi, static_cast<int>(a)) *= corr;
-                            }
-                        }
-                    }
-                    if (cfg_.nystrom_degree_normalize) {
-                        float d_i = k_mat.row(bi).sum();
-                        if (d_i < 1e-10f) d_i = 1.0f;
-                        k_mat.row(bi) =
-                            k_mat.row(bi).cwiseProduct(d_anc_row) / std::sqrt(d_i);
-                    }
-                }
-            }
-            {
-                auto _gemm_t0 = std::chrono::steady_clock::now();
-                e_mat.topRows(bs).noalias() = k_mat.topRows(bs) * W;
-                gemm_seconds += std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - _gemm_t0).count();
-            }
-            for (int bi = 0; bi < bs; ++bi) {
-                const size_t i = i0 + static_cast<size_t>(bi);
-                float norm = e_mat.row(bi).norm();
-                if (norm > 1e-10f) e_mat.row(bi) /= norm;
-                std::copy(e_mat.row(bi).data(), e_mat.row(bi).data() + actual_d,
-                          embeddings_[i].vector.data());
-                std::copy(e_mat.row(bi).data(), e_mat.row(bi).data() + actual_d,
-                          store_.row(i));
-            }
-        }
-    }
-#endif
 
     // Keep Eigen pinned to single-threaded for the rest of the run: any subsequent
     // Eigen GEMM/eigensolve (apply_nystrom_taxon, apply_nystrom_multicomp,
@@ -2087,10 +2019,8 @@ bool GeodesicDerep::apply_nystrom_taxon(
     // Step 2: anchor Gram matrix K [na × na]
     using RowMajorMatXf = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     RowMajorMatXf K(static_cast<int>(na), static_cast<int>(na));
-#if GEODESIC_USE_OMP
-    #pragma omp parallel for schedule(dynamic, 4) num_threads(cfg_.threads)
-#endif
-    for (int i = 0; i < static_cast<int>(na); ++i) {
+    par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+    for (int i = _t; i < static_cast<int>(na); i += _nt) {
         uint32_t ri = taxon_rows[anchor_idx[static_cast<size_t>(i)]];
         K(i, i) = 1.0f;
         for (int j = i + 1; j < static_cast<int>(na); ++j) {
@@ -2106,6 +2036,7 @@ bool GeodesicDerep::apply_nystrom_taxon(
             K(i, j) = jac;
         }
     }
+    }); // par_workers anchor Gram 2
     for (int i = 0; i < static_cast<int>(na); ++i)
         for (int j = 0; j < i; ++j)
             K(i, j) = K(j, i);
@@ -2175,10 +2106,8 @@ bool GeodesicDerep::apply_nystrom_taxon(
 
     for (size_t i0 = 0; i0 < n; i0 += static_cast<size_t>(BATCH)) {
         const int bs = static_cast<int>(std::min(static_cast<size_t>(BATCH), n - i0));
-#if GEODESIC_USE_OMP
-        #pragma omp parallel for num_threads(cfg_.threads)
-#endif
-        for (int bi = 0; bi < bs; ++bi) {
+        par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+        for (int bi = _t; bi < bs; bi += _nt) {
             uint32_t ri = taxon_rows[i0 + static_cast<size_t>(bi)];
             const uint16_t* sig_i = store_.sig(ri);
             for (int aj = 0; aj < static_cast<int>(na); ++aj) {
@@ -2199,6 +2128,7 @@ bool GeodesicDerep::apply_nystrom_taxon(
                     k_mat.row(bi).cwiseProduct(d_inv_sqrt.transpose()) / std::sqrt(d_i);
             }
         }
+        }); // par_workers BATCH inner
         e_mat.topRows(bs).noalias() = k_mat.topRows(bs) * W;
         for (int bi = 0; bi < bs; ++bi) {
             uint32_t row = taxon_rows[i0 + static_cast<size_t>(bi)];
@@ -2553,10 +2483,8 @@ bool GeodesicDerep::apply_nystrom_percomp(
         const size_t na_c = anchor_idx.size();
 
         Eigen::MatrixXf Kc(static_cast<int>(na_c), static_cast<int>(na_c));
-#if GEODESIC_USE_OMP
-        #pragma omp parallel for schedule(dynamic,4) num_threads(cfg_.threads)
-#endif
-        for (int i = 0; i < static_cast<int>(na_c); ++i) {
+        par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+        for (int i = _t; i < static_cast<int>(na_c); i += _nt) {
             uint32_t ri = c_eis[anchor_idx[i]];
             Kc(i, i) = 1.0f;
             for (int j = i + 1; j < static_cast<int>(na_c); ++j) {
@@ -2567,7 +2495,7 @@ bool GeodesicDerep::apply_nystrom_percomp(
                 Kc(i, j) = Kc(j, i) = jac;
             }
         }
-
+        }); // par_workers Kc Gram
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXf> eig_c(Kc);
         if (eig_c.info() != Eigen::Success) continue;
 
@@ -2671,8 +2599,8 @@ bool GeodesicDerep::apply_oph_sphere(const std::vector<uint32_t>& taxon_ei) {
     const __m256  kNegOnes  = _mm256_set1_ps(-1.0f);
 #endif
 
-#pragma omp parallel for schedule(dynamic, 64) num_threads(cfg_.threads)
-    for (size_t li = 0; li < n; ++li) {
+    par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+    for (size_t li = static_cast<size_t>(_t); li < n; li += static_cast<size_t>(_nt)) {
         const uint32_t row = taxon_ei[li];
         const uint16_t* sig = store_.sig(row);
 
@@ -2735,6 +2663,7 @@ bool GeodesicDerep::apply_oph_sphere(const std::vector<uint32_t>& taxon_ei) {
             vec[d]       = v;
         }
     }
+    }); // par_workers OPH phi
 
     nystrom_oph_sphere_applied_ = true;
     spdlog::info("GEODESIC: OPH token sphere (ANN recall gap): {} genomes, D={}, σ≈{:.4f}",
@@ -2938,16 +2867,15 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             representatives.push_back(rep_id);
             is_rep_row[i] = true;
             const size_t rep_store_i = i;
-#if GEODESIC_USE_OMP
-            #pragma omp parallel for num_threads(cfg_.threads)
-#endif
-            for (size_t j = 0; j < n; ++j) {
+            par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+            for (size_t j = static_cast<size_t>(_t); j < n; j += static_cast<size_t>(_nt)) {
                 float sim = sim_fn(rep_store_i, j);
                 if (sim > max_sim_to_rep[j]) {
                     max_sim_to_rep[j] = sim;
                     nearest_rep[j] = rep_id;
                 }
             }
+            }); // par_workers pinned rep update
             max_sim_to_rep[i] = 1.0f;
         }
     }
@@ -2984,16 +2912,15 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                 uint64_t rep_id = store_.genome_ids[best_i];
                 representatives.push_back(rep_id);
                 is_rep_row[best_i] = true;
-#if GEODESIC_USE_OMP
-                #pragma omp parallel for num_threads(cfg_.threads)
-#endif
-                for (size_t j = 0; j < n; ++j) {
+                par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+                for (size_t j = static_cast<size_t>(_t); j < n; j += static_cast<size_t>(_nt)) {
                     float sim = sim_fn(best_i, j);
                     if (sim > max_sim_to_rep[j]) {
                         max_sim_to_rep[j] = sim;
                         nearest_rep[j]    = rep_id;
                     }
                 }
+                }); // par_workers pre-seed rep update
                 max_sim_to_rep[best_i] = 1.0f;
             }
             spdlog::info("GEODESIC: Pre-seeded {} component reps ({} disconnected components)",
@@ -3006,10 +2933,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             // instead of continuing within-cluster diversity selection. Reset each genome's
             // max_sim_to_rep to its own cluster's pre-seeded rep only.
             if (genuine_bimodal_) {
-#if GEODESIC_USE_OMP
-                #pragma omp parallel for num_threads(cfg_.threads)
-#endif
-                for (size_t i = 0; i < n; ++i) {
+                par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+                for (size_t i = static_cast<size_t>(_t); i < n; i += static_cast<size_t>(_nt)) {
                     int cid = component_ids_[i];
                     if (cid < 0) continue;
                     auto it = comp_best_idx.find(cid);
@@ -3018,6 +2943,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                     max_sim_to_rep[i] = same_sim;
                     nearest_rep[i]    = store_.genome_ids[it->second];
                 }
+                }); // par_workers bimodal reset
                 spdlog::info("GEODESIC: bimodal FPS: reset max_sim_to_rep to per-cluster seeds");
             }
         }
@@ -3059,13 +2985,12 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         }
 
         // Update similarities to first rep
-#if GEODESIC_USE_OMP
-        #pragma omp parallel for num_threads(cfg_.threads)
-#endif
-        for (size_t i = 0; i < n; ++i) {
+        par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+        for (size_t i = static_cast<size_t>(_t); i < n; i += static_cast<size_t>(_nt)) {
             max_sim_to_rep[i] = sim_fn(first_idx, i);
             nearest_rep[i] = first_rep;
         }
+        }); // par_workers first rep update
         max_sim_to_rep[first_idx] = 1.0f;  // Self-similarity
     }
 
@@ -3124,10 +3049,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         // FPS fitness = distance × sqrt(size) — quality is a tie-breaker only
         struct FitEntry { float dist_fit; float quality; size_t idx; };
         std::vector<FitEntry> fit_active(active.size());
-#if GEODESIC_USE_OMP
-        #pragma omp parallel for num_threads(cfg_.threads)
-#endif
-        for (size_t ai = 0; ai < active.size(); ++ai) {
+        par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+        for (size_t ai = static_cast<size_t>(_t); ai < active.size(); ai += static_cast<size_t>(_nt)) {
             size_t i = active[ai];
             float sim = max_sim_to_rep[i];
             // Fast angular distance proxy: sqrt(2(1-sim)) ≈ acos(sim) for sim near 1.
@@ -3136,6 +3059,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             // Primary fitness: distance × sqrt(size) — pure diversity signal
             fit_active[ai] = {d_proxy * length_factors[i], store_.quality_scores[i], i};
         }
+        }); // par_workers fit_active
 
         // Partial sort: bring top-B to front (O(n) average)
         // Compare by (dist_fit DESC, quality DESC, genome_id ASC) — strict total order.
@@ -3181,10 +3105,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
         const size_t nb = batch_idx.size();
         const size_t n_active = active.size();
-#if GEODESIC_USE_OMP
-        #pragma omp parallel for schedule(static) num_threads(cfg_.threads)
-#endif
-        for (size_t ai = 0; ai < n_active; ++ai) {
+        par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+        for (size_t ai = static_cast<size_t>(_t); ai < n_active; ai += static_cast<size_t>(_nt)) {
             const size_t j = active[ai];
             const float* __restrict__ vj = store_.row(j);
             float best = max_sim_to_rep[j];
@@ -3196,6 +3118,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             max_sim_to_rep[j] = best;
             nearest_rep[j] = best_rep;
         }
+        }); // par_workers active scan
         compact_active();
     }
     spdlog::info("GEODESIC: [timing] FPS done: {} reps selected", representatives.size());
@@ -3297,10 +3220,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                 new_gids.push_back(store_.genome_ids[bi]);
             }
             const size_t nb_new = new_vecs.size();
-#if GEODESIC_USE_OMP
-            #pragma omp parallel for num_threads(cfg_.threads)
-#endif
-            for (size_t j = 0; j < n; ++j) {
+            par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+            for (size_t j = static_cast<size_t>(_t); j < n; j += static_cast<size_t>(_nt)) {
                 const float* vj = store_.row(j);
                 for (size_t k = 0; k < nb_new; ++k) {
                     float s = dot_product_simd(new_vecs[k], vj, dim);
@@ -3310,6 +3231,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                     }
                 }
             }
+            }); // par_workers new reps update
         }
     }
 
@@ -3372,45 +3294,28 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         // search_radius() is thread-safe (read-only brute-force scan).
         std::vector<std::pair<size_t, size_t>> merge_pairs;
 
-#if GEODESIC_USE_OMP
-        std::mutex merge_mutex;
-        #pragma omp parallel num_threads(cfg_.threads)
         {
-            std::vector<std::pair<size_t, size_t>> local_pairs;
-            #pragma omp for nowait
-            for (size_t i = 0; i < representatives.size(); ++i) {
-                uint64_t rep_i = representatives[i];
-                auto row_it = gid_to_row_.find(rep_i);
-                if (row_it == gid_to_row_.end()) continue;
-                auto neighbors = index_->search_radius(embeddings_[row_it->second].vector, cfg_.min_rep_distance, &rep_set);
-                for (const auto& [neighbor_id, dist] : neighbors) {
-                    if (neighbor_id == rep_i) continue;
-                    auto it = rep_to_idx.find(neighbor_id);
-                    if (it != rep_to_idx.end()) {
-                        size_t j = it->second;
-                        if (i < j) local_pairs.emplace_back(i, j);
+            std::mutex merge_mutex;
+            par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+                std::vector<std::pair<size_t, size_t>> local_pairs;
+                for (size_t i = static_cast<size_t>(_t); i < representatives.size(); i += static_cast<size_t>(_nt)) {
+                    uint64_t rep_i = representatives[i];
+                    auto row_it = gid_to_row_.find(rep_i);
+                    if (row_it == gid_to_row_.end()) continue;
+                    auto neighbors = index_->search_radius(embeddings_[row_it->second].vector, cfg_.min_rep_distance, &rep_set);
+                    for (const auto& [neighbor_id, dist] : neighbors) {
+                        if (neighbor_id == rep_i) continue;
+                        auto it = rep_to_idx.find(neighbor_id);
+                        if (it != rep_to_idx.end()) {
+                            size_t j = it->second;
+                            if (i < j) local_pairs.emplace_back(i, j);
+                        }
                     }
                 }
-            }
-            std::lock_guard<std::mutex> lk(merge_mutex);
-            merge_pairs.insert(merge_pairs.end(), local_pairs.begin(), local_pairs.end());
+                std::lock_guard<std::mutex> lk(merge_mutex);
+                merge_pairs.insert(merge_pairs.end(), local_pairs.begin(), local_pairs.end());
+            }); // par_workers merge_pairs
         }
-#else
-        for (size_t i = 0; i < representatives.size(); ++i) {
-            uint64_t rep_i = representatives[i];
-            auto row_it = gid_to_row_.find(rep_i);
-            if (row_it == gid_to_row_.end()) continue;
-            auto neighbors = index_->search_radius(embeddings_[row_it->second].vector, cfg_.min_rep_distance, &rep_set);
-            for (const auto& [neighbor_id, dist] : neighbors) {
-                if (neighbor_id == rep_i) continue;
-                auto it = rep_to_idx.find(neighbor_id);
-                if (it != rep_to_idx.end()) {
-                    size_t j = it->second;
-                    if (i < j) merge_pairs.emplace_back(i, j);
-                }
-            }
-        }
-#endif
         // Union-Find is order-sensitive: unite(x,y) sets parent[find(x)] = find(y),
         // so the chosen root depends on the sequence of unite calls. Threads append
         // local_pairs in arrival order — sort to fix the apply order across runs.
@@ -3456,10 +3361,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
         // Selective recompute: only genomes whose nearest_rep was merged away.
         // Genomes assigned to surviving reps keep their current assignment.
-#if GEODESIC_USE_OMP
-        #pragma omp parallel for num_threads(cfg_.threads)
-#endif
-        for (size_t i = 0; i < n; ++i) {
+        par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+        for (size_t i = static_cast<size_t>(_t); i < n; i += static_cast<size_t>(_nt)) {
             if (is_rep_row[i]) {
                 max_sim_to_rep[i] = 1.0f;
                 nearest_rep[i] = store_.genome_ids[i];
@@ -3480,6 +3383,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                 nearest_rep[i] = best_rep;
             }
         }
+        }); // par_workers merge recompute
     } else {
         representatives = std::move(refined_reps);
     }
@@ -3650,14 +3554,11 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
         std::vector<size_t> repair_queue;
         cert_set_ef();
-#if GEODESIC_USE_OMP
         {
             std::vector<std::vector<size_t>> tl_repair(static_cast<size_t>(cfg_.threads));
-            #pragma omp parallel num_threads(cfg_.threads)
-            {
-                auto& local_repair = tl_repair[static_cast<size_t>(omp_get_thread_num())];
-                #pragma omp for schedule(dynamic, 256)
-                for (size_t i = 0; i < n; ++i) {
+            par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+                auto& local_repair = tl_repair[static_cast<size_t>(_t)];
+                for (size_t i = static_cast<size_t>(_t); i < n; i += static_cast<size_t>(_nt)) {
                     if (is_rep_row[i]) continue;
                     if (store_.quality_scores[i] == 0.0f) continue;
                     const auto sig_i = store_.sig_span(i);
@@ -3685,41 +3586,11 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                         local_repair.push_back(i);
                     }
                 }
-            }
+            }); // par_workers cert scan
             for (auto& local : tl_repair)
                 repair_queue.insert(repair_queue.end(), local.begin(), local.end());
             std::sort(repair_queue.begin(), repair_queue.end());
         }
-#else
-        for (size_t i = 0; i < n; ++i) {
-            if (is_rep_row[i]) continue;
-            if (store_.quality_scores[i] == 0.0f) continue;
-            const auto sig_i = store_.sig_span(i);
-            if (sig_i.size() != m_oph) continue;
-
-            // Fast path: check assigned rep first.
-            auto rep_it = gid_to_row_.find(nearest_rep[i]);
-            if (rep_it != gid_to_row_.end()) {
-                auto [cert, jac] = oph_cert_jac(i, rep_it->second);
-                if (cert) {
-                    max_sim_to_rep[i] = static_cast<float>(jac);
-                    continue;
-                }
-            }
-
-            // Exhaustive fallback: embedding-ranked scan.
-            double best_cert_jac = -1.0;
-            size_t best_rep_row = SIZE_MAX;
-            cert_scan(i, best_cert_jac, best_rep_row);
-
-            if (best_rep_row != SIZE_MAX) {
-                nearest_rep[i]    = store_.genome_ids[best_rep_row];
-                max_sim_to_rep[i] = static_cast<float>(best_cert_jac);
-            } else {
-                repair_queue.push_back(i);
-            }
-        }
-#endif
         cert_restore_ef();
 
         const size_t n_reps_pre_repair = cert_rep_idx.size();
@@ -3741,10 +3612,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                 repair_gids.push_back(store_.genome_ids[i]);
             }
             const size_t n_repair = repair_queue.size();
-#if GEODESIC_USE_OMP
-            #pragma omp parallel for schedule(static) num_threads(cfg_.threads)
-#endif
-            for (size_t j = 0; j < n; ++j) {
+            par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+            for (size_t j = static_cast<size_t>(_t); j < n; j += static_cast<size_t>(_nt)) {
                 if (is_rep_row[j]) continue;
                 const float* vj = store_.row(j);
                 for (size_t k = 0; k < n_repair; ++k) {
@@ -3755,6 +3624,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                     }
                 }
             }
+            }); // par_workers cert repair scan
         } else if (is_verbose()) {
             spdlog::info("GEODESIC: Phase 7c: all non-rep genomes OPH-certified");
         }
@@ -3798,10 +3668,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                     rvecs[k] = store_.row(cert_rep_idx[rb + k]);
                     rgids[k] = store_.genome_ids[cert_rep_idx[rb + k]];
                 }
-#if GEODESIC_USE_OMP
-                #pragma omp parallel for schedule(static) num_threads(cfg_.threads)
-#endif
-                for (size_t j = 0; j < n; ++j) {
+                par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+                for (size_t j = static_cast<size_t>(_t); j < n; j += static_cast<size_t>(_nt)) {
                     if (store_.quality_scores[j] == 0.0f) continue;
                     const float* vj = store_.row(j);
                     for (size_t k = 0; k < nb; ++k) {
@@ -3809,6 +3677,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                             cert_reps[j].push_back(rgids[k]);
                     }
                 }
+                }); // par_workers cert_reps scan
             }
 
             // (Mid-taxon budget release intentionally disabled: subsequent phases —
@@ -4009,25 +3878,14 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         }
         J_est = std::clamp(J_est, 0.0, 1.0);
 
-        // For fragmented MAGs, Jaccard underestimates ANI because the union
-        // denominator includes the target's dense bins while the query has few
-        // real bins. Use containment (matches/n_real_bins_query) + C^(1/k).
         const uint32_t nr_i = embeddings_[i].n_real_bins;
-        const bool is_mag_i = has_oph && nr_i > 0 &&
-            nr_i < static_cast<uint32_t>(cfg_.sketch_size) / 2;
-        float ani_frac;
-        if (is_mag_i) {
-            const auto sa = store_.sig_span(i);
-            const auto sb = store_.sig_span(rep_idx);
-            size_t matches = 0;
-            for (size_t t = 0; t < sa.size(); ++t)
-                if (sa[t] != 0xFFFFu && sa[t] == sb[t]) ++matches;
-            double c = static_cast<double>(matches) / static_cast<double>(nr_i);
-            ani_frac = static_cast<float>(std::pow(std::clamp(c, 0.0, 1.0),
-                                                   1.0 / cfg_.kmer_size));
-        } else {
-            ani_frac = jaccard_to_ani_frac(J_est);
-        }
+        const uint32_t nr_r = embeddings_[rep_idx].n_real_bins;
+        const auto sa = store_.sig_span(i);
+        const auto sb = store_.sig_span(rep_idx);
+        float ani_frac = has_oph
+            ? score_pair(sa.data(), sb.data(), static_cast<uint32_t>(sa.size()),
+                         nr_i, nr_r, cfg_.kmer_size, J_est)
+            : jaccard_to_ani_frac(J_est);
 
         SimilarityEdge edge;
         edge.source   = path_strings[i];
@@ -4476,17 +4334,20 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
     double coverage_max = 0.0;
     size_t n_valid = 0;
 
-#if GEODESIC_USE_OMP
-    #pragma omp parallel for reduction(+:coverage_sum,n_valid) reduction(min:coverage_min) reduction(max:coverage_max) num_threads(cfg_.threads)
-#endif
-    for (size_t i = 0; i < embeddings_.size(); ++i) {
-        const float* query = store_.row(i);
-        // Skip zero-norm embeddings (failed sketch: empty/corrupt FASTA)
-        if (dot_product_simd(query, query, runtime_dim_) < 0.01f) {
-            coverage_dists[i] = std::numeric_limits<double>::quiet_NaN();
-            continue;
-        }
-        ++n_valid;
+    {
+        std::vector<double> _cov_sum(cfg_.threads, 0.0);
+        std::vector<double> _cov_min(cfg_.threads, std::numeric_limits<double>::max());
+        std::vector<double> _cov_max(cfg_.threads, 0.0);
+        std::vector<size_t> _n_valid(cfg_.threads, 0);
+        par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+        for (size_t i = static_cast<size_t>(_t); i < embeddings_.size(); i += static_cast<size_t>(_nt)) {
+            const float* query = store_.row(i);
+            // Skip zero-norm embeddings (failed sketch: empty/corrupt FASTA)
+            if (dot_product_simd(query, query, runtime_dim_) < 0.01f) {
+                coverage_dists[i] = std::numeric_limits<double>::quiet_NaN();
+                continue;
+            }
+            ++_n_valid[_t];
 
         float max_sim = -1.0f;
         size_t best_rep = SIZE_MAX;
@@ -4523,9 +4384,15 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
         }
         coverage_dists[i] = min_dist;
         nearest_rep_idx[i] = best_rep;
-        coverage_sum += min_dist;
-        coverage_min = std::min(coverage_min, min_dist);
-        coverage_max = std::max(coverage_max, min_dist);
+        _cov_sum[_t] += min_dist;
+        _cov_min[_t] = std::min(_cov_min[_t], min_dist);
+        _cov_max[_t] = std::max(_cov_max[_t], min_dist);
+        }
+        }); // par_workers coverage
+        coverage_sum = std::accumulate(_cov_sum.begin(), _cov_sum.end(), 0.0);
+        coverage_min = *std::min_element(_cov_min.begin(), _cov_min.end());
+        coverage_max = *std::max_element(_cov_max.begin(), _cov_max.end());
+        n_valid = std::accumulate(_n_valid.begin(), _n_valid.end(), size_t{0});
     }
 
     metrics.coverage_mean_dist = n_valid > 0 ? coverage_sum / static_cast<double>(n_valid) : 0.0;
@@ -4564,11 +4431,10 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
         const int m = cfg_.sketch_size;
         const double k = static_cast<double>(cfg_.kmer_size);
 
-        int cnt99 = 0, cnt98 = 0, cnt97 = 0, cnt95 = 0;
-#if GEODESIC_USE_OMP
-        #pragma omp parallel for reduction(+:cnt99,cnt98,cnt97,cnt95) num_threads(cfg_.threads)
-#endif
-        for (size_t i = 0; i < embeddings_.size(); ++i) {
+        std::vector<int> _cnt99(cfg_.threads, 0), _cnt98(cfg_.threads, 0);
+        std::vector<int> _cnt97(cfg_.threads, 0), _cnt95(cfg_.threads, 0);
+        par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
+        for (size_t i = static_cast<size_t>(_t); i < embeddings_.size(); i += static_cast<size_t>(_nt)) {
             if (!std::isfinite(coverage_dists[i])) continue;
             const size_t ridx = nearest_rep_idx[i];
             if (ridx == SIZE_MAX) continue;
@@ -4594,11 +4460,16 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
                 const double j = static_cast<double>(n11) / n_union;
                 ani = (j > 0.0) ? std::pow(2.0 * j / (1.0 + j), 1.0 / k) : 0.0;
             }
-            if (ani < 0.99) cnt99++;
-            if (ani < 0.98) cnt98++;
-            if (ani < 0.97) cnt97++;
-            if (ani < 0.95) cnt95++;
+            if (ani < 0.99) _cnt99[_t]++;
+            if (ani < 0.98) _cnt98[_t]++;
+            if (ani < 0.97) _cnt97[_t]++;
+            if (ani < 0.95) _cnt95[_t]++;
         }
+        }); // par_workers ANI count
+        const int cnt99 = std::accumulate(_cnt99.begin(), _cnt99.end(), 0);
+        const int cnt98 = std::accumulate(_cnt98.begin(), _cnt98.end(), 0);
+        const int cnt97 = std::accumulate(_cnt97.begin(), _cnt97.end(), 0);
+        const int cnt95 = std::accumulate(_cnt95.begin(), _cnt95.end(), 0);
         metrics.coverage_below_99 = cnt99;
         metrics.coverage_below_98 = cnt98;
         metrics.coverage_below_97 = cnt97;
