@@ -17,9 +17,22 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build gcc g++ \
+            cmake ninja-build gcc g++ ccache \
             libzstd-dev libxxhash-dev libdeflate-dev \
             git
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-
+
+      - name: Cache FetchContent
+        uses: actions/cache@v4
+        with:
+          path: .fc
+          key: fetchcontent-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
 
       # genopack is a private sibling dependency not available on GitHub.
       # The build step below will fail gracefully with a clear error if it is
@@ -29,6 +42,8 @@ jobs:
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DFETCHCONTENT_BASE_DIR=.fc \
             ${GENOPACK_INCLUDE_DIR:+-DGENOPACK_INCLUDE_DIR="$GENOPACK_INCLUDE_DIR"} \
             ${GENOPACK_LIBRARY:+-DGENOPACK_LIBRARY="$GENOPACK_LIBRARY"}
         env:
