@@ -193,9 +193,9 @@ geodesic update -g new_genomes.txt --lock prev_run.lock \
 |---------|---------|-----------------|-----------|---------|---------------|---------|
 | *E. coli* | 233,166 | 1,142 | 99.5% | 6 min | 98.6% (auto) | 16 |
 | *S. enterica* | 367,440 | 8,347 | 97.7% | 11 min | 99.9% (auto) | 16 |
-| Full GTDB r232 | 5,238,926 | 886,507 | 83.1% | 65 min | per-taxon (auto) | 88 |
+| Full GTDB r232 | 5,238,926 | 886,507 | 83.1% | 65 min | per-taxon (auto) | 24 |
 
-Throughput: ~630 genomes/sec at 16 threads (single large taxon); ~1,340 genomes/sec at 88 threads across full GTDB diversity. Peak memory: ~524 GB for 5.2M genomes at 88 threads. ANI thresholds are inferred per taxon from the MST bottleneck edge — no user tuning required.
+Throughput: ~1,340 genomes/sec at 24 threads across full GTDB diversity. Peak memory: ~63 GB for 5.2M genomes at 24 threads. ANI thresholds are inferred per taxon from the MST bottleneck edge — no user tuning required.
 
 Coverage: Phase 8 OPH certification guarantees every genome is within the ANI threshold of its assigned representative in sketch space. Near the default 95% ANI threshold, OPH estimation error is typically well below 0.1 ANI points for dense assemblies.
 
