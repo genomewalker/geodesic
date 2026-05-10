@@ -2582,7 +2582,7 @@ bool GeodesicDerep::apply_oph_sphere(const std::vector<uint32_t>& taxon_ei) {
     const int D        = cfg_.embedding_dim;
     const int m        = cfg_.sketch_size;
     const int n_blocks = (D + 63) / 64;
-    const float inv_sqrt_m = 1.0f / std::sqrtf(static_cast<float>(m));
+    const float inv_sqrt_m = 1.0f / std::sqrt(static_cast<float>(m));
 
     if (static_cast<int>(store_.dim) != D)
         store_.resize_dim(static_cast<size_t>(D));
@@ -2651,7 +2651,7 @@ bool GeodesicDerep::apply_oph_sphere(const std::vector<uint32_t>& taxon_ei) {
             phi[d] *= inv_sqrt_m;
             norm_sq += phi[d] * phi[d];
         }
-        const float inv_norm = (norm_sq > 0.0f) ? 1.0f / std::sqrtf(norm_sq) : 0.0f;
+        const float inv_norm = (norm_sq > 0.0f) ? 1.0f / std::sqrt(norm_sq) : 0.0f;
 
         float* dst_store = store_.row(row);
         auto& vec = embeddings_[row].vector;
@@ -2667,7 +2667,7 @@ bool GeodesicDerep::apply_oph_sphere(const std::vector<uint32_t>& taxon_ei) {
 
     nystrom_oph_sphere_applied_ = true;
     spdlog::info("GEODESIC: OPH token sphere (ANN recall gap): {} genomes, D={}, σ≈{:.4f}",
-                 n, D, std::sqrtf(0.25f / static_cast<float>(m)));
+                 n, D, std::sqrt(0.25f / static_cast<float>(m)));
     return true;
 }
 
