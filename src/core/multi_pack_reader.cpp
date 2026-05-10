@@ -256,7 +256,10 @@ void MultiPackReader::visit_sketch_batches(
                 [&](size_t local_idx, const genopack::SketchResult& sk) {
                     cb(sorted_gidx[local_idx], sk);
                 });
-            archives_[aidx].reader->release_sketches();
+            // release_sketches() removed: V4 has no decompressed buffers to free here,
+            // and calling it mid-preload would DONTNEED mmap pages that are re-read
+            // immediately for the next k-value (3× NFS reads instead of 1×).
+            // DONTNEED is applied at wave granularity by process_taxa_parallel instead.
             fadvise_dontneed_(archives_[aidx].path);
         }
     }
