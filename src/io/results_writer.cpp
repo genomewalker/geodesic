@@ -18,7 +18,7 @@ void ResultsWriter::write_derep_genomes(const RunState& state) const {
     std::ofstream out(path);
     if (!out) throw std::runtime_error("Cannot open output file: " + path.string());
 
-    out << "accession\ttaxonomy\trepresentative\tcluster_rep\tnn_dist\n";
+    out << "accession\ttaxonomy\trepresentative\tcluster_rep\tnn_dist\tsketch_fill\n";
 
     for (const auto& taxon : state.taxa()) {
         const std::string& taxonomy = taxon.result.taxonomy;
@@ -34,12 +34,15 @@ void ResultsWriter::write_derep_genomes(const RunState& state) const {
                 auto dit = taxon.member_nn_dist.find(acc);
                 if (dit != taxon.member_nn_dist.end()) nn_dist_val = dit->second;
             }
+            float fill = 1.0f;
+            auto fit = taxon.member_fill_ratio.find(acc);
+            if (fit != taxon.member_fill_ratio.end()) fill = fit->second;
             out << acc << '\t' << taxonomy << '\t' << is_rep << '\t'
                 << cluster_rep << '\t';
             if (is_rep)
-                out << "0\n";
+                out << "0\t" << fill << '\n';
             else
-                out << nn_dist_val << '\n';
+                out << nn_dist_val << '\t' << fill << '\n';
         }
     }
 

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build gcc g++ \
+            libzstd-dev libxxhash-dev libdeflate-dev \
+            git
+
+      # genopack is a private sibling dependency not available on GitHub.
+      # The build step below will fail gracefully with a clear error if it is
+      # not present — this CI job validates the rest of the build graph.
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++ \
+            ${GENOPACK_INCLUDE_DIR:+-DGENOPACK_INCLUDE_DIR="$GENOPACK_INCLUDE_DIR"} \
+            ${GENOPACK_LIBRARY:+-DGENOPACK_LIBRARY="$GENOPACK_LIBRARY"}
+        env:
+          GENOPACK_INCLUDE_DIR: ${{ secrets.GENOPACK_INCLUDE_DIR }}
+          GENOPACK_LIBRARY: ${{ secrets.GENOPACK_LIBRARY }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

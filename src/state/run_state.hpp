@@ -44,7 +44,8 @@ struct TaxonOutput {
 
     std::vector<std::vector<float>>                     rep_embeddings;
     std::unordered_map<std::string, std::string>        member_to_rep;
-    std::unordered_map<std::string, double>             member_nn_dist; // OPH distance to assigned rep
+    std::unordered_map<std::string, double>             member_nn_dist;       // OPH distance to assigned rep
+    std::unordered_map<std::string, float>              member_fill_ratio;    // n_real_bins / sketch_size
     std::unordered_map<std::string, uint32_t>           rep_cluster_size;
     int                                                 sketch_kmer_used = 0;
 
