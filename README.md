@@ -180,7 +180,7 @@ See [Distributed Mode](wiki/Distributed-Mode.md) for the full workflow.
 
 ```bash
 geodesic update -g new_genomes.txt --lock prev_run.lock \
-    --pack mydb_v2.gpk \
+    --pack mydb.gpk \
     --geodf-output updated.geodf --lock-output updated.lock \
     --threads 24
 ```
@@ -199,7 +199,7 @@ Throughput: ~1,340 genomes/sec at 24 threads across full GTDB diversity. Peak me
 
 Coverage: Phase 8 OPH certification guarantees every genome is within the ANI threshold of its assigned representative in sketch space. Near the default 95% ANI threshold, OPH estimation error is typically well below 0.1 ANI points for dense assemblies.
 
-**Fragmented genomes (MAGs)**: sketches built with open syncmer OPH (`--sketch-syncmer auto`, targeting ~6% k-mer density, default since genopack v2) store only locally-minimal k-mer positions. For assemblies with fewer hashed positions than the sketch size, geodesic automatically switches from Jaccard to containment-based ANI estimation, preserving accuracy for fragmented MAGs without affecting full assemblies.
+**Fragmented genomes (MAGs)**: sketches built with open syncmer OPH (`--sketch-syncmer auto`, targeting ~6% k-mer density) store only locally-minimal k-mer positions. For assemblies with fewer hashed positions than the sketch size, geodesic automatically switches from Jaccard to containment-based ANI estimation, preserving accuracy for fragmented MAGs without affecting full assemblies.
 
 ## License
 
