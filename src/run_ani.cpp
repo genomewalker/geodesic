@@ -78,8 +78,7 @@ int run_ani(const Config& cfg) {
     for (int i = 0; i < (int)needed.size(); ++i) {
         auto it = fastas.find(needed[i]);
         if (it == fastas.end()) continue;
-        sketches[i] = build_sketch(needed[i], it->second,
-                                    cfg.ani_k, cfg.ani_syncmer_s, cfg.ani_sketch_size);
+        sketches[i] = build_sketch(needed[i], it->second, cfg.ani_k, cfg.ani_c);
     }
     fastas.clear();
 

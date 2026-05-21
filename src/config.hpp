@@ -96,10 +96,9 @@ struct Config {
     std::filesystem::path ani_query_file;   // --ql
     std::filesystem::path ani_ref_file;     // --rl (empty = same as ql, self all-pairs)
     std::filesystem::path ani_output;       // -o
-    int    ani_k            = 21;
-    int    ani_sketch_size  = 10000;
-    int    ani_syncmer_s    = 7;
-    double ani_min_af       = 0.0;
+    int    ani_k   = 21;
+    int    ani_c   = 125;   // compression factor: keep k-mer if hash % c == 0
+    double ani_min_af = 0.0;
 };
 
 Config parse_args(int argc, char** argv);

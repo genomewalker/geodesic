@@ -252,10 +252,8 @@ Config parse_args(int argc, char** argv) {
         "Minimum alignment fraction to report a pair")->default_val(0.0);
     ani_cmd->add_option("--ani-k", cfg.ani_k,
         "k-mer size")->default_val(21);
-    ani_cmd->add_option("--ani-sketch-size", cfg.ani_sketch_size,
-        "Number of hashes per sketch")->default_val(10000);
-    ani_cmd->add_option("--ani-syncmer-s", cfg.ani_syncmer_s,
-        "Open-syncmer window s")->default_val(7);
+    ani_cmd->add_option("-c,--compression", cfg.ani_c,
+        "Compression factor: keep k-mer if hash % c == 0 (matches skani -c)")->default_val(125);
 
     // ── parse ───────────────────────────────────────────────────────────────
     try {

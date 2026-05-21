@@ -10,7 +10,6 @@ namespace derep {
 
 namespace {
 
-// Encode nucleotide to 2-bit value; returns 255 for non-ACGT.
 inline uint8_t encode_base(char c) {
     switch (c) {
     case 'A': case 'a': return 0;
@@ -21,108 +20,62 @@ inline uint8_t encode_base(char c) {
     }
 }
 
-// Complement of a 2-bit encoded base.
 inline uint8_t comp_base(uint8_t b) { return b ^ 3u; }
 
-// Hash a k-mer given as a buffer of 2-bit encoded bases.
-inline uint64_t hash_encoded(const uint8_t* buf, int len) {
+inline uint64_t hash_buf(const uint8_t* buf, int len) {
     return XXH3_64bits(buf, static_cast<size_t>(len));
-}
-
-// Open syncmer: k-mer is selected if the minimum s-mer sub-hash occurs at position 0.
-bool is_open_syncmer(const uint8_t* fwd, int k, int s) {
-    // There are (k - s + 1) s-mers; we want argmin == 0.
-    uint64_t h0 = hash_encoded(fwd, s);
-    uint64_t min_h = h0;
-    for (int pos = 1; pos <= k - s; ++pos) {
-        uint64_t h = hash_encoded(fwd + pos, s);
-        if (h < min_h) min_h = h;
-    }
-    return h0 == min_h;
 }
 
 } // anonymous namespace
 
+// Exact skani compression model: select canonical k-mer if hash % c == 0.
+// Sketch size scales with genome_length / c, matching skani -c parameter.
 SkaniSketch build_sketch(std::string_view accession, std::string_view fasta,
-                          int k, int s, int sketch_size) {
+                          int k, int c) {
     SkaniSketch sk;
     sk.accession = std::string(accession);
 
-    // We collect all syncmer hashes, then take the smallest sketch_size.
-    // For very large genomes this can be large; we use a bounded max-heap instead.
-    std::vector<uint64_t> candidates;
-    candidates.reserve(static_cast<size_t>(sketch_size) * 4);
+    const uint64_t c64 = static_cast<uint64_t>(c);
+    std::vector<uint64_t> hashes;
+    hashes.reserve(fasta.size() / static_cast<size_t>(c) + 64);
 
-    uint8_t kbuf[64] = {};  // rolling encoded k-mer buffer; k <= 63 assumed
+    uint8_t kbuf[64] = {};
+    int     filled   = 0;
+    bool    in_header = false;
 
-    const char* data = fasta.data();
-    const size_t len = fasta.size();
-
-    size_t contig_start = 0;
-    bool in_header = false;
-
-    // Sliding window state
-    size_t pos = 0;    // current position in fasta
-    int    filled = 0; // number of valid bases in kbuf
-
-    auto flush_window = [&]() { filled = 0; };
-
-    auto process_base = [&](char c) {
-        if (c == '\n' || c == '\r') return;
-        uint8_t b = encode_base(c);
-        // Shift window left by 1
+    auto process_base = [&](char ch) {
+        if (ch == '\n' || ch == '\r') return;
+        uint8_t b = encode_base(ch);
         for (int i = 0; i < k - 1; ++i) kbuf[i] = kbuf[i + 1];
         kbuf[k - 1] = b;
-        if (b == 255) {
-            // N or bad base — reset window
-            filled = 0;
-            return;
-        }
+        if (b == 255) { filled = 0; return; }
         if (filled < k) ++filled;
         if (filled < k) return;
 
         ++sk.genome_length;
 
-        // Build RC and pick canonical orientation — shared k-mers on opposite strands
-        // must select identically, so syncmer criterion must use the canonical form.
-        uint8_t rc_buf[64];
-        for (int i = 0; i < k; ++i) rc_buf[i] = comp_base(kbuf[k - 1 - i]);
-        const uint64_t h_fwd = hash_encoded(kbuf, k);
-        const uint64_t h_rc  = hash_encoded(rc_buf, k);
-        const uint8_t* canon = (h_fwd <= h_rc) ? kbuf : rc_buf;
+        uint8_t rc[64];
+        for (int i = 0; i < k; ++i) rc[i] = comp_base(kbuf[k - 1 - i]);
+        const uint64_t h_fwd = hash_buf(kbuf, k);
+        const uint64_t h_rc  = hash_buf(rc,   k);
+        const uint64_t h     = std::min(h_fwd, h_rc);
 
-        if (!is_open_syncmer(canon, k, s)) return;
-
-        candidates.push_back(std::min(h_fwd, h_rc));
+        if (h % c64 != 0) return;
+        hashes.push_back(h);
     };
 
-    (void)contig_start;
+    const char* data = fasta.data();
+    const size_t len = fasta.size();
     for (size_t i = 0; i < len; ++i) {
-        char c = data[i];
-        if (c == '>') {
-            in_header = true;
-            flush_window();
-            continue;
-        }
-        if (in_header) {
-            if (c == '\n') in_header = false;
-            continue;
-        }
-        process_base(c);
+        char ch = data[i];
+        if (ch == '>') { in_header = true; filled = 0; continue; }
+        if (in_header)  { if (ch == '\n') in_header = false; continue; }
+        process_base(ch);
     }
 
-    // Keep the sketch_size smallest hashes (sorted).
-    if ((int)candidates.size() > sketch_size) {
-        std::nth_element(candidates.begin(),
-                         candidates.begin() + sketch_size,
-                         candidates.end());
-        candidates.resize(static_cast<size_t>(sketch_size));
-    }
-    std::sort(candidates.begin(), candidates.end());
-    // Deduplicate (same canonical hash from fwd/rc of adjacent k-mers).
-    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
-
-    sk.hashes = std::move(candidates);
+    std::sort(hashes.begin(), hashes.end());
+    hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
+    sk.hashes = std::move(hashes);
     return sk;
 }
 
