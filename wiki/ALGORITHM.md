@@ -446,29 +446,28 @@ $$
 
 After degree normalisation, dot products approximate a normalised-graph similarity rather than raw Jaccard. Phase 7 corrects borderline decisions back to sketch Jaccard space.
 
-### Embedding distance → ANI calibration
+### K-mer size pre-probe
 
-Because the Nyström embedding uses degree-normalised Jaccard similarities, the embedding distance $d$ does not equal $\theta_{\mathrm{ANI}}$ exactly. geodesic fits a data-driven calibration model per taxon to map embedding distances to ANI bounds.
+Before loading all $n$ sketches, geodesic runs a lightweight pre-probe (`probe_taxon_kmer`) to determine which stored k-mer size best matches the taxon's diversity:
 
-**Fallback (uncalibrated).** When fewer than 10 calibration pairs are available, the Mash chain is used directly. The L2-normalised embedding places each genome on the unit sphere, so $\mathrm{dot}(a,b) \approx J(a,b)$ before degree normalisation; after normalisation the relationship is approximate. The fallback treats $J \approx \cos(\pi d)$ and inverts the Mash formula:
+1. Sample up to $\min(300,\ n/5)$ genomes at uniform stride.
+2. Load their OPH sketches at the largest available k (e.g. $k=31$) using only 500 bins.
+3. Compute all-pairs OPH Jaccard dissimilarity $d_{ij} = 1 - J_{ij}$ among the probe set; record each genome's nearest-neighbour distance $d_i^{\mathrm{nn}} = \min_{j \ne i} d_{ij}$.
+4. Compute $p_5$ and $p_{95}$ of the NN distribution. Apply the selection rule:
 
-$$
-\widehat{\mathrm{ANI}} = \left(\frac{2\cos(\pi d)}{1 + \cos(\pi d)}\right)^{1/k}
-$$
+| $p_{95}$ | selected k | taxon regime |
+|----------|-----------|--------------|
+| $< 0.002$ | 31 | clonal / near-identical strains |
+| $< 0.010$ | 21 | moderate intra-species diversity |
+| $\geq 0.010$ | 16 | diverse or cross-species taxa |
 
-with a fixed ±1.5% ANI margin, using $k$ as configured for the taxon tier (default 21).
+Safety: if $k = 16$ was selected but $p_5 < 0.010$ (mixed clonal + diverse), falls back to $k = 21$.
 
-**Fitted calibration (ANICalibrator).** When ≥ 10 calibration pairs are available, geodesic fits monotonic quantile regression curves to $(d_i, \mathrm{ANI}_i)$ samples drawn from genome pairs within the taxon:
+The thresholds follow from the OPH Jaccard ↔ ANI table above: at $k = 31$, $d = 0.010$ corresponds to $J = 0.990$, which via the Mash formula gives ANI $\approx 99.97\%$ — the boundary between clonal and moderately diverse taxa. At $k = 31$, $d = 0.002$ ($J = 0.998$) is the near-identical threshold ($\mathrm{ANI} \gtrsim 99.99\%$).
 
-1. Sort the $N$ samples by embedding distance; build a 100-point distance grid by uniform index quantiles.
-2. At each grid point, collect nearby samples within a half-window of the local grid spacing.
-3. Compute the 5th and 95th percentile ANI within the window → raw lower and upper curves.
-4. Apply ±0.02 conformal safety margins: `lower -= 0.02`, `upper += 0.02`, then clamp to $[0, 1]$.
-5. Enforce monotonicity: lower and upper curves are non-increasing in distance (higher distance → lower ANI bound).
+If the taxon has fewer than 20 genomes, or the archive stores only one k, the probe is skipped and the configured default ($k = 21$) is used.
 
-The fitted model is queried by linear interpolation between grid points. `inverse_upper(target_ANI)` returns the embedding distance below which the upper ANI bound falls under the target — used to set the coverage threshold in Phase 7.
-
-The default number of calibration pairs is `--geodesic-calibration-pairs 50`. When the taxon has fewer than 10 pairs, the Mash fallback is used without warning.
+After Phase 4 (Score), geodesic may additionally call `maybe_reselect_k` if the post-embedding $p_{95}$ nearest-neighbour distance warrants a different k, triggering a full re-embedding with the new k.
 
 ---
 
