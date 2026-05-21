@@ -420,7 +420,6 @@ TaxonResult process_taxon(
             .hnsw_ef_search = 50,
             .threads = threads,
             .io_threads = cfg.io_threads,
-            .calibration_samples = 0,
             .isolation_k = 10,
             .k_cap_max = cfg.k_cap_max,
             .diversity_threshold = diversity_threshold,

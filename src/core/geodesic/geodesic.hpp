@@ -161,45 +161,6 @@ struct GenomeEmbedding {
     uint32_t n_contigs = 0;           // Number of sequences (FASTA '>' headers)
 };
 
-// Calibration model: embedding_distance → [ANI_lower, ANI_upper]
-// Uses monotonic quantile regression with conformal safety margins
-class ANICalibrator {
-public:
-    struct Bounds {
-        double lower;  // Conservative lower bound on ANI
-        double upper;  // Conservative upper bound on ANI
-    };
-
-    // Fit on (embedding_distance, true_ANI) pairs
-    void fit(const std::vector<std::pair<double, double>>& samples);
-
-    // Predict ANI bounds for given embedding distance
-    Bounds predict(double embedding_distance) const;
-
-    // Inverse: find distance threshold where upper bound = target ANI
-    double inverse_upper(double target_ani) const;
-
-    // Inverse: find distance threshold where lower bound = target ANI
-    double inverse_lower(double target_ani) const;
-
-    // Coverage probability guarantee
-    double coverage_probability() const { return coverage_prob_; }
-
-    bool is_fitted() const { return fitted_; }
-
-private:
-    bool fitted_ = false;
-    double coverage_prob_ = 0.95;
-
-    // Monotonic quantile curves (distance → ANI bounds)
-    std::vector<double> distance_grid_;
-    std::vector<double> ani_lower_curve_;
-    std::vector<double> ani_upper_curve_;
-
-    // Safety margins from conformal calibration
-    double lower_margin_ = 0.02;
-    double upper_margin_ = 0.02;
-};
 
 // SIMD dot product (AVX2) - declared here, defined in cpp
 float dot_product_simd(const float* a, const float* b, size_t dim);
@@ -234,9 +195,6 @@ public:
         // Max concurrent NFS file readers during genome embedding.
         // 0 = auto: threads (total budget for this taxon caps NFS readers).
         int io_threads = 0;
-
-        // Calibration
-        int calibration_samples = 500;
 
         // Isolation score
         int isolation_k = 10;  // k nearest neighbors for isolation
@@ -485,8 +443,6 @@ private:
     int runtime_dim_ = 0;  // Actual embedding dim after Nystrom (may differ from cfg_.embedding_dim)
     std::vector<GenomeEmbedding> embeddings_;
     SoAStore store_;  // SoA layout for SIMD-friendly access
-    ANICalibrator calibrator_;
-
     // (Projection matrix removed: now uses OPH + CountSketch)
 
     // HNSW index (forward declaration to avoid header dependency)
