@@ -79,6 +79,12 @@ public:
         const std::function<void(size_t idx,
                                  const genopack::SketchResult& sk)>& cb) const;
 
+    void visit_sketch_batches_multi_k(
+        const std::vector<std::string>& accessions,
+        const std::vector<uint32_t>& ks, uint32_t sz,
+        const std::function<void(size_t idx, uint32_t k,
+                                 const genopack::SketchResult& sk)>& cb) const override;
+
     const float* kmer_profile(genopack::GenomeId virt_id) const override;
     const float* kmer_profile_by_accession(std::string_view acc) const override;
 

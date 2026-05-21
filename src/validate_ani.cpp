@@ -134,16 +134,16 @@ int run_validate_ani(const Config& cfg) {
     for (auto [i, j] : pairs) { needed_set.insert(accs[i]); needed_set.insert(accs[j]); }
     std::vector<std::string> needed(needed_set.begin(), needed_set.end());
 
-    // Load sketches for every needed accession at every k
+    // Load sketches for every needed accession at all k-values in a single archive pass.
+    // visit_sketch_batches_multi_k holds each archive's pages warm across all k-values
+    // before evicting, avoiding N_k re-reads of the same NFS frames.
     using SigMap = std::unordered_map<std::string, std::unordered_map<uint32_t, std::vector<uint16_t>>>;
     SigMap sigs;
-    for (uint32_t k : avail_ks) {
-        pack->visit_sketch_batches(needed, k, sketch_sz,
-            [&](size_t idx, const genopack::SketchResult& sk) {
-                auto& v = sigs[needed[idx]][k];
-                v.assign(sk.sig, sk.sig + sk.sketch_size);
-            });
-    }
+    pack->visit_sketch_batches_multi_k(needed, avail_ks, sketch_sz,
+        [&](size_t idx, uint32_t k, const genopack::SketchResult& sk) {
+            auto& v = sigs[needed[idx]][k];
+            v.assign(sk.sig, sk.sig + sk.sketch_size);
+        });
     spdlog::info("validate-ani: loaded sketches for {}/{} accessions", sigs.size(), needed.size());
 
     // Extract FASTAs via genopack
@@ -157,19 +157,43 @@ int run_validate_ani(const Config& cfg) {
 
     const std::string gpk_bin = cfg.genopack_bin.empty() ? "genopack" : cfg.genopack_bin;
     spdlog::info("validate-ani: extracting {} FASTAs …", needed.size());
-    auto extract = run_subprocess(
-        {gpk_bin, "extract", pack_path.string(),
-         "--accessions-file", (fasta_dir / "accs.txt").string(),
-         "--output-dir", fasta_dir.string()},
-        {.capture_stderr = true});
-    if (!extract.ok())
-        throw std::runtime_error("genopack extract failed (exit "
-            + std::to_string(extract.exit_code) + "): " + extract.stderr_output);
 
-    // Write skani list files (all unique FASTAs for all-pairs run)
+    // For multipart directories, genopack extract only reads one part — run it per part.
+    std::vector<fs::path> gpk_targets;
+    if (fs::is_directory(pack_path)) {
+        for (const auto& e : fs::directory_iterator(pack_path))
+            if (e.path().extension() == ".gpk") gpk_targets.push_back(e.path());
+        std::sort(gpk_targets.begin(), gpk_targets.end());
+    } else {
+        gpk_targets.push_back(pack_path);
+    }
+
+    for (const auto& gpk : gpk_targets) {
+        auto extract = run_subprocess(
+            {gpk_bin, "extract", gpk.string(),
+             "--accessions-file", (fasta_dir / "accs.txt").string(),
+             "--output-dir", fasta_dir.string()},
+            {.capture_stderr = true});
+        if (!extract.ok())
+            throw std::runtime_error("genopack extract failed on " + gpk.string()
+                + " (exit " + std::to_string(extract.exit_code)
+                + "): " + extract.stderr_output);
+    }
+
+    // Write separate query/ref lists for skani — one side of each pair per list.
+    // This avoids O(n_unique²) all-pairs; skani only computes the cross-product
+    // of unique left-side vs unique right-side accessions (~2×n_pairs instead of n_unique²).
     {
-        std::ofstream f(fasta_dir / "fasta_list.txt");
-        for (const auto& a : needed) f << (fasta_dir / (a + ".fa")).string() << "\n";
+        std::unordered_set<std::string> ql_set, rl_set;
+        for (auto [i, j] : pairs) { ql_set.insert(accs[i]); rl_set.insert(accs[j]); }
+        {
+            std::ofstream f(fasta_dir / "ql.txt");
+            for (const auto& a : ql_set) f << (fasta_dir / (a + ".fa")).string() << "\n";
+        }
+        {
+            std::ofstream f(fasta_dir / "rl.txt");
+            for (const auto& a : rl_set) f << (fasta_dir / (a + ".fa")).string() << "\n";
+        }
     }
 
     spdlog::info("validate-ani: running skani dist …");
@@ -178,8 +202,8 @@ int run_validate_ani(const Config& cfg) {
     skani_opts.capture_stderr = false;
     auto skani = run_subprocess(
         {"skani", "dist",
-         "--ql", (fasta_dir / "fasta_list.txt").string(),
-         "--rl", (fasta_dir / "fasta_list.txt").string(),
+         "--ql", (fasta_dir / "ql.txt").string(),
+         "--rl", (fasta_dir / "rl.txt").string(),
          "-t",  std::to_string(cfg.threads),
          "--min-af", "0.0"},
         skani_opts);

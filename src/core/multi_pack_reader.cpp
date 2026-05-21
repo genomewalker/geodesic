@@ -261,6 +261,60 @@ void MultiPackReader::visit_sketch_batches(
     }
 }
 
+void MultiPackReader::visit_sketch_batches_multi_k(
+    const std::vector<std::string>& accessions,
+    const std::vector<uint32_t>& ks, uint32_t sz,
+    const std::function<void(size_t idx, uint32_t k,
+                             const genopack::SketchResult& sk)>& cb) const
+{
+    struct ArchSlice {
+        std::vector<size_t>             global_idx;
+        std::vector<genopack::GenomeId> local_ids;
+        std::vector<size_t>             sorted_gidx;
+        std::vector<genopack::GenomeId> sorted_ids;
+    };
+    std::vector<ArchSlice> slices(archives_.size());
+
+    for (size_t i = 0; i < accessions.size(); ++i) {
+        auto it = acc_to_arch_.find(accessions[i]);
+        if (it == acc_to_arch_.end()) continue;
+        const uint16_t aidx = it->second;
+        auto meta = archives_[aidx].reader->genome_meta_by_accession(accessions[i]);
+        if (!meta) continue;
+        slices[aidx].global_idx.push_back(i);
+        slices[aidx].local_ids.push_back(meta->genome_id);
+    }
+
+    // Pre-sort each archive slice once (reused across all k-values).
+    for (auto& sl : slices) {
+        if (sl.global_idx.empty()) continue;
+        std::vector<size_t> ord(sl.local_ids.size());
+        std::iota(ord.begin(), ord.end(), 0);
+        std::sort(ord.begin(), ord.end(),
+                  [&](size_t a, size_t b) { return sl.local_ids[a] < sl.local_ids[b]; });
+        sl.sorted_ids.resize(sl.local_ids.size());
+        sl.sorted_gidx.resize(sl.local_ids.size());
+        for (size_t i = 0; i < ord.size(); ++i) {
+            sl.sorted_ids[i]  = sl.local_ids[ord[i]];
+            sl.sorted_gidx[i] = sl.global_idx[ord[i]];
+        }
+    }
+
+    // For each archive: process all k-values before evicting from page cache.
+    for (size_t aidx = 0; aidx < archives_.size(); ++aidx) {
+        auto& sl = slices[aidx];
+        if (sl.global_idx.empty()) continue;
+        std::lock_guard<std::mutex> lk(arch_sketch_mu_[aidx]);
+        for (uint32_t k : ks) {
+            archives_[aidx].reader->sketch_for_ids(sl.sorted_ids, k, sz,
+                [&](size_t local_idx, const genopack::SketchResult& sk) {
+                    cb(sl.sorted_gidx[local_idx], k, sk);
+                });
+        }
+        fadvise_dontneed_(archives_[aidx].path);
+    }
+}
+
 void MultiPackReader::fadvise_dontneed_(const fs::path& p) const noexcept {
     auto advise_file = [](const fs::path& fp) noexcept {
         int fd = ::open(fp.c_str(), O_RDONLY);

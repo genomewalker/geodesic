@@ -6,7 +6,7 @@
 
 namespace derep {
 
-enum class Command { Derep, Update, Scatter, Gather, ValidateAni };
+enum class Command { Derep, Update, Scatter, Gather, ValidateAni, Ani };
 
 struct Config {
     Command command = Command::Derep;
@@ -91,6 +91,15 @@ struct Config {
     int validate_pairs = 500;
     std::filesystem::path validate_output;
     std::string genopack_bin;
+
+    // ani (geodesic ani — skani-style in-memory all-pairs ANI)
+    std::filesystem::path ani_query_file;   // --ql
+    std::filesystem::path ani_ref_file;     // --rl (empty = same as ql, self all-pairs)
+    std::filesystem::path ani_output;       // -o
+    int    ani_k            = 21;
+    int    ani_sketch_size  = 10000;
+    int    ani_syncmer_s    = 7;
+    double ani_min_af       = 0.0;
 };
 
 Config parse_args(int argc, char** argv);

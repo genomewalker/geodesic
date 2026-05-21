@@ -234,6 +234,29 @@ Config parse_args(int argc, char** argv) {
     vani_cmd->add_option("-t,--threads", cfg.threads,
         "Threads for skani")->default_val(4);
 
+    // ── ani subcommand ─────────────────────────────────────────────────────
+    auto* ani_cmd = app.add_subcommand("ani",
+        "Compute skani-style all-pairs ANI from genopack sequences (in-memory, no FASTA extraction)");
+
+    ani_cmd->add_option("--ql", cfg.ani_query_file,
+        "Query accession list (one per line)")->required()->check(CLI::ExistingFile);
+    ani_cmd->add_option("--rl", cfg.ani_ref_file,
+        "Reference accession list (empty = same as --ql for self all-pairs)")->check(CLI::ExistingFile);
+    ani_cmd->add_option("--pack", cfg.pack_dir,
+        "genopack archive (single .gpk or directory of part_*.gpk)")->required();
+    ani_cmd->add_option("-o,--output", cfg.ani_output,
+        "Output TSV path")->default_val("ani_results.tsv");
+    ani_cmd->add_option("-t,--threads", cfg.threads,
+        "Threads for parallel sketch building")->default_val(4);
+    ani_cmd->add_option("--min-af", cfg.ani_min_af,
+        "Minimum alignment fraction to report a pair")->default_val(0.0);
+    ani_cmd->add_option("--ani-k", cfg.ani_k,
+        "k-mer size")->default_val(21);
+    ani_cmd->add_option("--ani-sketch-size", cfg.ani_sketch_size,
+        "Number of hashes per sketch")->default_val(10000);
+    ani_cmd->add_option("--ani-syncmer-s", cfg.ani_syncmer_s,
+        "Open-syncmer window s")->default_val(7);
+
     // ── parse ───────────────────────────────────────────────────────────────
     try {
         app.parse(argc, argv);
@@ -253,6 +276,8 @@ Config parse_args(int argc, char** argv) {
         cfg.command = Command::Gather;
     } else if (vani_cmd->parsed()) {
         cfg.command = Command::ValidateAni;
+    } else if (ani_cmd->parsed()) {
+        cfg.command = Command::Ani;
     } else {
         cfg.command = Command::Derep;
     }

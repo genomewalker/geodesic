@@ -52,6 +52,19 @@ struct IPackReader {
         const std::function<void(size_t idx,
                                  const genopack::SketchResult& sk)>& cb) const = 0;
 
+    // Multi-k variant: processes all k-values for each archive part before evicting
+    // from page cache. Avoids re-reading the same archive frames N times (once per k).
+    // Default: falls back to calling visit_sketch_batches once per k.
+    virtual void visit_sketch_batches_multi_k(
+        const std::vector<std::string>& accessions,
+        const std::vector<uint32_t>& ks, uint32_t sz,
+        const std::function<void(size_t idx, uint32_t k,
+                                 const genopack::SketchResult& sk)>& cb) const {
+        for (uint32_t k : ks)
+            visit_sketch_batches(accessions, k, sz,
+                [&](size_t idx, const genopack::SketchResult& sk) { cb(idx, k, sk); });
+    }
+
     virtual void release_sketches() const {}
     virtual size_t sketch_memory_bytes() const { return 0; }
 
