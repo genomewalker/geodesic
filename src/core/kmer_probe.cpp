@@ -6,12 +6,6 @@
 
 namespace derep {
 
-static int select_best_k_for_diversity(float p95_nn_dist) {
-    if (p95_nn_dist < 0.002f) return 31;
-    if (p95_nn_dist < 0.010f) return 21;
-    return 16;
-}
-
 int probe_taxon_kmer(const std::vector<std::string>& accessions,
                      IPackReader& gpk,
                      int /*default_k*/,
@@ -67,7 +61,7 @@ int probe_taxon_kmer(const std::vector<std::string>& accessions,
     const float p5  = nn[static_cast<size_t>(m * 0.05)];
     const float p95 = nn[static_cast<size_t>(m * 0.95)];
 
-    int best_k = select_best_k_for_diversity(p95);
+    int best_k = (p95 < 0.002f) ? 31 : (p95 < 0.010f) ? 21 : 16;
     if (best_k < 21 && p5 < 0.010f) best_k = 21;
 
     spdlog::info("GEODESIC: k pre-probe (n={} sample, bins={}): p5_nn={:.4f} p95_nn={:.4f} → k={}",

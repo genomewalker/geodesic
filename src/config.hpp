@@ -38,8 +38,6 @@ struct Config {
     double ani_threshold = 95.0;
 
     // GEODESIC params (geodesic_ prefix dropped)
-    bool auto_calibrate = true;
-    int calibration_pairs = 50;
     uint64_t seed = 42;  // Master RNG seed; all sub-seeds derived from this
     int embedding_dim = 256;
     int kmer_size = 21;

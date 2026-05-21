@@ -299,15 +299,6 @@ GeodesicDerep::GeodesicDerep(Config cfg)
 
 GeodesicDerep::~GeodesicDerep() = default;
 
-float GeodesicDerep::angular_distance(const std::vector<float>& a,
-                                       const std::vector<float>& b) {
-    const size_t d = std::min(a.size(), b.size());
-    if (a.size() != b.size()) spdlog::warn("angular_distance: dim mismatch {} vs {}", a.size(), b.size());
-    float dot = dot_product_simd(a.data(), b.data(), d);
-    dot = std::max(-1.0f, std::min(1.0f, dot));
-    return std::acos(dot) / static_cast<float>(M_PI);
-}
-
 float GeodesicDerep::angular_distance(const float* a, const float* b, size_t d) {
     float dot = dot_product_simd(a, b, d);
     dot = std::max(-1.0f, std::min(1.0f, dot));
@@ -1158,7 +1149,6 @@ GeodesicDerep::NNDistStats GeodesicDerep::compute_isolation_scores() {
             // store_.row(i) from the sorted embeddings_, propagating the new coords.
             nystrom_taxon_applied_ = false;
             nystrom_multicomp_applied_  = false;
-            nystrom_multicomp_s_max_    = 0.0f;
             nystrom_scaled_j_floor_     = 0.0f;
             nystrom_oph_sphere_applied_ = false;
             if (!recall_gap_bridges.empty() && n_emb > SMALL_N_THRESHOLD) {
@@ -2227,7 +2217,6 @@ bool GeodesicDerep::apply_nystrom_multicomp(
     }
 
     nystrom_multicomp_applied_ = true;
-    nystrom_multicomp_s_max_   = s_max;
     spdlog::info("GEODESIC: multi-component Nyström: {} genomes, {} components, "
                  "d_global={} d_per_comp={} s_max={:.4f} cos_div={:.4f}",
                  n, C, d_global, d_per_comp, s_max, cos_diversity);
@@ -4110,15 +4099,6 @@ GeodesicDerep::detect_outlier_candidates(float z_threshold) {
     return candidates;
 }
 
-std::vector<std::pair<std::string, uint64_t>>
-GeodesicDerep::get_genome_sizes() const {
-    std::vector<std::pair<std::string, uint64_t>> result;
-    result.reserve(embeddings_.size());
-    for (const auto& emb : embeddings_)
-        result.emplace_back(emb.accession, emb.genome_size);
-    return result;
-}
-
 GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
     const std::vector<uint64_t>& representative_ids) const {
 
@@ -4408,7 +4388,6 @@ bool GeodesicDerep::maybe_reselect_k(
     nystrom_applied_ = false;
     nystrom_taxon_applied_ = false;
     nystrom_multicomp_applied_ = false;
-    nystrom_multicomp_s_max_    = 0.0f;
     nystrom_percomp_applied_    = false;
     nystrom_scaled_j_floor_     = 0.0f;
     nystrom_oph_sphere_applied_ = false;

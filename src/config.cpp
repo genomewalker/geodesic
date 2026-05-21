@@ -61,11 +61,6 @@ Config parse_args(int argc, char** argv) {
     derep->add_option("--ani-threshold", cfg.ani_threshold, "ANI threshold for clustering")
         ->default_val(95.0);
 
-    derep->add_flag("--geodesic-auto-calibrate,!--geodesic-no-auto-calibrate",
-        cfg.auto_calibrate,
-        "Auto-calibrate params from ANI sample (default: on)")->default_val(true);
-    derep->add_option("--geodesic-calibration-pairs", cfg.calibration_pairs,
-        "Number of pairs to sample for auto-calibration")->default_val(50);
     derep->add_option("--seed", cfg.seed,
         "Master RNG seed (HNSW, sketching, Nyström anchors, diversity sampling)")->default_val(42);
     derep->add_option("--geodesic-dim", cfg.embedding_dim,

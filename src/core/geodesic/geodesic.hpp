@@ -166,9 +166,6 @@ struct GenomeEmbedding {
 float dot_product_simd(const float* a, const float* b, size_t dim);
 
 // Cosine similarity using SIMD (no acos - faster for comparisons)
-inline float cosine_similarity_simd(const float* a, const float* b, size_t dim) {
-    return dot_product_simd(a, b, dim);  // Vectors are normalized
-}
 
 // GEODESIC: Genome Embedding + On-Demand Edge Synthesis with Indexed Clustering
 // A physics-inspired approach to genome dereplication
@@ -244,7 +241,7 @@ public:
         const std::unordered_map<std::string, double>& quality_scores = {});
 
     // Get representative genome IDs (after select_representatives)
-    std::vector<uint64_t> get_representative_ids() const { return last_representative_ids_; }
+
 
     // Exclude accessions from being selected as representatives (sets quality score to 0).
     // Call after build_index_from_gpk_sketches and detect_outlier_candidates,
@@ -398,7 +395,7 @@ public:
 
     // Returns (accession, genome_length_bp) for all embedded genomes after
     // build_index_from_gpk_sketches. Used to persist genome_length to the DB.
-    std::vector<std::pair<std::string, uint64_t>> get_genome_sizes() const;
+
 
     // Adaptive k-selection: pick the k that best matches this taxon's NN-distance diversity.
     // If the GPK has that k and it differs from current cfg_.kmer_size, re-embeds everything
@@ -443,7 +440,7 @@ private:
     int runtime_dim_ = 0;  // Actual embedding dim after Nystrom (may differ from cfg_.embedding_dim)
     std::vector<GenomeEmbedding> embeddings_;
     SoAStore store_;  // SoA layout for SIMD-friendly access
-    // (Projection matrix removed: now uses OPH + CountSketch)
+
 
     // HNSW index (forward declaration to avoid header dependency)
     struct HNSWIndex;
@@ -474,7 +471,7 @@ private:
     bool nystrom_applied_ = false;
     bool nystrom_taxon_applied_ = false;  // set by apply_nystrom_taxon on success
     bool nystrom_multicomp_applied_ = false;  // set by apply_nystrom_multicomp on success
-    float nystrom_multicomp_s_max_ = 0.0f;   // max bridge Jaccard used in multi-component embedding
+
     bool nystrom_percomp_applied_ = false;    // set by apply_nystrom_percomp (ANN recall gap path)
     float nystrom_scaled_j_floor_ = 0.0f;    // > 0 when kernel-scaled Nyström active (ANN recall gap)
     bool nystrom_oph_sphere_applied_ = false; // OPH token sphere used (ANN recall gap path)
@@ -546,9 +543,6 @@ private:
     int probe_kmer_size_(const std::vector<std::string>& accessions,
                          IPackReader& gpk) const;
 
-    // Angular distance between two embeddings (works with any dimension)
-    static float angular_distance(const std::vector<float>& a,
-                                  const std::vector<float>& b);
     static float angular_distance(const float* a, const float* b, size_t d);
 
 };

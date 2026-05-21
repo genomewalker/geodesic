@@ -73,9 +73,6 @@ public:
     size_t total_genomes() const;
     size_t total_reps() const;
     size_t total_failed() const;
-    size_t total_singletons() const;
-    size_t total_contaminated() const;
-
     const std::vector<TaxonOutput>& taxa() const;
 
     // Sort taxa_ by taxonomy for deterministic emission order. push() is called from

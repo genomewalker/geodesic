@@ -33,22 +33,7 @@ size_t RunState::total_failed() const {
     return total;
 }
 
-size_t RunState::total_singletons() const {
-    std::lock_guard lock(mutex_);
-    size_t total = 0;
-    for (const auto& t : taxa_)
-        if (t.result.status == TaxonStatus::SINGLETON)
-            ++total;
-    return total;
-}
 
-size_t RunState::total_contaminated() const {
-    std::lock_guard lock(mutex_);
-    size_t total = 0;
-    for (const auto& t : taxa_)
-        total += t.result.n_representatives > 0 ? t.diversity_stats.n_outliers_excluded : 0;
-    return total;
-}
 
 const std::vector<TaxonOutput>& RunState::taxa() const {
     std::lock_guard lock(mutex_);
