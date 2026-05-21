@@ -17,7 +17,7 @@ Sketch → Embed → Index → Score → Select → Merge → Verify → Certify
 
 | Phase | Name | What it does |
 |-------|------|-------------|
-| 1 | Sketch | Hash each genome's k-mers into a compact fingerprint (OPH signature) |
+| 1 | Sketch | Read pre-computed OPH signatures from the genopack archive (stored at multiple k-mer sizes; auto-calibration selects k and m per taxon) |
 | 2 | Embed | Project all genomes onto a unit sphere using a small anchor subset (Nyström) |
 | 3 | Index | Build an approximate nearest-neighbour index (HNSW) over the sphere |
 | 4 | Score | Measure how isolated each genome is; infer the taxon's natural diversity scale from an MST |
@@ -34,7 +34,7 @@ For taxa with exactly 2 genomes, the full pipeline is skipped; see [n=2 fast pat
 
 ### One-permutation hashing
 
-For each genome, geodesic computes a [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signature of $m$ bins using k-mers of length $k$. Both parameters are chosen by auto-calibration from sampled genome pairs (see Phase 1 calibration below); the default tier for 95–99% ANI taxa uses $m = 10{,}000$ and $k = 21$. The calibration first-pass sketch uses $m = 4{,}096$.
+For each genome, geodesic reads a pre-computed [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signature from the genopack archive. The archive stores OPH signatures at multiple k-mer sizes (e.g. $k \in \{16, 21, 31\}$, $m = 10{,}000$ bins per size). Auto-calibration (`--geodesic-auto-calibrate`, on by default) selects the appropriate k and m from a small sample of genome pairs; the default tier for 95–99% ANI taxa uses $m = 10{,}000$ and $k = 21$. The calibration first-pass sketch uses $m = 4{,}096$.
 
 **Canonical k-mer selection.** For each position in the genome, both the forward k-mer and its reverse complement are encoded as a 64-bit integer (2 bits per base, A=0/C=1/G=2/T=3). The canonical k-mer is the lexicographic minimum of the two encodings, selected by a branchless comparison:
 
@@ -91,7 +91,7 @@ where $m_{\mathrm{real}}$ is the number of bins that are real in at least one of
 
 ### Dual OPH sketches
 
-Two independent OPH signatures (sig1, sig2) are computed per genome using seeds `--seed` and `--seed + 1` (defaults: 42 and 43). The anchor Gram matrix uses dual-sketch averaged Jaccard (see Phase 2):
+Two independent OPH signatures (sig1, sig2) are read per genome; sig1 was computed with seed `--seed` (default 42), sig2 always with seed 1337. The anchor Gram matrix uses dual-sketch averaged Jaccard (see Phase 2):
 
 $$
 K[i,j] = \frac{J_1(\mathrm{anchor}_i, \mathrm{anchor}_j) + J_2(\mathrm{anchor}_i, \mathrm{anchor}_j)}{2}
@@ -109,7 +109,7 @@ $$
 \hat{J}_{\mathrm{corr}} = \max\!\left(0,\ \frac{\hat{J}_{\mathrm{raw}} - 2^{-16}}{1 - 2^{-16}}\right)
 $$
 
-**Lazy sig2 materialisation.** sig2 is materialised on demand only for anchor genomes and borderline verification candidates. Non-anchor Nyström extension uses sig1 only. Decompressed FASTA buffers are cached in memory so anchor sig2 materialisation avoids a second NFS read.
+**Lazy sig2 loading.** sig2 is loaded from the genopack archive on demand only for anchor genomes and borderline verification candidates. Non-anchor Nyström extension uses sig1 only.
 
 ### Fill fraction
 
