@@ -102,11 +102,12 @@ SkaniSketch build_sketch(std::string_view accession, std::string_view fasta,
     hashes.reserve(fasta.size() / static_cast<size_t>(c) + 64);
 
     uint64_t hf = 0, hr = 0;
-    int      filled    = 0;
     bool     in_header = false;
 
-    alignas(64) uint8_t ring[64] = {};  // ring buffer of last k 2-bit bases (k ≤ 63)
-    int ring_pos = 0;
+    // Ring buffer indexed by valid_count & 31 (k=21 < 32, so no aliasing between
+    // incoming base at [valid_count&31] and outgoing at [(valid_count-k)&31]).
+    alignas(64) uint8_t ring[32] = {};
+    uint32_t valid_count = 0;  // count of valid bases in current contig run
 
     const char*  data = fasta.data();
     const size_t len  = fasta.size();
@@ -114,26 +115,25 @@ SkaniSketch build_sketch(std::string_view accession, std::string_view fasta,
     for (size_t i = 0; i < len; ++i) {
         const uint8_t ch = static_cast<uint8_t>(data[i]);
 
-        // Header/newline/CR: rare in hot loop — handled with predictable branches.
-        if (__builtin_expect(ch == '>', 0)) { in_header = true; hf = hr = 0; filled = 0; ring_pos = 0; continue; }
+        if (__builtin_expect(ch == '>', 0)) { in_header = true; hf = hr = 0; valid_count = 0; continue; }
         if (__builtin_expect(in_header,  0)) { if (ch == '\n') in_header = false; continue; }
-        if (__builtin_expect(ch <= '\r', 0)) continue;  // '\n'=10, '\r'=13, skip both
+        if (__builtin_expect(ch <= '\r', 0)) continue;
 
         const uint8_t b = BASE_ENC[ch];
-        if (__builtin_expect(b == 255, 0)) { hf = hr = 0; filled = 0; ring_pos = 0; continue; }
+        if (__builtin_expect(b == 255, 0)) { hf = hr = 0; valid_count = 0; continue; }
 
-        if (__builtin_expect(filled < k, 0)) {
-            // Init: accumulate first k-mer (entered only k times per contig).
-            hf ^= rol64(SEED_FWD[b], k - 1 - filled);
-            hr ^= rol64(SEED_RC[b],  filled);
-            ring[filled] = b;
-            if (++filled < k) continue;
-            // ring_pos stays 0 after init.
+        ring[valid_count & 31] = b;
+
+        if (__builtin_expect(valid_count < (uint32_t)k, 0)) {
+            // Init: accumulate first k-mer (entered only k times per contig run).
+            hf ^= rol64(SEED_FWD[b], k - 1 - valid_count);
+            hr ^= rol64(SEED_RC[b],  valid_count);
+            if (++valid_count < (uint32_t)k) continue;
+            // valid_count == k: fall through to hash check.
         } else {
-            // Hot path: O(1) rolling update using precomputed tables.
-            const uint8_t prev = ring[ring_pos];
-            ring[ring_pos] = b;
-            if (++ring_pos >= k) ring_pos = 0;
+            // Hot path: O(1) rolling update, no branch on ring wrap.
+            const uint8_t prev = ring[(valid_count - k) & 31];
+            ++valid_count;
 
             hf = rol64(hf, 1) ^ tab_fk[prev]  ^ SEED_FWD[b];
             hr = ror64(hr, 1) ^ tab_r1[prev]   ^ tab_rk1[b];
