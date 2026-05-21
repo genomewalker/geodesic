@@ -104,21 +104,35 @@ int run_ani(const Config& cfg) {
     struct Row { int qi, ri; double ani, af, c_ab, c_ba; };
     std::vector<Row> rows;
 
+    // Per-thread row storage avoids a shared critical section on every push_back.
+    const int nthreads = cfg.threads;
+    std::vector<std::vector<Row>> trows(nthreads);
+    for (auto& v : trows) v.reserve((size_t)nq * nr / nthreads + 64);
+
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(dynamic, 16) num_threads(cfg.threads)
+    #pragma omp parallel for schedule(dynamic, 16) num_threads(nthreads)
 #endif
     for (int qi = 0; qi < nq; ++qi) {
+#ifdef _OPENMP
+        auto& local = trows[omp_get_thread_num()];
+#else
+        auto& local = trows[0];
+#endif
         for (int ri = 0; ri < nr; ++ri) {
             if (self_pairs && qsks[qi] == rsks[ri]) continue;
             if (self_pairs && qsks[qi] > rsks[ri]) continue;
             auto res = compute_ani(*qsks[qi], *rsks[ri], cfg.ani_k);
             if (res.af < cfg.ani_min_af) continue;
-#ifdef _OPENMP
-            #pragma omp critical
-#endif
-            rows.push_back({qi, ri, res.ani, res.af, res.c_ab, res.c_ba});
+            local.push_back({qi, ri, res.ani, res.af, res.c_ab, res.c_ba});
         }
     }
+
+    // Merge thread-local results.
+    size_t total = 0;
+    for (auto& v : trows) total += v.size();
+    rows.reserve(total);
+    for (auto& v : trows)
+        rows.insert(rows.end(), v.begin(), v.end());
 
     out << std::fixed << std::setprecision(4);
     for (auto& r : rows) {

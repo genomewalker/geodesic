@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <string_view>
 #include <vector>
+#ifdef __AVX2__
+#  include <immintrin.h>
+#endif
 
 namespace derep {
 
@@ -151,21 +154,47 @@ SkaniSketch build_sketch(std::string_view accession, std::string_view fasta,
     return sk;
 }
 
+// AVX2 4×4 block sorted-merge intersection for unique sorted uint64 arrays.
+// Correctness: for unique sorted arrays, a[i..i+3] × b[j..j+3] comparison
+// is exhaustive — no cross-block match is possible since both are strictly
+// monotone. OR across 4 broadcasts is safe because each b-lane matches at
+// most one a-element (uniqueness). movemask_epi8 gives 8 bits per 64-bit
+// match; popcount/8 = number of matching lanes.
+static size_t intersect_count(const uint64_t* a, size_t na,
+                               const uint64_t* b, size_t nb) {
+    size_t count = 0;
+    size_t i = 0, j = 0;
+
+#ifdef __AVX2__
+    while (i + 4 <= na && j + 4 <= nb) {
+        const __m256i vb = _mm256_loadu_si256((const __m256i*)(b + j));
+        const __m256i m = _mm256_or_si256(
+            _mm256_or_si256(_mm256_cmpeq_epi64(_mm256_set1_epi64x((int64_t)a[i+0]), vb),
+                            _mm256_cmpeq_epi64(_mm256_set1_epi64x((int64_t)a[i+1]), vb)),
+            _mm256_or_si256(_mm256_cmpeq_epi64(_mm256_set1_epi64x((int64_t)a[i+2]), vb),
+                            _mm256_cmpeq_epi64(_mm256_set1_epi64x((int64_t)a[i+3]), vb)));
+        count += (unsigned)__builtin_popcount((unsigned)_mm256_movemask_epi8(m)) / 8u;
+        const uint64_t al = a[i+3], bl = b[j+3];
+        i += (al <= bl) ? 4u : 0u;
+        j += (bl <= al) ? 4u : 0u;
+    }
+#endif
+
+    // Scalar tail (also handles non-AVX2 builds).
+    while (i < na && j < nb) {
+        if (a[i] == b[j]) { ++count; ++i; ++j; }
+        else if (a[i] < b[j]) ++i;
+        else ++j;
+    }
+    return count;
+}
+
 SkaniResult compute_ani(const SkaniSketch& a, const SkaniSketch& b, int k) {
     SkaniResult res;
     if (a.hashes.empty() || b.hashes.empty()) return res;
 
-    // Count intersection size via sorted-merge.
-    size_t isect = 0;
-    {
-        auto it_a = a.hashes.begin(), end_a = a.hashes.end();
-        auto it_b = b.hashes.begin(), end_b = b.hashes.end();
-        while (it_a != end_a && it_b != end_b) {
-            if (*it_a == *it_b) { ++isect; ++it_a; ++it_b; }
-            else if (*it_a < *it_b) ++it_a;
-            else ++it_b;
-        }
-    }
+    const size_t isect = intersect_count(a.hashes.data(), a.hashes.size(),
+                                         b.hashes.data(), b.hashes.size());
 
     res.c_ab = double(isect) / double(a.hashes.size());
     res.c_ba = double(isect) / double(b.hashes.size());
