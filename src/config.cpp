@@ -213,7 +213,7 @@ Config parse_args(int argc, char** argv) {
 
     // ── validate-ani subcommand ────────────────────────────────────────────
     auto* vani_cmd = app.add_subcommand("validate-ani",
-        "Sample genome pairs from a pack, compare OPH Jaccard ANI estimates to skani ground truth");
+        "Sample genome pairs from a pack, compare OPH Jaccard ANI estimates to FracMinHash ANI ground truth");
 
     vani_cmd->add_option("-g,--genomes", cfg.genomes_file,
         "Accession list (one per line)")->required()->check(CLI::ExistingFile);
@@ -223,20 +223,16 @@ Config parse_args(int argc, char** argv) {
         "Number of random pairs to evaluate")->default_val(500);
     vani_cmd->add_option("-o,--output", cfg.validate_output,
         "Output TSV path")->default_val("ani_validation.tsv");
-    vani_cmd->add_option("--tmp-dir", cfg.tmp_dir,
-        "Temporary directory for extracted FASTAs")->default_val(".");
-    vani_cmd->add_option("--genopack-bin", cfg.genopack_bin,
-        "Path to genopack binary (default: 'genopack' from PATH)")->default_val("genopack");
     vani_cmd->add_option("--seed", cfg.seed,
         "RNG seed for pair sampling")->default_val(42);
     vani_cmd->add_option("--geodesic-sketch-size", cfg.sketch_size,
         "Sketch size (bins) to use for Jaccard computation")->default_val(10000);
     vani_cmd->add_option("-t,--threads", cfg.threads,
-        "Threads for skani")->default_val(4);
+        "Threads for FracMinHash sketch building")->default_val(4);
 
     // ── ani subcommand ─────────────────────────────────────────────────────
     auto* ani_cmd = app.add_subcommand("ani",
-        "Compute skani-style all-pairs ANI from genopack sequences (in-memory, no FASTA extraction)");
+        "Compute FracMinHash all-pairs ANI from genopack sequences (in-memory, no FASTA extraction)");
 
     ani_cmd->add_option("--ql", cfg.ani_query_file,
         "Query accession list (one per line)")->required()->check(CLI::ExistingFile);
