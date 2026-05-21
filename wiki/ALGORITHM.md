@@ -54,7 +54,7 @@ h = wymix(canonical XOR (seed + P0),  canonical XOR P1)
     wymix(a, b) = lo64(a*b) XOR hi64(a*b)
 ```
 
-sig1 uses seed = `--seed`, sig2 uses seed = `--seed + 1` (defaults: 42 and 43). Both the bin index and the per-bin value are derived from this one hash:
+sig1 uses seed = `--seed` (default 42), sig2 uses seed = 1337. Both the bin index and the per-bin value are derived from this one hash:
 
 $$
 t = \left\lfloor \frac{h \cdot m}{2^{64}} \right\rfloor, \qquad \mathrm{sig}[t] = \min\!\left(\mathrm{sig}[t],\ \mathrm{hi32}(h)\right)
@@ -235,7 +235,7 @@ Beyond $d=256$, accuracy improves by $< 0.1\%$ while cost doubles. The embedding
 
 ## Phase 3: HNSW index
 
-A [Hierarchical Navigable Small World (HNSW)](https://arxiv.org/abs/1603.09320) index (Malkov & Yashunin 2018) is built over all $n$ unit-sphere embeddings using inner product as the metric. HNSW is a graph-based approximate nearest-neighbour structure that supports sub-linear query time by navigating a layered proximity graph from coarse to fine resolution. Default parameters: $M = 16$, ef\_construction $= 64$, ef\_search $= 50$.
+A [Hierarchical Navigable Small World (HNSW)](https://arxiv.org/abs/1603.09320) index (Malkov & Yashunin 2018) is built over all $n$ unit-sphere embeddings using inner product as the metric. HNSW is a graph-based approximate nearest-neighbour structure that supports sub-linear query time by navigating a layered proximity graph from coarse to fine resolution. Default parameters: $M = 48$, ef\_construction $= 400$, ef\_search $= 50$.
 
 The index serves two purposes:
 - Computing isolation scores (Phase 4): finding the $k_{\mathrm{iso}}=10$ nearest neighbours of each genome; collecting up to $K_{\mathrm{cap}}$ edges per genome for the adaptive MST threshold derivation
@@ -344,7 +344,7 @@ Batching $B = 16$ candidates fuses 16 distance updates into one parallel pass, r
 
 Quality weighting can place two representatives closer than intended. Representatives with embedding distance below $d_{\mathrm{min}}$ are merged via [Union-Find](https://en.wikipedia.org/wiki/Disjoint-set_data_structure): the pair is collapsed to the survivor with higher $\mathrm{quality} \times \mathrm{size}$.
 
-Merge candidates are found via HNSW search over the representative set. $d_{\mathrm{min}} = \min(\mathrm{NN}_{P5},\ \theta / 2)$.
+Merge candidates are found via HNSW search over the representative set. $d_{\mathrm{min}} = \min(\mathrm{NN}_{P5},\ \theta / 4)$.
 
 ---
 
