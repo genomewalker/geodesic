@@ -138,6 +138,22 @@ Results written to the working directory (or `--out-dir`). TSV outputs are alway
 
 **Determinism.** geodesic pins Eigen to a single thread (`Eigen::setNbThreads(1)`) at startup and derives every per-phase RNG seed from `--seed`, so a fixed `--seed` (and identical input ordering) yields bit-identical derep results across runs and machines.
 
+## Pairwise ANI (`geodesic ani`)
+
+`geodesic ani` computes all-pairs FracMinHash ANI between genomes stored in a genopack archive. It loads raw FASTA sequences from the pack in memory — no FASTA extraction to disk — builds FracMinHash sketches (k-mer kept when `hash % c == 0`, the same compression model as skani's `-c`), and computes ANI from AVX2-accelerated sorted-set intersections.
+
+```bash
+# All-pairs ANI within a collection
+geodesic ani --ql accessions.txt --pack mydb.gpk -t 24 -o ani_results.tsv
+
+# Query set against a separate reference set
+geodesic ani --ql queries.txt --rl references.txt --pack mydb.gpk -t 24 -o ani_results.tsv
+```
+
+When `--rl` is omitted it defaults to `--ql`, computing self all-pairs (each unordered pair once). Output is a TSV: `query`, `ref`, `ani`, `af` (alignment fraction), `c_ab`, `c_ba` (directional containments). Key options: `--ani-k` (k-mer size, default 21), `-c, --compression` (default 125), `--min-af` (minimum alignment fraction filter), `-t` (threads).
+
+A companion `geodesic validate-ani` compares the cheap OPH Jaccard ANI estimates stored in the pack against this FracMinHash ANI, per stored k-mer size — useful for confirming the derep sketches stay within tolerance. See the [ANI Computation](https://github.com/genomewalker/geodesic/wiki/ANI-Computation) wiki page for the full CLI reference, output schemas, and the OPH-vs-FracMinHash accuracy context.
+
 ### Distributed mode
 
 For large collections across multiple nodes, use scatter/gather:

@@ -208,7 +208,34 @@ See [Derep Output](Derep-Output) for full column descriptions.
 
 ---
 
-## 8. Incremental update (new release)
+## 8. (Optional) Validate the sketches and spot-check ANI
+
+Before trusting a large run, confirm that the pack's OPH sketches track exact ANI
+on a sample of pairs:
+
+```bash
+geodesic validate-ani \
+    -g accessions.txt \
+    --pack gtdb_r232.gpk \
+    -n 2000 \
+    -o gtdb_r232_ani_validation.tsv \
+    -t 24
+```
+
+Inspect the per-k error columns (`err_k16`, `err_k21`, …) — near the 95% ANI
+threshold, dense-sketch error should sit well below 0.1 ANI points. To compute
+exact pairwise FracMinHash ANI for a specific set of representatives (e.g. to QC a
+cluster), use `geodesic ani`:
+
+```bash
+geodesic ani --ql cluster_members.txt --pack gtdb_r232.gpk -t 24 -o cluster_ani.tsv
+```
+
+See [ANI Computation](ANI-Computation) for full details on both subcommands.
+
+---
+
+## 9. Incremental update (new release)
 
 When a new GTDB release adds genomes, add them to the archive and re-run only
 affected taxa — no full re-derep required:
@@ -235,7 +262,7 @@ geodesic update \
 
 ---
 
-## 9. Using the derep archive downstream
+## 10. Using the derep archive downstream
 
 ```cpp
 #include <genopack/derep_view.hpp>

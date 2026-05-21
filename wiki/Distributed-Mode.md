@@ -20,21 +20,21 @@ Workers are fully independent: no TCP, no shared memory, no NFS locking. Each wr
 
 ## Scatter
 
-Partitions the input TSV by taxonomy using LPT (Longest Processing Time) bin-packing to balance genome counts across partitions:
+Partitions the input by taxonomy using LPT (Longest Processing Time) bin-packing to balance genome counts across partitions. Taxonomy is read from the pack's TAXN section, so the input is a plain accession list:
 
 ```bash
-geodesic scatter -t genomes.tsv -n 4 -o dist/ --rank g --threads 24
+geodesic scatter -g genomes.txt --pack mydb.gpk -n 4 -o dist/ --rank g --threads 24
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-t` | -- | Input taxonomy TSV |
-| `-n` | -- | Number of partitions |
-| `-o` | -- | Output directory |
+| `-g, --genomes` | required | Accession list (one per line; taxonomy read from pack TAXN section) |
+| `-n, --partitions` | required | Number of partitions (typically = number of worker nodes) |
+| `-o, --output-dir` | required | Output directory for partition files and worker script |
+| `--pack` | -- | genopack archive path (passed through to worker commands) |
 | `--rank` | `g` | Taxonomy rank for grouping (`g`=genus, `f`=family, `s`=species) |
-| `--threads` | 4 | Threads per worker (passed to generated commands) |
-| `--tmp-dir` | `<output>/tmp` | Temporary directory for workers |
-| `--pack` | -- | genopack archive path (passed through to workers) |
+| `--threads` | 4 | Threads per worker (baked into the generated `run.sh`) |
+| `--tmp-dir` | scatter output dir | Temporary directory for workers |
 
 Outputs:
 - `part_N.tsv` -- per-partition genome lists
