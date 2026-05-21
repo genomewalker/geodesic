@@ -1,6 +1,7 @@
 #include "config.hpp"
 #include "distributed.hpp"
 #include "pipeline.hpp"
+#include "validate_ani.hpp"
 #include <Eigen/Core>
 #include <omp.h>
 #include <spdlog/spdlog.h>
@@ -29,6 +30,8 @@ int main(int argc, char** argv) {
             return derep::run_scatter(cfg);
         case derep::Command::Gather:
             return derep::run_gather(cfg);
+        case derep::Command::ValidateAni:
+            return derep::run_validate_ani(cfg);
         }
     } catch (const std::exception& e) {
         spdlog::critical("Fatal: {}", e.what());

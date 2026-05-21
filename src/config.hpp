@@ -6,7 +6,7 @@
 
 namespace derep {
 
-enum class Command { Derep, Update, Scatter, Gather };
+enum class Command { Derep, Update, Scatter, Gather, ValidateAni };
 
 struct Config {
     Command command = Command::Derep;
@@ -86,6 +86,11 @@ struct Config {
     std::filesystem::path scatter_dir;       // scatter: output directory for partitions
     std::filesystem::path gather_dir;        // gather: directory containing shard results
     std::filesystem::path gather_output;     // gather: merged output path
+
+    // validate-ani
+    int validate_pairs = 500;
+    std::filesystem::path validate_output;
+    std::string genopack_bin;
 };
 
 Config parse_args(int argc, char** argv);

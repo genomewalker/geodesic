@@ -153,6 +153,7 @@ add_executable(geodesic
     src/taxonomy/normalize.cpp
     src/core/geodesic/geodesic.cpp
     src/parallel/taxon_processor.cpp
+    src/validate_ani.cpp
     src/state/run_state.cpp
     src/derep/derep_archive.cpp
 )
