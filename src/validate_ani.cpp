@@ -2,7 +2,7 @@
 #include "core/multi_pack_reader.hpp"
 #include "core/pack_reader.hpp"
 #include "core/preloaded_pack_reader.hpp"
-#include "core/subprocess.hpp"
+#include "core/skani.hpp"
 #include <genopack/archive.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -10,8 +10,10 @@
 #include <fstream>
 #include <iomanip>
 #include <random>
-#include <sstream>
 #include <stdexcept>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -38,31 +40,6 @@ double jaccard_to_ani(double J, int k) {
     if (J <= 0.0) return 70.0;
     if (J >= 1.0) return 100.0;
     return std::max(70.0, std::min(100.0, std::pow(2.0 * J / (1.0 + J), 1.0 / k) * 100.0));
-}
-
-// skani dist stdout: Query_file\tRef_file\tANI\t...
-// Returns map of "acc_a\tacc_b" -> ANI (both orderings stored)
-std::unordered_map<std::string, double> parse_skani_output(const std::string& text) {
-    std::unordered_map<std::string, double> result;
-    std::istringstream ss(text);
-    std::string line;
-    bool header = true;
-    while (std::getline(ss, line)) {
-        if (header) { header = false; continue; }
-        if (line.empty()) continue;
-        std::vector<std::string> cols;
-        std::istringstream ls(line);
-        std::string tok;
-        while (std::getline(ls, tok, '\t')) cols.push_back(tok);
-        if (cols.size() < 3) continue;
-        const std::string& qa = std::filesystem::path(cols[0]).stem().string();
-        const std::string& rb = std::filesystem::path(cols[1]).stem().string();
-        double ani = 0.0;
-        try { ani = std::stod(cols[2]); } catch (...) { continue; }
-        result[qa + "\t" + rb] = ani;
-        result[rb + "\t" + qa] = ani;
-    }
-    return result;
 }
 
 } // anonymous namespace
@@ -146,72 +123,42 @@ int run_validate_ani(const Config& cfg) {
         });
     spdlog::info("validate-ani: loaded sketches for {}/{} accessions", sigs.size(), needed.size());
 
-    // Extract FASTAs via genopack
-    fs::path fasta_dir = cfg.tmp_dir / "validate_ani_fasta";
-    fs::create_directories(fasta_dir);
+    // Load raw FASTA sequences from pack and build FracMinHash sketches in-process
+    std::unordered_map<std::string, std::string> fastas;
+    fastas.reserve(needed.size());
+    pack->visit_shard_batches(needed, [&](genopack::ArchiveReader::ShardBatch& batch) {
+        for (auto& [idx, genome] : batch)
+            fastas[genome.accession] = std::move(genome.fasta);
+    });
+    spdlog::info("validate-ani: loaded {}/{} FASTAs", fastas.size(), needed.size());
 
-    {
-        std::ofstream f(fasta_dir / "accs.txt");
-        for (const auto& a : needed) f << a << "\n";
+    std::vector<SkaniSketch> ani_sketches(needed.size());
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic) num_threads(cfg.threads)
+#endif
+    for (int i = 0; i < (int)needed.size(); ++i) {
+        auto it = fastas.find(needed[i]);
+        if (it == fastas.end()) continue;
+        ani_sketches[i] = build_sketch(needed[i], it->second, cfg.ani_k, cfg.ani_c);
     }
+    fastas.clear();
 
-    const std::string gpk_bin = cfg.genopack_bin.empty() ? "genopack" : cfg.genopack_bin;
-    spdlog::info("validate-ani: extracting {} FASTAs …", needed.size());
+    std::unordered_map<std::string, const SkaniSketch*> sketch_idx;
+    sketch_idx.reserve(ani_sketches.size());
+    for (auto& sk : ani_sketches)
+        if (!sk.accession.empty()) sketch_idx[sk.accession] = &sk;
 
-    // For multipart directories, genopack extract only reads one part — run it per part.
-    std::vector<fs::path> gpk_targets;
-    if (fs::is_directory(pack_path)) {
-        for (const auto& e : fs::directory_iterator(pack_path))
-            if (e.path().extension() == ".gpk") gpk_targets.push_back(e.path());
-        std::sort(gpk_targets.begin(), gpk_targets.end());
-    } else {
-        gpk_targets.push_back(pack_path);
+    std::unordered_map<std::string, double> ani_map;
+    ani_map.reserve(pairs.size());
+    for (auto [i, j] : pairs) {
+        const auto& a = accs[i];
+        const auto& b = accs[j];
+        auto ia = sketch_idx.find(a), ib = sketch_idx.find(b);
+        if (ia == sketch_idx.end() || ib == sketch_idx.end()) continue;
+        auto res = compute_ani(*ia->second, *ib->second, cfg.ani_k);
+        ani_map[a + "\t" + b] = res.ani;
     }
-
-    for (const auto& gpk : gpk_targets) {
-        auto extract = run_subprocess(
-            {gpk_bin, "extract", gpk.string(),
-             "--accessions-file", (fasta_dir / "accs.txt").string(),
-             "--output-dir", fasta_dir.string()},
-            {.capture_stderr = true});
-        if (!extract.ok())
-            throw std::runtime_error("genopack extract failed on " + gpk.string()
-                + " (exit " + std::to_string(extract.exit_code)
-                + "): " + extract.stderr_output);
-    }
-
-    // Write separate query/ref lists for skani — one side of each pair per list.
-    // This avoids O(n_unique²) all-pairs; skani only computes the cross-product
-    // of unique left-side vs unique right-side accessions (~2×n_pairs instead of n_unique²).
-    {
-        std::unordered_set<std::string> ql_set, rl_set;
-        for (auto [i, j] : pairs) { ql_set.insert(accs[i]); rl_set.insert(accs[j]); }
-        {
-            std::ofstream f(fasta_dir / "ql.txt");
-            for (const auto& a : ql_set) f << (fasta_dir / (a + ".fa")).string() << "\n";
-        }
-        {
-            std::ofstream f(fasta_dir / "rl.txt");
-            for (const auto& a : rl_set) f << (fasta_dir / (a + ".fa")).string() << "\n";
-        }
-    }
-
-    spdlog::info("validate-ani: running skani dist …");
-    SubprocessOptions skani_opts;
-    skani_opts.capture_stdout = true;
-    skani_opts.capture_stderr = false;
-    auto skani = run_subprocess(
-        {"skani", "dist",
-         "--ql", (fasta_dir / "ql.txt").string(),
-         "--rl", (fasta_dir / "rl.txt").string(),
-         "-t",  std::to_string(cfg.threads),
-         "--min-af", "0.0"},
-        skani_opts);
-    if (!skani.ok())
-        spdlog::warn("validate-ani: skani exited {}", skani.exit_code);
-
-    auto skani_map = parse_skani_output(skani.stdout_output);
-    spdlog::info("validate-ani: {} skani ANI entries", skani_map.size());
+    spdlog::info("validate-ani: computed {} FracMinHash ANI pairs", ani_map.size());
 
     // Write output TSV
     const fs::path out_path = cfg.validate_output.empty()
@@ -219,21 +166,21 @@ int run_validate_ani(const Config& cfg) {
     std::ofstream out(out_path);
     if (!out) throw std::runtime_error("cannot open output: " + out_path.string());
 
-    out << "query\tref\tani_skani";
+    out << "query\tref\tani_geo";
     for (uint32_t k : avail_ks)
         out << "\tj_k" << k << "\tani_est_k" << k << "\terr_k" << k;
     out << "\tfill_query\tfill_ref\n";
 
-    size_t n_written = 0, n_no_skani = 0;
+    size_t n_written = 0, n_missing = 0;
     for (auto [i, j] : pairs) {
         const auto& a = accs[i];
         const auto& b = accs[j];
 
-        auto it = skani_map.find(a + "\t" + b);
-        if (it == skani_map.end()) { ++n_no_skani; continue; }
-        const double ani_skani = it->second;
+        auto it = ani_map.find(a + "\t" + b);
+        if (it == ani_map.end()) { ++n_missing; continue; }
+        const double ani_geo = it->second;
 
-        out << a << "\t" << b << "\t" << std::fixed << std::setprecision(4) << ani_skani;
+        out << a << "\t" << b << "\t" << std::fixed << std::setprecision(4) << ani_geo;
 
         const auto& sigs_a = sigs[a];
         const auto& sigs_b = sigs[b];
@@ -247,7 +194,7 @@ int run_validate_ani(const Config& cfg) {
             const size_t m = std::min(sa.size(), sb.size());
             const double J   = oph_jaccard(sa.data(), sb.data(), m);
             const double est = jaccard_to_ani(J, static_cast<int>(k));
-            out << "\t" << J << "\t" << est << "\t" << (est - ani_skani);
+            out << "\t" << J << "\t" << est << "\t" << (est - ani_geo);
 
             // fill fraction from the first k only
             if (fill_a < 0) {
@@ -264,8 +211,8 @@ int run_validate_ani(const Config& cfg) {
         ++n_written;
     }
 
-    spdlog::info("validate-ani: wrote {} rows → {} ({} pairs not in skani output)",
-                 n_written, out_path.string(), n_no_skani);
+    spdlog::info("validate-ani: wrote {} rows → {} ({} pairs missing)",
+                 n_written, out_path.string(), n_missing);
     return 0;
 }
 
