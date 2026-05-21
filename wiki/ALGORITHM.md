@@ -446,6 +446,30 @@ $$
 
 After degree normalisation, dot products approximate a normalised-graph similarity rather than raw Jaccard. Phase 7 corrects borderline decisions back to sketch Jaccard space.
 
+### Embedding distance → ANI calibration
+
+Because the Nyström embedding uses degree-normalised Jaccard similarities, the embedding distance $d$ does not equal $\theta_{\mathrm{ANI}}$ exactly. geodesic fits a data-driven calibration model per taxon to map embedding distances to ANI bounds.
+
+**Fallback (uncalibrated).** When fewer than 10 calibration pairs are available, the Mash chain is used directly. The L2-normalised embedding places each genome on the unit sphere, so $\mathrm{dot}(a,b) \approx J(a,b)$ before degree normalisation; after normalisation the relationship is approximate. The fallback treats $J \approx \cos(\pi d)$ and inverts the Mash formula:
+
+$$
+\widehat{\mathrm{ANI}} = \left(\frac{2\cos(\pi d)}{1 + \cos(\pi d)}\right)^{1/k}
+$$
+
+with a fixed ±1.5% ANI margin, using $k$ as configured for the taxon tier (default 21).
+
+**Fitted calibration (ANICalibrator).** When ≥ 10 calibration pairs are available, geodesic fits monotonic quantile regression curves to $(d_i, \mathrm{ANI}_i)$ samples drawn from genome pairs within the taxon:
+
+1. Sort the $N$ samples by embedding distance; build a 100-point distance grid by uniform index quantiles.
+2. At each grid point, collect nearby samples within a half-window of the local grid spacing.
+3. Compute the 5th and 95th percentile ANI within the window → raw lower and upper curves.
+4. Apply ±0.02 conformal safety margins: `lower -= 0.02`, `upper += 0.02`, then clamp to $[0, 1]$.
+5. Enforce monotonicity: lower and upper curves are non-increasing in distance (higher distance → lower ANI bound).
+
+The fitted model is queried by linear interpolation between grid points. `inverse_upper(target_ANI)` returns the embedding distance below which the upper ANI bound falls under the target — used to set the coverage threshold in Phase 7.
+
+The default number of calibration pairs is `--geodesic-calibration-pairs 50`. When the taxon has fewer than 10 pairs, the Mash fallback is used without warning.
+
 ---
 
 ## Complexity
