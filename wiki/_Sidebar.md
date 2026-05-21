@@ -7,4 +7,5 @@
 - [Outlier Detection](Outlier-Detection)
 - [Distributed Mode](Distributed-Mode)
 - [Derep Output](Derep-Output)
+- [Contamination Detection](Contamination)
 - [Full GTDB Example](GTDB-Example)
