@@ -130,8 +130,6 @@ Results written to the working directory (or `--out-dir`). TSV outputs are alway
 | `--geodesic-syncmer-s` | 0 | Open-syncmer prefilter `s` (0 = disabled) |
 | `--geodesic-diversity-threshold` | 0.02 | Minimum FPS step gain (relative) before stopping |
 | `--geodesic-max-rep-fraction` | 0.2 | Hard cap on rep set size as fraction of `n` |
-| `--geodesic-auto-calibrate / --geodesic-no-auto-calibrate` | on | Auto-pick k/m from a small calibration sample |
-| `--geodesic-calibration-pairs` | 50 | Pair count used by auto-calibration |
 | `--k-cap-max` | 256 | Max `K_cap` retry value when k-NN graph fails to connect at 64 |
 | `--nystrom-diagonal-loading` | 0.01 | Tikhonov regularisation fraction |
 | `--nystrom-degree-normalize / --no-nystrom-degree-normalize` | on | Symmetric Laplacian normalisation of Gram matrix |
@@ -203,19 +201,14 @@ geodesic update -g new_genomes.txt --lock prev_run.lock \
 
 `--lock` takes the JSON lock file written by `--lock-output`. `update` diffs accessions in the new list against the prior GEODF, identifies which taxa gained members (taxonomy resolved from pack TAXN), and re-runs only those taxa. Unchanged taxa are copied from the prior GEODF.
 
-## Performance
+## Coverage guarantee
 
-| Dataset | Genomes | Representatives | Reduction | Runtime | ANI threshold | Threads |
-|---------|---------|-----------------|-----------|---------|---------------|---------|
-| *E. coli* | 233,166 | 1,142 | 99.5% | 6 min | 98.6% (auto) | 16 |
-| *S. enterica* | 367,440 | 8,347 | 97.7% | 11 min | 99.9% (auto) | 16 |
-| Full GTDB r232 | 5,238,926 | 886,507 | 83.1% | 65 min | per-taxon (auto) | 24 |
-
-Throughput: ~1,340 genomes/sec at 24 threads across full GTDB diversity. Peak memory: ~63 GB for 5.2M genomes at 24 threads. ANI thresholds are inferred per taxon from the MST bottleneck edge.
-
-Coverage: Phase 8 OPH certification guarantees every genome is within the ANI threshold of its assigned representative in sketch space. Near the default 95% ANI threshold, OPH estimation error is typically well below 0.1 ANI points for dense assemblies.
-
-**Fragmented genomes (MAGs)**: sketches built with open syncmer OPH (`--sketch-syncmer auto`, targeting ~6% k-mer density) store only locally-minimal k-mer positions. For assemblies with fewer hashed positions than the sketch size, geodesic switches from Jaccard to containment-based ANI estimation.
+Phase 8 OPH certification guarantees every genome is within the ANI threshold
+of its assigned representative in sketch space. Near the default 95% ANI
+threshold, OPH estimation error is typically well below 0.1 ANI points for
+dense assemblies. Sparse genomes (MAGs with few contigs) switch to
+containment-based ANI estimation when the number of occupied OPH bins is
+below the sketch size.
 
 ## License
 

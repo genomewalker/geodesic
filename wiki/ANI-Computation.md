@@ -218,50 +218,21 @@ k-mer/ANI accuracy tables.
 
 ---
 
-## Performance benchmark
+## ANI formula
 
-> **Provenance:** reproduce with `bench/run_ani_bench.sh <pack> <accessions.txt>` against a
-> clean build. Numbers below are from 200 *E. coli* GTDB r232 genomes (96–100% ANI range),
-> 8 threads, NFS-backed storage. All sketch-based methods underestimate vs fastANI by
-> 0.09–0.13 ANI points on average; this is expected and not a calibration error (fastANI uses
-> fragmented alignment; sketch methods use k-mer Jaccard).
-
-### Speed
-
-| Method | Version | Pre-build | Query (19,900 pairs) | ms / pair |
-|--------|---------|-----------|----------------------|-----------|
-| fastANI | 1.34 | none | ~50 min | ~15 |
-| skani | 0.2.2 | 2.1 s sketch | 80.5 s | 4.0 |
-| **FracMinHash (GPK)** | — | 37.2 s build¹ | **4.3 s** | **0.3** |
-| OPH k=31 (stored) | — | pre-built | <1 s | <0.1 |
-| OPH k=21 (stored) | — | pre-built | <1 s | <0.1 |
-
-¹ genopack build cost is amortised — it also compresses sequences, builds the sketch, and
-writes GCOV/FCOV sections used by contamination detection.
-
-### Accuracy vs fastANI (12,611 matched pairs)
-
-| Method | RMSE (ANI pts) | MAE | Bias |
-|--------|---------------|-----|------|
-| skani 0.2.2 | 0.177 | 0.140 | −0.088 |
-| **FracMinHash (GPK)** | **0.198** | 0.161 | −0.127 |
-| OPH k=31 | 0.338 | 0.274 | −0.250 |
-| OPH k=21 | 0.246 | 0.197 | +0.141 |
-
-**Interpretation.** FracMinHash from a pre-built GPK is 13× faster per pair than skani
-and comparable in accuracy (0.198 vs 0.177 RMSE). The stored OPH sketches (k=21) are an
-order of magnitude faster still but carry ~0.25 ANI points more error — sufficient for
-dereplication clustering but not for reporting exact ANI values. `validate-ani` exists
-to quantify this error on your specific collection.
-
-### Mash formula note
-
-The Mash ANI formula used throughout geodesic and validate-ani is:
+The Mash formula used throughout geodesic:
 
 $$\mathrm{ANI} = \left(\frac{2J}{1+J}\right)^{1/k} \times 100$$
 
-where $J$ is the (b-bit-corrected) OPH Jaccard similarity. The `2J/(1+J)` term converts
-union-based Jaccard to the equivalent containment-symmetric Jaccard under the Mash model;
-it is the correct transformation for sketch-based estimators and matches the skani and
-Mash papers. All ANI threshold conversions in geodesic use $q = (\mathrm{ANI}/100)^k$ (ANI
-as a fraction, 0–1) to avoid unit errors at the certification step.
+where $J$ is the (b-bit-corrected) OPH Jaccard similarity. The $2J/(1+J)$ term converts
+union-based Jaccard to the containment-symmetric form under the Mash model; it is the
+correct transformation for sketch-based estimators.
+
+All internal ANI threshold conversions use $q = (\mathrm{ANI}/100)^k$ (ANI as a
+fraction 0–1, not percent) to avoid unit errors at the certification step.
+
+**Estimator context.** FracMinHash (`geodesic ani`) and skani use k-mer Jaccard;
+fastANI uses fragmented alignment. Sketch-based methods systematically produce slightly
+lower ANI values than alignment-based methods for the same genome pair — this is expected
+behaviour, not a calibration error. Use `geodesic validate-ani` to quantify the OPH
+sketch error on your specific collection.
