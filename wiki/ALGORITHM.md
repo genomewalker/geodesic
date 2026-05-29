@@ -26,7 +26,7 @@ Sketch → Embed → Index → Score → Select → Merge → Verify → Certify
 | 7 | Verify | Re-check borderline genomes near the coverage boundary with exact sketch Jaccard |
 | 8 | Certify | Universal coverage pass: every genome is certified against its representative in sketch space |
 
-For taxa with exactly 2 genomes, the full pipeline is skipped; see [n=2 fast path](#n2-fast-path).
+For taxa with 20 or fewer genomes, the full pipeline is replaced by a brute-force all-pairs cover; see [Tiny-taxon fast path](#tiny-taxon-fast-path-n--20).
 
 ---
 
