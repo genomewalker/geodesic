@@ -14,7 +14,7 @@ struct LockData {
     int syncmer_s = 0;
     double ani_threshold = 0.0;
     uint64_t seed1 = 42;
-    uint64_t seed2 = 1337;
+    uint64_t seed2 = 43;
     uint32_t params_hash = 0;
     uint64_t geodf_hash = 0;
     std::string timestamp;

@@ -158,7 +158,7 @@ body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;font
       <div class="alg-step-num">01 · Fingerprinting</div>
       <div class="alg-step-title">Each genome gets a unique fingerprint</div>
       <div class="alg-step-body">
-        Two independent OPH signatures (k=21, m=10,000 bins, seeds 42 and 1337). Averaging the two Jaccard estimates halves variance. Each dot on the sphere is a genome.
+        Two independent OPH signatures (k=21, m=10,000 bins, seeds 42 and 43). Averaging the two Jaccard estimates halves variance. Each dot on the sphere is a genome.
       </div>
     </div>
     <div class="alg-step" data-step="1">
@@ -1064,7 +1064,7 @@ footer{padding:28px 40px;border-top:1px solid var(--border);display:flex;align-i
       <div class="alg-step-num">01 · Fingerprinting</div>
       <div class="alg-step-title">Each genome gets a unique fingerprint</div>
       <div class="alg-step-body">
-        Two independent OPH signatures (k=21, m=10,000 bins, seeds 42 and 1337). Averaging the two Jaccard estimates halves variance. Each dot on the sphere is a genome.
+        Two independent OPH signatures (k=21, m=10,000 bins, seeds 42 and 43). Averaging the two Jaccard estimates halves variance. Each dot on the sphere is a genome.
       </div>
     </div>
     <div class="alg-step" data-step="1">

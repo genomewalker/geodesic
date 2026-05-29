@@ -823,6 +823,8 @@ int run_pipeline(Config& cfg) {
             lock.sketch_size   = cfg.sketch_size;
             lock.syncmer_s     = cfg.syncmer_s;
             lock.ani_threshold = cfg.ani_threshold;
+            lock.seed1         = cfg.seed;
+            lock.seed2         = cfg.seed + 1;
             lock.params_hash   = geodf::hash_run_params(cfg.kmer_size, cfg.sketch_size,
                                                         cfg.syncmer_s, cfg.ani_threshold);
             if (cfg.pack_dir.has_value() && cfg.pack_dir->extension() == ".gpk") {
