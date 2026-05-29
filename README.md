@@ -8,7 +8,7 @@
 
 ## Algorithm
 
-1. **Sketch** -- read two independent [One-Permutation Hash (OPH)](https://files.ifi.uzh.ch/dbtg/sdbs13/T17.0.pdf) signatures per genome from the genopack archive. The archive stores pre-computed OPH signatures at multiple k-mer sizes (e.g. $k \in \{16, 21, 31\}$, $m=10{,}000$ bins per size, seeds `--seed` (default 42) for sig1 and 1337 for sig2). Auto-calibration (`--geodesic-auto-calibrate`, on by default) selects the appropriate k and m from a small sample of genome pairs; the default tier for 95–99% ANI taxa uses $k=21$, $m=10{,}000$ bins. Each bin holds the minimum hash of all k-mers mapping to it, giving $\Pr[\mathrm{sig}_A[t] = \mathrm{sig}_B[t]] \approx J(A,B)$ (equality holds before densification; after densification, filled bins introduce correlation). Averaging two independent signatures halves Jaccard estimation variance. The per-bin occupancy bitmask enables containment estimation for sparse assemblies.
+1. **Sketch** -- read two independent [One-Permutation Hash (OPH)](https://files.ifi.uzh.ch/dbtg/sdbs13/T17.0.pdf) signatures per genome from the genopack archive. The archive stores pre-computed OPH signatures at multiple k-mer sizes (e.g. $k \in \{16, 21, 31\}$, $m=10{,}000$ bins per size, seeds `--seed` (default 42) for sig1 and `--seed`+1 (default 43) for sig2). Auto-calibration (`--geodesic-auto-calibrate`, on by default) selects the appropriate k and m from a small sample of genome pairs; the default tier for 95–99% ANI taxa uses $k=21$, $m=10{,}000$ bins. Each bin holds the minimum hash of all k-mers mapping to it, giving $\Pr[\mathrm{sig}_A[t] = \mathrm{sig}_B[t]] \approx J(A,B)$ (equality holds before densification; after densification, filled bins introduce correlation). Averaging two independent signatures halves Jaccard estimation variance. The per-bin occupancy bitmask enables containment estimation for sparse assemblies.
 
 2. **Embed** -- place all genomes in a low-dimensional similarity space using a small set of landmark genomes (anchors):
    - *Anchor selection*: anchors are drawn across the full range of assembly completeness so sparse MAGs and complete genomes are equally represented as landmarks.
@@ -28,7 +28,7 @@
 
 7. **Verify** -- for non-representatives with embedding distance in $[\theta(1-\varepsilon),\,\theta)$, check the top-3 nearest representatives using exact dual-sketch OPH Jaccard. Promote only if no representative is within $\theta$ in sketch space.
 
-8. **Certify** -- universal sketch-space coverage pass: every non-representative is verified against its assigned representative by direct OPH Jaccard. Certification threshold $\tau = q/(2-q)$ where $q = \mathrm{ANI}^k$. Any genome failing this check is promoted to a representative. OPH estimation error depends on real-bin occupancy and Jaccard; near the default 95% ANI threshold with dense sketches it is typically well below 0.1 ANI points, but sparse genomes are less stable. Sketch-asymmetric pairs (MAG vs. complete genome, $n_\mathrm{real,small}/n_\mathrm{real,large} < 0.5$ by occupied OPH bins) are additionally checked by directional containment: the fraction of the small genome's real bins that match the large genome must exceed $q = \mathrm{ANI}^k$.
+8. **Certify** -- universal sketch-space coverage pass: every non-representative is verified against its assigned representative by direct OPH Jaccard. Certification threshold $\tau = q/(2-q)$ where $q = ({\rm ANI}/100)^k$ (ANI as a fraction, e.g. 0.95 for 95%). Any genome failing this check is promoted to a representative. OPH estimation error depends on real-bin occupancy and Jaccard; near the default 95% ANI threshold with dense sketches it is typically well below 0.1 ANI points, but sparse genomes are less stable. Sketch-asymmetric pairs (MAG vs. complete genome, $n_\mathrm{real,small}/n_\mathrm{real,large} < 0.5$ by occupied OPH bins) are additionally checked by directional containment: the fraction of the small genome's real bins that match the large genome must exceed $q = ({\rm ANI}/100)^k$.
 
 ANI thresholds are derived from Jaccard via the Mash formula: $\mathrm{ANI} = \left(\frac{2J}{1+J}\right)^{1/k} \times 100$.
 
@@ -116,7 +116,7 @@ Results written to the working directory (or `--out-dir`). TSV outputs are alway
 | `--threads` | 1 | Total CPU threads |
 | `-w, --workers` | 1 | Worker pool (advanced; overrides `total_budget = workers * threads`) |
 | `--io-threads` | 0 (auto) | Max concurrent NFS file readers (`0` = auto = `--threads`) |
-| `--seed` | 42 | Master RNG seed; OPH sig1 uses `seed`, sig2 always uses 1337 |
+| `--seed` | 42 | Master RNG seed; OPH sig1 uses `seed`, sig2 uses `seed`+1 (43 by default) |
 
 **Algorithm**
 
