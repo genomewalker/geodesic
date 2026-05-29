@@ -27,7 +27,9 @@ Six per-genome signals are computed and stored in the `outlier_candidates` table
 
 ## Flagging criterion
 
-A genome is excluded from representative selection when `nn_outlier = TRUE`. The threshold is derived from a [Median Absolute Deviation (MAD)](https://en.wikipedia.org/wiki/Median_absolute_deviation)-based robust estimate of the per-component isolation score distribution. MAD has a breakdown point of 50%: up to half of genomes can be contaminated without biasing the estimator.
+A genome is excluded from representative selection when `nn_outlier = TRUE`. The threshold is the maximum of two MAD-based estimates: a **per-component** threshold computed from genomes in the same connected MST component, and a **global** threshold computed from all non-outlier genomes. The max-combination means a genome must be anomalous relative to both its local component and the global distribution before being flagged. MAD has a breakdown point of 50%.
+
+When MAD is zero (all isolation scores in a component are identical), the code falls back to an IQR-based threshold.
 
 $$
 \text{threshold} = \tilde{\mu} + z \cdot 1.4826 \cdot \mathrm{MAD}

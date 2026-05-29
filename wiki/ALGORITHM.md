@@ -34,7 +34,7 @@ For taxa with exactly 2 genomes, the full pipeline is skipped; see [n=2 fast pat
 
 ### One-permutation hashing
 
-For each genome, geodesic reads a pre-computed [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signature from the genopack archive. The archive stores OPH signatures at multiple k-mer sizes (e.g. $k \in \{16, 21, 31\}$, $m = 10{,}000$ bins per size). Auto-calibration selects the appropriate k and m from a small sample of genome pairs; the default tier for 95–99% ANI taxa uses $m = 10{,}000$ and $k = 21$. The calibration first-pass sketch uses $m = 4{,}096$.
+For each genome, geodesic reads a pre-computed [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signature from the genopack archive. The archive stores OPH signatures at multiple k-mer sizes (e.g. $k \in \{16, 21, 31\}$, $m = 10{,}000$ bins per size). Auto-calibration selects the appropriate k and m from a small sample of genome pairs; the default tier for 95–99% ANI taxa uses $m = 10{,}000$ and $k = 21$. The calibration pre-probe uses 500 bins to estimate the nearest-neighbour distance distribution before committing to the full sketch size.
 
 **Canonical k-mer selection.** For each position in the genome, both the forward k-mer and its reverse complement are encoded as a 64-bit integer (2 bits per base, A=0/C=1/G=2/T=3). The canonical k-mer is the lexicographic minimum of the two encodings, selected by a branchless comparison:
 
@@ -62,7 +62,7 @@ $$
 
 The stored uint32 value is truncated to uint16 at storage time (retaining bits 32–47 of $h$). A single hash call per k-mer determines both bin index and comparison value.
 
-**Densification.** After scanning all k-mers, empty bins are filled by nearest-neighbour propagation, following the OPH densification scheme of Li & König (2012):
+**Densification.** After scanning all k-mers, empty bins are filled by nearest-neighbour propagation, following the OPH densification scheme of Li, Owen & Zhang (2012):
 
 ```
 Forward:  if sig[t] = EMPTY and sig[t-1] ≠ EMPTY: sig[t] = SplitMix64(sig[t-1] XOR t)
@@ -109,7 +109,7 @@ $$
 \hat{J}_{\mathrm{corr}} = \max\!\left(0,\ \frac{\hat{J}_{\mathrm{raw}} - 2^{-16}}{1 - 2^{-16}}\right)
 $$
 
-**Lazy sig2 loading.** sig2 is loaded from the genopack archive on demand only for anchor genomes and borderline verification candidates. Non-anchor Nyström extension uses sig1 only.
+**sig2 loading.** Both sig1 and sig2 are loaded eagerly for all genomes at startup from the genopack archive's SKCH section. sig2 is used for the anchor Gram matrix (dual-sketch averaging) and then freed before Phase 5; Phase 7 and Phase 8 use sig1 only.
 
 ### Fill fraction
 
@@ -119,7 +119,7 @@ $$
 \mathbb{E}[f_i] \approx 1 - e^{-|G_i|/m}
 $$
 
-For complete bacterial genomes ($|G| \sim 10^6$ k-mers, $m = 10{,}000$), $f \approx 1$. Highly incomplete assemblies ($f \ll 0.2$) have elevated OPH variance and trigger containment-based corrections in Phase 2. At $m = 4{,}096$ (calibration first-pass tier), the same assemblies still satisfy $f \approx 1$.
+For complete bacterial genomes ($|G| \sim 10^6$ k-mers, $m = 10{,}000$), $f \approx 1$. Highly incomplete assemblies ($f \ll 0.2$) have elevated OPH variance and trigger containment-based corrections in Phase 2. At the 500-bin calibration pre-probe tier, the same assemblies still satisfy $f \approx 1$.
 
 ### K-mer size and OPH accuracy
 
@@ -154,7 +154,7 @@ Exact pairwise Jaccard over $n$ genomes requires $O(n^2 m)$ operations, infeasib
 
 The anchor count is $p = \min(n,\ \max(200,\ 2 \cdot d_{\mathrm{cfg}}))$, where $d_{\mathrm{cfg}}$ is the configured maximum embedding dimension (default 256, `--geodesic-dim`). The actual embedding dimension $d$ is auto-selected from the anchor eigenspectrum (see below) and may be less than $d_{\mathrm{cfg}}$.
 
-Genomes are stratified by fill fraction $f_i$ into $Q = 5$ quantile strata, and an equal number of anchors is drawn from each stratum by Fisher-Yates shuffle. Stratification ensures the anchor Gram matrix covers the full range of genome completeness.
+Genomes are split into a **dense pool** ($f_i \geq 0.85$, shuffled uniformly) and a **sparse pool** (sparser assemblies, sorted by descending fill). Anchors are drawn from the dense pool first, then from the sparse pool in fill order. This ensures the anchor Gram matrix covers the full range of genome completeness, including MAGs with few occupied bins.
 
 ### Anchor Gram matrix
 
@@ -259,11 +259,11 @@ $$
 \theta = \min\!\left(\theta_{\mathrm{MST}},\ \frac{\arccos(J_{\mathrm{ANI}})}{\pi}\right)
 $$
 
-**$\theta_{\mathrm{MST}}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding the MAD-based threshold $\tilde{\mu} + z \cdot 1.4826 \cdot \mathrm{MAD}$ excluded) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_{\mathrm{MST}}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
+**$\theta_{\mathrm{MST}}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding a $\bar{x} + 2\sigma$ threshold excluded from the MST — note this is a simpler mean+2σ pre-filter, not the MAD threshold used for final outlier classification) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_{\mathrm{MST}}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
 
 **Kruskal's construction.** The k-NN edges are sorted in ascending order of angular distance. Union-Find processes them greedily, adding each edge only if it connects two previously disconnected components. The algorithm terminates as soon as a single component spans all non-outlier genomes; the edge that triggered this merge is $\theta_{\mathrm{MST}}$ by construction.
 
-**Adaptive $k$ selection.** Isolation scoring uses a fixed $k_{\mathrm{iso}}$ neighbours. MST edge collection uses a two-phase adaptive scan with budget $K_{\mathrm{cap}} = \min(64, n-1)$.
+**Adaptive $k$ selection.** Isolation scoring uses a fixed $k_{\mathrm{iso}}$ neighbours. MST edge collection uses a two-phase adaptive scan with budget $K_{\mathrm{cap}}$ scaled by taxon size: 64 for $n \leq 5{,}000$, 128 for $5{,}000 < n \leq 50{,}000$, 256 for $n > 50{,}000$ (further capped by `--k-cap-max`).
 
 **Phase A -- DSU connectivity scan.** The k-NN edges are added column by column, incrementing $k$ from 1 to $K_{\mathrm{cap}}$. A [Disjoint Set Union (DSU)](https://en.wikipedia.org/wiki/Disjoint-set_data_structure) structure (also called Union-Find) tracks component membership -- each genome starts in its own component, and merging two sets takes near-constant amortised time. The scan halts at the first $k$ for which the core k-NN graph (outliers excluded) becomes fully connected; this value is recorded as $k_{\mathrm{conn}}$. If no $k \leq K_{\mathrm{cap}}$ achieves connectivity (e.g., a taxon with genuine phylogenetic sub-lineages), $k_{\mathrm{conn}} = -1$.
 
@@ -328,13 +328,13 @@ The ad-hoc proxy measures what fraction of the OPH sketch bins are filled -- a s
 4. Remove newly covered genomes ($(1 - s_i) < \theta$) from the active set
 5. Terminate when the active set is empty, or the top candidate's angular distance $\arccos(s_i)/\pi < \theta$
 
-Batching $B = 16$ candidates fuses 16 distance updates into one parallel pass, reducing OpenMP synchronisation overhead.
+Batching $B = 16$ candidates fuses 16 distance updates into one parallel pass, reducing thread-pool synchronisation overhead.
 
 ---
 
 ## Phase 6: Union-Find merge
 
-Quality weighting can place two representatives closer than intended. Representatives with embedding distance below $d_{\mathrm{min}}$ are merged via [Union-Find](https://en.wikipedia.org/wiki/Disjoint-set_data_structure): the pair is collapsed to the survivor with higher $\mathrm{quality} \times \mathrm{size}$.
+Quality weighting can place two representatives closer than intended. Representatives with embedding distance below $d_{\mathrm{min}}$ are merged via [Union-Find](https://en.wikipedia.org/wiki/Disjoint-set_data_structure): the pair is collapsed to the survivor that was selected earlier by FPS (lower index in the representative list), preserving the FPS diversity ordering.
 
 Merge candidates are found via HNSW search over the representative set. $d_{\mathrm{min}} = \min(\mathrm{NN}_{P5},\ \theta / 4)$.
 
@@ -344,7 +344,7 @@ Merge candidates are found via HNSW search over the representative set. $d_{\mat
 
 ### Approximation error
 
-Nyström embedding introduces geometric error. The implementation uses $\varepsilon = \min(3/\sqrt{d},\ 0.3)$ as an empirical error tolerance. A genome at embedding distance in
+Nyström embedding introduces geometric error. The implementation uses $\varepsilon = \min(1.5/\sqrt{d},\ 0.3)$ as an empirical error tolerance. A genome at embedding distance in
 
 $$
 \left[\theta(1-\varepsilon),\ \theta\right)
@@ -357,16 +357,16 @@ is borderline covered and verified by a direct sketch comparison.
 For each borderline-covered genome $G_i$:
 
 1. Find the top-3 closest representatives by embedding dot product.
-2. For each candidate representative $R_k$, compute dual-sketch averaged OPH Jaccard:
+2. For each candidate representative $R_k$, compute single-sketch OPH Jaccard (sig1 only — sig2 was freed after Phase 2):
 
 $$
-J_{\mathrm{dual}} = \frac{J(\mathrm{sig1}_i,\ \mathrm{sig1}_{R_k}) + J(\mathrm{sig2}_i,\ \mathrm{sig2}_{R_k})}{2}
+J_{\mathrm{verify}} = J(\mathrm{sig1}_i,\ \mathrm{sig1}_{R_k})
 $$
 
-3. Convert: $d_{\mathrm{sketch}} = \arccos\!\left(\min(1, \max(0, J_{\mathrm{dual}}))\right) / \pi$
+3. Convert: $d_{\mathrm{sketch}} = \arccos\!\left(\min(1, \max(0, J_{\mathrm{verify}}))\right) / \pi$
 4. Promote $G_i$ to representative only if all checked representatives satisfy $d_{\mathrm{sketch}} \geq \theta$.
 
-This uses OPH sketch Jaccard (with $m$ bins as configured for the taxon tier, typically 10,000), not exact ANI, with variance $J(1-J) / (2\, m_{\mathrm{real}})$.
+This uses OPH sketch Jaccard (with $m$ bins as configured for the taxon tier, typically 10,000), not exact ANI, with variance $J(1-J) / m_{\mathrm{real}}$.
 
 ---
 
@@ -388,7 +388,7 @@ $J_{\mathrm{cert}}$ is used for the symmetric Jaccard arm (equal-size genomes). 
 
 **Two-arm `oph_certified` function.** For a pair $(G_i, G_j)$, the function returns `true` if either arm passes:
 
-- **Arm 1 (symmetric Jaccard):** $J_{\mathrm{dual}}(G_i, G_j) \geq J_{\mathrm{cert}}$.
+- **Arm 1 (symmetric Jaccard):** $J(G_i, G_j) \geq J_{\mathrm{cert}}$ (sig1 only).
 - **Arm 2 (directional containment):** triggered when $n_{\mathrm{real,small}} / n_{\mathrm{real,large}} \leq 0.85$ (one genome occupies ≤85% of the OPH bins of the other — catches most MAG vs. complete-genome pairs). Computes the containment fraction $C = n_{\mathrm{match}} / n_{\mathrm{real,small}}$ and requires $C \geq q_{\mathrm{cert}}$.
 
 **Algorithm.** For each non-representative genome $G_i$ (excluding contamination-excluded genomes):
@@ -397,20 +397,21 @@ $J_{\mathrm{cert}}$ is used for the symmetric Jaccard arm (equal-size genomes). 
 2. **Exhaustive scan**: if the fast path fails, run `oph_certified(G_i, R_k)` against every representative $R_k$. Reassign $G_i$ to the representative with the highest $J_{\mathrm{dual}}$ among those that pass. Using either arm ensures that a MAG correctly covered by containment is not incorrectly sent to the repair queue.
 3. **Repair queue**: if no representative passes either arm, $G_i$ is promoted to a new representative.
 
-The outer loop is parallelised with OpenMP (`schedule(dynamic, 256)`); each thread maintains a local repair queue merged after the barrier.
+The outer loop is parallelised with a BS thread pool; each thread maintains a local repair queue merged after the barrier.
 
 **Coverage guarantee.** After Phase 8, every non-representative genome satisfies `oph_certified` against at least one representative, independent of Nyström approximation error. For symmetric pairs this is a sketch-space Jaccard guarantee; for asymmetric pairs it is a directional containment guarantee. The remaining uncertainty is OPH estimation variance: at 95% ANI with $m = 10{,}000$ bins (typical tier), $\sigma_J \approx 0.004$ for dense assemblies; sparse genomes (low $m_{\mathrm{real}}$) have higher variance and looser sketch-space guarantees.
 
 ---
 
-## n=2 fast path
+## Tiny-taxon fast path ($n \leq 20$)
 
-For taxa with exactly 2 genomes, the full pipeline is unnecessary. The outcome depends only on whether the two genomes are similar enough to collapse:
+For taxa with 20 or fewer genomes, the full Nyström embedding pipeline is skipped. A brute-force all-pairs OPH Jaccard cover is run instead:
 
-- If OPH Jaccard(A, B) → ANI $\geq$ ani_threshold: select the genome with higher quality score as the sole representative.
-- Otherwise: both are representatives.
+- Compute all $\binom{n}{2}$ pairwise Jaccard values directly.
+- Run a greedy cover: iteratively pick the genome that covers the most uncovered genomes within the ANI threshold, using the genome with higher quality score as tie-breaker.
+- Any genome not within ANI threshold of any representative becomes its own representative.
 
-The OPH direct Jaccard has sub-0.2% ANI error at $m=10{,}000$ bins (see Phase 1 table); the n=2 path uses whichever $m$ was configured for the taxon. For $n=1$ taxa, the single genome is trivially the representative.
+For $n=1$, the single genome is trivially the representative.
 
 ---
 
@@ -485,7 +486,7 @@ Typical values: $p \approx 512$, $m \in \{5{,}000,\, 10{,}000,\, 20{,}000\}$ (ti
 ## Implementation notes
 
 - **SIMD**: AVX2 in the OPH inner loop (32 bytes/cycle), anchor-slab Gram matrix (`_mm256_cmpeq_epi16`), and FPS update loops.
-- **OpenMP**: parallel OPH sketching, Gram matrix rows, FPS fitness/update loops, HNSW isolation queries.
+- **Thread pool (BS::thread_pool)**: parallel Gram matrix rows, FPS fitness/update loops, HNSW isolation queries, Phase 8 certification. OPH sketching uses a separate producer-consumer pipeline.
 - **GEODF**: results written to flat binary file; interrupted runs resume via GEODF crash recovery.
 - **Anchor slab**: anchor signatures ($p \times m \times 2$ bytes, e.g. $512 \times 4{,}096 \times 2 = 4\ \mathrm{MB}$ at the medium tier or $512 \times 10{,}000 \times 2 \approx 10\ \mathrm{MB}$ at the typical tier) packed into a contiguous aligned buffer for cache-friendly Gram matrix computation.
 - **Producer-consumer I/O**: genome decompression overlapped with k-mer computation via bounded semaphore.
@@ -498,8 +499,8 @@ Typical values: $p \approx 512$, $m \in \{5{,}000,\, 10{,}000,\, 20{,}000\}$ (ti
 
 - Ondov et al. (2016) *Mash: fast genome and metagenome distance estimation using MinHash*. Genome Biology. [doi:10.1186/s13059-016-0997-x](https://doi.org/10.1186/s13059-016-0997-x)
 - Li, P. & König, A.C. (2011) *b-Bit Minwise Hashing*. WWW 2011. [doi:10.1145/1989323.1989399](https://doi.org/10.1145/1989323.1989399)
-- Li, P. & König, A.C. (2012) *One Permutation Hashing*. NIPS. [link](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html)
+- Li, P., Owen, A. & Zhang, C.H. (2012) *One Permutation Hashing*. NIPS. [link](https://proceedings.neurips.cc/paper_files/paper/2012/file/eaa32c96f620053cf442ad32258076b9-Paper.pdf)
 - Williams, C.K.I. & Seeger, M. (2001) *Using the Nyström Method to Speed Up Kernel Machines*. NIPS. [link](https://proceedings.neurips.cc/paper/2000/file/19de10adbaa1b2ee13f77f679fa1483a-Paper.pdf)
 - Gonzalez, T.F. (1985) *Clustering to minimize the maximum intercluster distance*. Theoretical Computer Science 38:293–306.
 - Malkov, Y.A. & Yashunin, D.A. (2018) *Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs*. IEEE TPAMI 42(4):824–836. [doi:10.1109/TPAMI.2018.2889473](https://doi.org/10.1109/TPAMI.2018.2889473)
-- Chowdhury et al. (2023) *CheckM2: a rapid, scalable and accurate tool for assessing microbial genome quality using machine learning*. Nature Methods. [doi:10.1038/s41592-023-01940-w](https://doi.org/10.1038/s41592-023-01940-w)
+- Chklovski, A., Parks, D.H., Woodcroft, B.J. & Tyson, G.W. (2023) *CheckM2: a rapid, scalable and accurate tool for assessing microbial genome quality using machine learning*. Nature Methods. [doi:10.1038/s41592-023-01940-w](https://doi.org/10.1038/s41592-023-01940-w)

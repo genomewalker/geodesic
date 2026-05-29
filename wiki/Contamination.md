@@ -16,7 +16,7 @@ Six per-genome signals are computed and stored in the `contamination_candidates`
 
 | Signal | Description |
 |--------|-------------|
-| `isolation_score` | Mean angular distance to the $k=10$ nearest neighbours in embedding space (high = isolated = anomalous) |
+| `isolation_score` | Mean angular distance to the $k$ nearest neighbours ($k = \max(10,\, \min(20,\, \lfloor\log_2 n\rfloor))$); high = isolated = anomalous |
 | `centroid_distance` | Angular distance from the species centroid (mean embedding vector, renormalised to unit length) |
 | `genome_size_zscore` | Z-score of genome size relative to the taxon distribution |
 | `kmer_div_zscore` | K-mer diversity z-score: occupied OPH bins per kbp relative to the taxon mean. Informational; see below. |
