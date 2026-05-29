@@ -200,7 +200,7 @@ The CheckM2 TSV should have columns `accession`, `completeness`, `contamination`
 | `gtdb_r232_derep_genomes.tsv` | Per-genome: `accession`, `taxonomy`, `representative` (0/1), `cluster_rep`, `nn_dist`, `sketch_fill` |
 | `gtdb_r232_diversity_stats.tsv` | Per-taxon coverage and diversity metrics |
 | `gtdb_r232_stats.tsv` | Per-taxon pipeline stats (MST edges, ANI threshold, outlier counts) |
-| `gtdb_r232_contamination.tsv` | Contamination candidates flagged by the MAD-based estimator |
+| `gtdb_r232_outliers.tsv` | Contamination candidates flagged by the MAD-based estimator |
 | `gtdb_r232.gpd` | Geodesic Derep Archive — machine-readable rep set consumed by `genopack::DerepView` |
 | `gtdb_r232.lock` | JSON provenance file; input to `geodesic update` for incremental re-runs |
 

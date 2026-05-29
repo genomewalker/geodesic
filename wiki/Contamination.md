@@ -1,6 +1,6 @@
-# Outlier detection
+# Contamination detection
 
-geodesic identifies potential outlier and chimeric assemblies before representative selection. Outlier genomes receive a fitness score of zero, excluding them from being chosen as representatives while still assigning them to the nearest representative in the output.
+geodesic identifies potentially contaminated and chimeric assemblies before representative selection. Contaminated genomes receive a fitness score of zero, excluding them from being chosen as representatives while still assigning them to the nearest representative in the output.
 
 ---
 
@@ -12,7 +12,7 @@ A contaminated or chimeric assembly contains sequence from multiple lineages and
 
 ## Detection signals
 
-Six per-genome signals are computed and stored in the `outlier_candidates` table:
+Six per-genome signals are computed and stored in the `contamination_candidates` table:
 
 | Signal | Description |
 |--------|-------------|
@@ -27,13 +27,13 @@ Six per-genome signals are computed and stored in the `outlier_candidates` table
 
 ## Flagging criterion
 
-A genome is excluded from representative selection when `nn_outlier = TRUE`. The threshold is derived from a [Median Absolute Deviation (MAD)](https://en.wikipedia.org/wiki/Median_absolute_deviation)-based robust estimate of the per-component isolation score distribution. MAD has a breakdown point of 50%: up to half of genomes can be contaminated without biasing the estimator.
+A genome is excluded from representative selection when `nn_outlier = TRUE`. The threshold uses a MAD-based (Median Absolute Deviation) robust estimator with a 50% breakdown point — up to half the taxon's genomes can be contaminated without biasing the estimator:
 
 $$
-\text{threshold} = \tilde{\mu} + z \cdot 1.4826 \cdot \mathrm{MAD}
+\text{threshold} = \tilde{\mu} + z \cdot 1.4826 \cdot \text{MAD}, \qquad \text{MAD} = \text{median}(|x_i - \tilde{\mu}|)
 $$
 
-where $\tilde{\mu}$ is the component median isolation score, $\mathrm{MAD} = \text{median}(|x_i - \tilde{\mu}|)$, and $z$ is configurable via `--z-threshold` (default 2.0). The factor 1.4826 makes MAD consistent with standard deviation for normal distributions. Ordinary mean and SD are not used because contaminated genomes form a long right tail in the isolation score distribution; including them in the estimator inflates $\sigma$ and raises the threshold, masking the very outliers we want to detect.
+where $\tilde{\mu}$ is the median isolation score and $z$ is configurable via `--z-threshold` (default 2.0). The 1.4826 factor makes MAD a consistent estimator of $\sigma$ under a Gaussian null. Ordinary mean and SD are not used because contaminated genomes form a long right tail; including them inflates $\sigma$ and raises the threshold, masking the very outliers we want to detect.
 
 Genomes with `isolation_score > threshold` have anomalously large mean distance to their nearest neighbours in embedding space, the primary signal of taxonomic misassignment or cross-species contamination. Their fitness is set to zero: they cannot be selected as representatives but remain in the output assigned to their nearest representative.
 
@@ -61,21 +61,19 @@ This signal is computed and stored for analysis. It is not currently used as a f
 
 ## CheckM2 integration
 
-When CheckM2 quality estimates are available (`--checkm2`), the quality score per genome is:
+When CheckM2 quality estimates are available (`--checkm2`), contamination enters directly through the fitness function:
 
 $$
 q = \text{completeness} - 5 \times \text{contamination}
 $$
 
-This score is used as a **tie-breaker** in FPS, not as a multiplier in the primary fitness:
-
 $$
 \text{fitness}_i = d_i \cdot \sqrt{\frac{L_i}{L_m}}
 $$
 
-where $d_i$ is the angular-distance proxy to the nearest current representative and $L_m$ is the taxon median genome length. When two candidates have fitness values within $10^{-3}$ of each other, the one with higher $q$ is selected. This preserves the pure diversity objective (maximise spread) while preferring higher-quality assemblies among equidistant candidates.
+where $d_i$ is the distance to the nearest current representative, $L_i$ is genome length, and $L_m$ is the taxon median genome length. The quality score $q_i$ acts as a **tie-breaker only** — when two candidates have equal fitness, the one with higher quality score is preferred. This keeps the primary selection signal (diversity) independent of quality noise.
 
-A genome with 10% CheckM2 contamination loses 50 quality points and is consistently deprioritised as a tie-break loser. Heavily contaminated genomes that are also isolation-score outliers are excluded entirely via the `nn_outlier` flag. The embedding-based `nn_outlier` flag is the fallback when CheckM2 scores are unavailable.
+A genome with 10% CheckM2 contamination loses 50 quality points, making it less likely to win ties. The embedding-based `nn_outlier` flag remains the primary contamination filter; CheckM2 quality only modulates selection among clean candidates.
 
 ---
 
@@ -92,7 +90,7 @@ Pass GUNC output with `--gunc-scores gunc_output.tsv`. Genomes with `pass.GUNC =
 The `_outliers.tsv` file contains all flagged candidates with columns:
 
 ```
-taxonomy  accession  nn_outlier  isolation_score  kmer_div_zscore  genome_size_zscore  centroid_distance  anomaly_score  genome_length_bp  n_contigs  margin_to_threshold  flag_reason
+taxonomy  accession  category  nn_outlier  isolation_score  kmer_div_zscore  genome_size_zscore  centroid_distance  anomaly_score  genome_length_bp  n_contigs  margin_to_threshold  flag_reason  excluded
 ```
 
 All genomes still appear in `_derep_genomes.tsv` assigned to their nearest representative; contamination detection only affects selection eligibility, not assignment.

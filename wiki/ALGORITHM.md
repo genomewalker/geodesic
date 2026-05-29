@@ -34,7 +34,7 @@ For taxa with exactly 2 genomes, the full pipeline is skipped; see [n=2 fast pat
 
 ### One-permutation hashing
 
-For each genome, geodesic reads a pre-computed [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signature from the genopack archive. The archive stores OPH signatures at multiple k-mer sizes (e.g. $k \in \{16, 21, 31\}$, $m = 10{,}000$ bins per size). Auto-calibration (`--geodesic-auto-calibrate`, on by default) selects the appropriate k and m from a small sample of genome pairs; the default tier for 95–99% ANI taxa uses $m = 10{,}000$ and $k = 21$. The calibration first-pass sketch uses $m = 4{,}096$.
+For each genome, geodesic reads a pre-computed [One-Permutation Hash (OPH)](https://papers.nips.cc/paper/2012/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html) signature from the genopack archive. The archive stores OPH signatures at multiple k-mer sizes (e.g. $k \in \{16, 21, 31\}$, $m = 10{,}000$ bins per size). Auto-calibration selects the appropriate k and m from a small sample of genome pairs; the default tier for 95–99% ANI taxa uses $m = 10{,}000$ and $k = 21$. The calibration first-pass sketch uses $m = 4{,}096$.
 
 **Canonical k-mer selection.** For each position in the genome, both the forward k-mer and its reverse complement are encoded as a 64-bit integer (2 bits per base, A=0/C=1/G=2/T=3). The canonical k-mer is the lexicographic minimum of the two encodings, selected by a branchless comparison:
 
@@ -54,7 +54,7 @@ h = wymix(canonical XOR (seed + P0),  canonical XOR P1)
     wymix(a, b) = lo64(a*b) XOR hi64(a*b)
 ```
 
-sig1 uses seed = `--seed` (default 42), sig2 uses seed = 1337. Both the bin index and the per-bin value are derived from this one hash:
+sig1 uses seed = `--seed` (default 42), sig2 uses seed = `--seed`+1 (default 43). Both the bin index and the per-bin value are derived from this one hash:
 
 $$
 t = \left\lfloor \frac{h \cdot m}{2^{64}} \right\rfloor, \qquad \mathrm{sig}[t] = \min\!\left(\mathrm{sig}[t],\ \mathrm{hi32}(h)\right)
@@ -91,7 +91,7 @@ where $m_{\mathrm{real}}$ is the number of bins that are real in at least one of
 
 ### Dual OPH sketches
 
-Two independent OPH signatures (sig1, sig2) are read per genome; sig1 was computed with seed `--seed` (default 42), sig2 always with seed 1337. The anchor Gram matrix uses dual-sketch averaged Jaccard (see Phase 2):
+Two independent OPH signatures (sig1, sig2) are read per genome; sig1 was computed with seed `--seed` (default 42), sig2 computed with seed `--seed`+1 (default 43). The anchor Gram matrix uses dual-sketch averaged Jaccard (see Phase 2):
 
 $$
 K[i,j] = \frac{J_1(\mathrm{anchor}_i, \mathrm{anchor}_j) + J_2(\mathrm{anchor}_i, \mathrm{anchor}_j)}{2}
@@ -164,26 +164,18 @@ $$
 K_{\mathrm{raw}}[i,j] = \frac{J_1(\mathrm{anchor}_i, \mathrm{anchor}_j) + J_2(\mathrm{anchor}_i, \mathrm{anchor}_j)}{2}
 $$
 
-**Bin co-occupancy blend for sparse anchors.** When either anchor has $f_i < 0.2$, a bin co-occupancy statistic is blended in to correct Jaccard underestimation:
-
-$$
-C_{\mathrm{occ}}(A \to B) = \frac{|\mathrm{mask}_A \cap \mathrm{mask}_B|}{n_{\mathrm{real},A}}
-$$
-
-where $|\mathrm{mask}_A \cap \mathrm{mask}_B|$ is the number of bins occupied in both $A$ and $B$. The blended kernel:
-
-$$
-K_{\mathrm{blend}}[i,j] = (1-\alpha)\, K_{\mathrm{raw}}[i,j] + \alpha \cdot \max\!\left(C_{\mathrm{occ}}(i \to j),\ C_{\mathrm{occ}}(j \to i)\right)
-$$
-
-with $\alpha_i = \max(0,\ 1 - f_i/0.2)$ (linear ramp from 1 at $f_i=0$ to 0 at $f_i=0.2$), $\alpha = \max(\alpha_i, \alpha_j)$.
+The raw Gram matrix $K_{\mathrm{raw}}$ uses pure Jaccard for all anchor pairs.
+Sparse-anchor containment blending was considered but removed: the blended kernel
+$(1-\alpha)J + \alpha\,C_{\mathrm{occ}}$ is not positive semi-definite, which breaks
+the spectral decomposition required in the next step. Containment corrections are
+applied at Phase 8 (certification) where no PSD constraint is needed.
 
 ### Gram matrix regularisation
 
 **Symmetric Laplacian normalisation** removes hub-anchor bias:
 
 $$
-K_{\mathrm{norm}}[i,j] = \frac{K_{\mathrm{blend}}[i,j]}{\sqrt{d_i \cdot d_j}}, \qquad d_i = \sum_j K_{\mathrm{blend}}[i,j]
+K_{\mathrm{norm}}[i,j] = \frac{K_{\mathrm{raw}}[i,j]}{\sqrt{d_i \cdot d_j}}, \qquad d_i = \sum_j K_{\mathrm{raw}}[i,j]
 $$
 
 equivalently $K_{\mathrm{norm}} = D^{-1/2} K_{\mathrm{blend}} D^{-1/2}$. After this step, dot products approximate a normalised-graph similarity, not raw Jaccard. Phase 7 corrects borderline decisions back to raw sketch Jaccard space.
@@ -397,7 +389,7 @@ $J_{\mathrm{cert}}$ is used for the symmetric Jaccard arm (equal-size genomes). 
 **Two-arm `oph_certified` function.** For a pair $(G_i, G_j)$, the function returns `true` if either arm passes:
 
 - **Arm 1 (symmetric Jaccard):** $J_{\mathrm{dual}}(G_i, G_j) \geq J_{\mathrm{cert}}$.
-- **Arm 2 (directional containment):** triggered when $n_{\mathrm{real,small}} / n_{\mathrm{real,large}} < 0.5$ (small genome has fewer than half the occupied OPH bins of the larger). Computes the containment fraction $C = n_{\mathrm{match}} / n_{\mathrm{real,small}}$ and requires $C \geq q_{\mathrm{cert}}$.
+- **Arm 2 (directional containment):** triggered when $n_{\mathrm{real,small}} / n_{\mathrm{real,large}} \leq 0.85$ (one genome occupies ≤85% of the OPH bins of the other — catches most MAG vs. complete-genome pairs). Computes the containment fraction $C = n_{\mathrm{match}} / n_{\mathrm{real,small}}$ and requires $C \geq q_{\mathrm{cert}}$.
 
 **Algorithm.** For each non-representative genome $G_i$ (excluding contamination-excluded genomes):
 
