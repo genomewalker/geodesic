@@ -150,7 +150,7 @@ Open-addressed hash table for O(1) `acc_to_ord`. Geodesic emits this when `cfg.e
 ```c
 uint32_t magic = 'GARM';
 uint32_t n_buckets;       // power of two, load factor target 0.7
-uint32_t hash_seed;       // reserved; currently always 0 (XXH3_128bits is called unseeded)
+uint32_t hash_seed;       // reserved; currently always 0 (XXH3_64bits is called unseeded)
 uint32_t pad;
 struct GpdArmpEntry {
     uint64_t hash;        // high 64 bits of XXH3_128bits(accession)

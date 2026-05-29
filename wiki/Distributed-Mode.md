@@ -34,7 +34,7 @@ geodesic scatter -g genomes.txt --pack mydb.gpk -n 4 -o dist/ --rank g --threads
 | `--pack` | -- | genopack archive path (passed through to worker commands) |
 | `--rank` | `g` | Taxonomy rank for grouping (`g`=genus, `f`=family, `s`=species) |
 | `--threads` | 4 | Threads per worker (baked into the generated `run.sh`) |
-| `--tmp-dir` | scatter output dir | Temporary directory for workers |
+| `--tmp-dir` | `<scatter-dir>/tmp` | Temporary directory for workers |
 
 Outputs:
 - `part_N.tsv` -- per-partition genome lists

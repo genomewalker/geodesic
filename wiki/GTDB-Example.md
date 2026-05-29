@@ -89,7 +89,7 @@ Key flags:
 | `-z 6` | zstd level 6 | Good compression/speed trade-off for genome FASTA |
 | `--sketch-kmers 16,21` | two k-mer sizes | k=16 for broad genus-level ANI, k=21 for species-level; geodesic auto-picks per taxon |
 | `--taxon-rank g` | genus | Groups genomes into per-genus shards — critical for NFS read locality during derep |
-| `--no-cidx` | (omit for GTDB) | CIDX is useful for contig lookup; skip with `--no-cidx` if not needed to save ~20 min |
+| `--cidx` | (omit for GTDB) | Opt in to building the CIDX contig index; off by default. Adds ~20 min for GTDB scale. |
 
 For a full GTDB r232 (~5.2 M genomes) this takes roughly **4–6 hours** on a 48-thread
 NFS node at ~250 MB/s. The resulting archive is ~1.5–2 TB compressed.
@@ -201,6 +201,7 @@ The CheckM2 TSV should have columns `accession`, `completeness`, `contamination`
 | `gtdb_r232_diversity_stats.tsv` | Per-taxon coverage and diversity metrics |
 | `gtdb_r232_stats.tsv` | Per-taxon pipeline stats (MST edges, ANI threshold, outlier counts) |
 | `gtdb_r232_outliers.tsv` | Contamination candidates flagged by the MAD-based estimator |
+| `gtdb_r232_failed.tsv` | Genomes that failed sketching or embedding (`accession`, `taxonomy`, `reason`) |
 | `gtdb_r232.gpd` | Geodesic Derep Archive — machine-readable rep set consumed by `genopack::DerepView` |
 | `gtdb_r232.lock` | JSON provenance file; input to `geodesic update` for incremental re-runs |
 

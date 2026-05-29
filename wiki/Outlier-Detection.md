@@ -16,7 +16,7 @@ Six per-genome signals are computed and stored in the `outlier_candidates` table
 
 | Signal | Description |
 |--------|-------------|
-| `isolation_score` | Mean angular distance to the $k=10$ nearest neighbours in embedding space (high = isolated = anomalous) |
+| `isolation_score` | Mean angular distance to the $k$ nearest neighbours ($k = \max(10,\, \min(20,\, \lfloor\log_2 n\rfloor))$ where $n$ is taxon size; high = isolated = anomalous) |
 | `centroid_distance` | Angular distance from the species centroid (mean embedding vector, renormalised to unit length) |
 | `genome_size_zscore` | Z-score of genome size relative to the taxon distribution |
 | `kmer_div_zscore` | K-mer diversity z-score: occupied OPH bins per kbp relative to the taxon mean. Informational; see below. |
@@ -73,7 +73,7 @@ $$
 \text{fitness}_i = d_i \cdot \sqrt{\frac{L_i}{L_m}}
 $$
 
-where $d_i$ is the angular-distance proxy to the nearest current representative and $L_m$ is the taxon median genome length. When two candidates have fitness values within $10^{-3}$ of each other, the one with higher $q$ is selected. This preserves the pure diversity objective (maximise spread) while preferring higher-quality assemblies among equidistant candidates.
+where $d_i$ is the angular-distance proxy to the nearest current representative and $L_m$ is the taxon median genome length. When two candidates have fitness values within $10^{-5}$ of each other, the one with higher $q$ is selected. This preserves the pure diversity objective (maximise spread) while preferring higher-quality assemblies among equidistant candidates.
 
 A genome with 10% CheckM2 contamination loses 50 quality points and is consistently deprioritised as a tie-break loser. Heavily contaminated genomes that are also isolation-score outliers are excluded entirely via the `nn_outlier` flag. The embedding-based `nn_outlier` flag is the fallback when CheckM2 scores are unavailable.
 
@@ -92,7 +92,7 @@ Pass GUNC output with `--gunc-scores gunc_output.tsv`. Genomes with `pass.GUNC =
 The `_outliers.tsv` file contains all flagged candidates with columns:
 
 ```
-taxonomy  accession  nn_outlier  isolation_score  kmer_div_zscore  genome_size_zscore  centroid_distance  anomaly_score  genome_length_bp  n_contigs  margin_to_threshold  flag_reason
+taxonomy  accession  category  nn_outlier  isolation_score  kmer_div_zscore  genome_size_zscore  centroid_distance  anomaly_score  genome_length_bp  n_contigs  margin_to_threshold  flag_reason  excluded
 ```
 
 All genomes still appear in `_derep_genomes.tsv` assigned to their nearest representative; outlier detection only affects selection eligibility, not assignment.
