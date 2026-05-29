@@ -227,10 +227,10 @@ Beyond $d=256$, accuracy improves by $< 0.1\%$ while cost doubles. The embedding
 
 ## Phase 3: HNSW index
 
-A [Hierarchical Navigable Small World (HNSW)](https://arxiv.org/abs/1603.09320) index (Malkov & Yashunin 2018) is built over all $n$ unit-sphere embeddings using inner product as the metric. HNSW is a graph-based approximate nearest-neighbour structure that supports sub-linear query time by navigating a layered proximity graph from coarse to fine resolution. Default parameters: $M = 48$, ef\_construction $= 400$, ef\_search $= 50$.
+A [Hierarchical Navigable Small World (HNSW)](https://arxiv.org/abs/1603.09320) index (Malkov & Yashunin 2018) is built over all $n$ unit-sphere embeddings using inner product as the metric. HNSW is a graph-based approximate nearest-neighbour structure that supports sub-linear query time by navigating a layered proximity graph from coarse to fine resolution. Default parameters: $M = 48$, ef\_construction $= 400$, ef\_search $= 200$ (raised dynamically during K_cap retries).
 
 The index serves two purposes:
-- Computing isolation scores (Phase 4): finding the $k_{\mathrm{iso}}=10$ nearest neighbours of each genome; collecting up to $K_{\mathrm{cap}}$ edges per genome for the adaptive MST threshold derivation
+- Computing isolation scores (Phase 4): finding the $k_{\mathrm{iso}} = \max(10, \min(20, \lfloor\log_2 n\rfloor))$ nearest neighbours of each genome; collecting up to $K_{\mathrm{cap}}$ edges per genome for the adaptive MST threshold derivation
 - Finding too-close representative pairs for merging (Phase 6)
 
 For $n \leq 50$ genomes, HNSW overhead exceeds $O(n^2)$ brute-force dot products; the brute-force path is used instead.
@@ -243,7 +243,7 @@ For $n \leq 50$ genomes, HNSW overhead exceeds $O(n^2)$ brute-force dot products
 
 ### Isolation score
 
-For each genome $G_i$, the isolation score is the mean angular distance to its $k_{\mathrm{iso}} = 10$ nearest neighbours:
+For each genome $G_i$, the isolation score is the mean angular distance to its $k_{\mathrm{iso}} = \max(10, \min(20, \lfloor\log_2 n\rfloor))$ nearest neighbours ($k_{\mathrm{iso}} \in [10, 20]$, scales with taxon size):
 
 $$
 \mathrm{isolation}(G_i) = \frac{1}{k_{\mathrm{iso}}} \sum_{j \in k_{\mathrm{iso}}\mathrm{NN}(G_i)} \frac{\arccos(\mathbf{e}_i \cdot \mathbf{e}_j)}{\pi}

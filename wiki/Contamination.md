@@ -12,7 +12,7 @@ A contaminated or chimeric assembly contains sequence from multiple lineages and
 
 ## Detection signals
 
-Six per-genome signals are computed and stored in the `contamination_candidates` table:
+Six per-genome signals are computed and stored in the outlier candidates list:
 
 | Signal | Description |
 |--------|-------------|
@@ -27,13 +27,13 @@ Six per-genome signals are computed and stored in the `contamination_candidates`
 
 ## Flagging criterion
 
-A genome is excluded from representative selection when `nn_outlier = TRUE`. The threshold uses a MAD-based (Median Absolute Deviation) robust estimator with a 50% breakdown point — up to half the taxon's genomes can be contaminated without biasing the estimator:
+A genome is excluded from representative selection when `nn_outlier = TRUE`. The threshold is `max(per_component_thr, global_thr)` — both computed with the MAD estimator (50% breakdown point):
 
 $$
 \text{threshold} = \tilde{\mu} + z \cdot 1.4826 \cdot \text{MAD}, \qquad \text{MAD} = \text{median}(|x_i - \tilde{\mu}|)
 $$
 
-where $\tilde{\mu}$ is the median isolation score and $z$ is configurable via `--z-threshold` (default 2.0). The 1.4826 factor makes MAD a consistent estimator of $\sigma$ under a Gaussian null. Ordinary mean and SD are not used because contaminated genomes form a long right tail; including them inflates $\sigma$ and raises the threshold, masking the very outliers we want to detect.
+The **per-component** threshold uses only genomes in the same MST component; the **global** threshold uses all non-excluded genomes. Taking the max means a genome must exceed both its local and global distributions. $z$ is configurable via `--z-threshold` (default 2.0). When MAD=0 (all isolation scores identical in a component), the code falls back to IQR. Ordinary mean/SD are not used because contaminated genomes form a long right tail.
 
 Genomes with `isolation_score > threshold` have anomalously large mean distance to their nearest neighbours in embedding space, the primary signal of taxonomic misassignment or cross-species contamination. Their fitness is set to zero: they cannot be selected as representatives but remain in the output assigned to their nearest representative.
 

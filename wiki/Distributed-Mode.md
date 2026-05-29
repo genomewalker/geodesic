@@ -7,9 +7,9 @@ geodesic supports distributed execution across multiple nodes via a scatter/gath
 ## Architecture
 
 ```
-genomes.tsv ──→ scatter ──→ part_0.tsv ──→ worker 0 ──→ shard_0.grd
-                           part_1.tsv ──→ worker 1 ──→ shard_1.grd
-                           part_2.tsv ──→ worker 2 ──→ shard_2.grd
+genomes.tsv ──→ scatter ──→ part_0.txt ──→ worker 0 ──→ shard_0.grd
+                           part_1.txt ──→ worker 1 ──→ shard_1.grd
+                           part_2.txt ──→ worker 2 ──→ shard_2.grd
                            ...
                                         gather ──→ merged.grd + merged TSVs
 ```
@@ -37,7 +37,7 @@ geodesic scatter -g genomes.txt --pack mydb.gpk -n 4 -o dist/ --rank g --threads
 | `--tmp-dir` | `<scatter-dir>/tmp` | Temporary directory for workers |
 
 Outputs:
-- `part_N.tsv` -- per-partition genome lists
+- `part_N.txt` -- per-partition genome lists
 - `run.sh` -- executable script with one `geodesic derep` command per partition
 - `manifest.tsv` -- machine-readable partition metadata
 
