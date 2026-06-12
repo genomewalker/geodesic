@@ -50,7 +50,7 @@ geodesic gather -d dist/ -o dist/merged.grd -p merged
 2. Nyström extension onto the unit sphere; symmetric Laplacian + Tikhonov regularisation.
 3. HNSW index on the sphere.
 4. Isolation scores from k_iso = max(10, min(20, ⌊log₂n⌋)) neighbours; θ = longest MST edge; outliers by MAD Z-score.
-5. Greedy FPS θ-cover; fitness = d·√(L/L_m); stops when all genomes are covered.
+5. Greedy FPS θ-cover; fitness = d·√(L/L_m).
 6. Union-Find coalescence within d_min; borderline non-reps rechecked by OPH Jaccard.
 7. Full coverage pass: each non-rep vs its rep by Jaccard and containment.
 
