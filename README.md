@@ -1,6 +1,6 @@
 # geodesic
 
-θ-cover dereplification of genomes from a genopack archive. Every input genome ends up within ANI threshold of at least one representative.
+θ-cover dereplication on a genopack archive. Every genome is within θ of at least one rep.
 
 [Algorithm](https://genomewalker.github.io/geodesic/) · [Wiki](https://github.com/genomewalker/geodesic/wiki)
 
@@ -21,7 +21,7 @@ geodesic ani   --ql queries.txt  --pack mydb.gpk -t 16 -o ani.tsv
 geodesic update -g new.txt --lock run1.lock --pack mydb.gpk -t 16
 ```
 
-Key flags: `--ani-threshold` (default 95.0), `--seed` (default 42, deterministic), `--threads`, `--tmp-dir`, `--checkm2`, `--gunc-scores`.
+Key flags: `--ani-threshold` (default 95.0), `--seed` (default 42), `--threads`, `--tmp-dir`, `--checkm2`, `--gunc-scores`.
 
 `-g` accepts one accession per line (`#` comments ignored). `--pack` is a `.gpk` file or directory of `part_*.gpk` parts.
 
