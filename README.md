@@ -31,7 +31,7 @@ geodesic update -g new.txt --lock run1.lock --pack mydb.gpk -t 16
 |------|----------|
 | `<prefix>_derep_genomes.tsv` | accession, taxon, rep, cluster_rep, nn_dist, sketch_fill |
 | `<prefix>_results.tsv` | per-taxon: method, n_genomes, n_derep, communities |
-| `<prefix>_stats.tsv` | per-taxon pipeline counts and ANI used |
+| `<prefix>_stats.tsv` | per-taxon: preflight/quality counts, θ used |
 | `<prefix>_failed.tsv` | genomes that failed sketching or embedding |
 
 `--grd-output`, `--geodf-output`, `--lock-output`: required for distributed/incremental runs.
@@ -52,7 +52,7 @@ geodesic gather -d dist/ -o dist/merged.grd -p merged
 4. Isolation scores from k_iso = max(10, min(20, ⌊log₂n⌋)) neighbours; θ = longest MST edge; outliers by MAD Z-score.
 5. Greedy FPS θ-cover; fitness = d·√(L/L_m).
 6. Union-Find coalescence within d_min; borderline non-reps rechecked by OPH Jaccard.
-7. Full coverage pass: each non-rep vs its rep by Jaccard and containment.
+7. Each non-rep vs its rep by Jaccard and containment.
 
 ANI = (2J/(1+J))^(1/k) × 100.
 
