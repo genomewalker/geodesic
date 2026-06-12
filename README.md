@@ -32,9 +32,9 @@ geodesic update -g new.txt --lock run1.lock --pack mydb.gpk -t 16
 | `<prefix>_derep_genomes.tsv` | accession, taxon, rep, cluster_rep, nn_dist, sketch_fill |
 | `<prefix>_results.tsv` | per-taxon: method, n_genomes, n_derep, communities |
 | `<prefix>_stats.tsv` | per-taxon: preflight/quality counts, θ used |
-| `<prefix>_failed.tsv` | genomes that failed sketching or embedding |
+| `<prefix>_failed.tsv` | sketch/embed failures with reason |
 
-`--grd-output`, `--geodf-output`, `--lock-output`: required for distributed/incremental runs.
+`--grd-output`, `--geodf-output`, `--lock-output` needed for distributed/incremental runs.
 
 ## Distributed
 
