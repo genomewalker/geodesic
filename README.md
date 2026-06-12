@@ -21,20 +21,20 @@ geodesic ani   --ql queries.txt  --pack mydb.gpk -t 16 -o ani.tsv
 geodesic update -g new.txt --lock run1.lock --pack mydb.gpk -t 16
 ```
 
-Key flags: `--ani-threshold` (default 95.0), `--seed` (default 42), `--threads`, `--tmp-dir`, `--checkm2`, `--gunc-scores`.
+`--ani-threshold` (default 95.0), `--seed` (default 42), `--threads`, `--tmp-dir`, `--checkm2`, `--gunc-scores`.
 
-`-g` accepts one accession per line (`#` comments ignored). `--pack` is a `.gpk` file or directory of `part_*.gpk` parts.
+`-g`: one accession per line, `#` comments ignored. `--pack`: `.gpk` file or directory of `part_*.gpk` parts.
 
-### Output files
+### Output
 
 | File | Contents |
 |------|----------|
-| `<prefix>_derep_genomes.tsv` | per-genome: accession, taxon, rep, cluster_rep, nn_dist, sketch_fill |
+| `<prefix>_derep_genomes.tsv` | accession, taxon, rep, cluster_rep, nn_dist, sketch_fill |
 | `<prefix>_results.tsv` | per-taxon: method, n_genomes, n_derep, communities |
 | `<prefix>_stats.tsv` | per-taxon pipeline counts and ANI used |
 | `<prefix>_failed.tsv` | genomes that failed sketching or embedding |
 
-Pass `--grd-output` / `--geodf-output` / `--lock-output` for distributed or incremental runs.
+`--grd-output`, `--geodf-output`, `--lock-output`: required for distributed/incremental runs.
 
 ## Distributed
 
