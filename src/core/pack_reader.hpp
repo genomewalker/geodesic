@@ -1,9 +1,12 @@
 #pragma once
 #include <genopack/archive.hpp>
 #include <algorithm>
+#include <cmath>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace derep {
@@ -77,11 +80,86 @@ struct IPackReader {
     virtual uint16_t archive_idx_for_accession(std::string_view acc) const = 0;
     virtual size_t n_archives() const = 0;
 
+    // GSTX section: precomputed per-genus consensus + p90 + TNF centroid.
+    virtual bool has_gstx() const { return false; }
+    virtual const genopack::GstxEntry* gstx_for_genus(std::string_view /*genus*/) const { return nullptr; }
+
+    // QUAL section: precomputed per-genome quality scores (completeness, contamination, consistency).
+    virtual bool has_qual() const { return false; }
+    virtual void scan_qual(const std::function<void(const genopack::QualRecord&)>& /*cb*/) const {}
+
+    // Per-accession quality score: completeness_post_decontam*100 - 5*contamination_leakage*100.
+    // Built once from scan_qual + scan_genome_accessions; thread-safe.
+    std::optional<double> qual_score_for_accession(std::string_view acc) const {
+        build_qual_cache_();
+        auto it = qual_score_cache_.find(std::string(acc));
+        return it != qual_score_cache_.end() ? std::optional{it->second} : std::nullopt;
+    }
+
+    // Returns the stored quality tier (LQ/MQ/HQ) or empty if not available.
+    // Requires a pack written by genopack check >= the version that stores quality_tier_u8.
+    // Old packs return empty (QTIER_NOT_SET == 0).
+    std::optional<uint8_t> quality_tier_for_accession(std::string_view acc) const {
+        build_qual_cache_();
+        auto it = qual_tier_cache_.find(std::string(acc));
+        return it != qual_tier_cache_.end() ? std::optional{it->second} : std::nullopt;
+    }
+
+    bool is_lq(std::string_view acc) const {
+        auto t = quality_tier_for_accession(acc);
+        return t && *t == genopack::QualRecord::QTIER_LQ;
+    }
+
+private:
+    void build_qual_cache_() const {
+        std::call_once(qual_cache_once_, [this] {
+            if (!has_qual()) return;
+            std::unordered_map<genopack::GenomeId, double>  id_scores;
+            std::unordered_map<genopack::GenomeId, uint8_t> id_tiers;
+            scan_qual([&](const genopack::QualRecord& r) {
+                float c = !std::isnan(r.completeness_post_decontam)
+                          ? r.completeness_post_decontam : r.completeness_cluster_relative;
+                id_scores[r.genome_id] = static_cast<double>(c) * 100.0
+                    - 5.0 * static_cast<double>(r.contamination_leakage) * 100.0;
+                id_tiers[r.genome_id]  = r.quality_tier_u8;
+            });
+            scan_genome_accessions([&](std::string_view a, genopack::GenomeId gid) {
+                auto is = id_scores.find(gid);
+                if (is != id_scores.end()) qual_score_cache_[std::string(a)] = is->second;
+                auto it = id_tiers.find(gid);
+                if (it != id_tiers.end()) qual_tier_cache_[std::string(a)]  = it->second;
+            });
+        });
+    }
+
+    mutable std::once_flag                          qual_cache_once_;
+    mutable std::unordered_map<std::string, double> qual_score_cache_;
+    mutable std::unordered_map<std::string, uint8_t> qual_tier_cache_;
+
+public:
     // Taxonomy access (TAXN section).
     virtual std::string taxonomy_for_accession(std::string_view acc) const = 0;
     virtual void scan_taxonomy(
         const std::function<void(std::string_view acc,
                                  std::string_view taxonomy)>& cb) const = 0;
+
+    // Combined taxonomy + genome-id scan in one pass.
+    // MultiPackReader overrides this with a .meta.tsv fast path (bypasses TAXN
+    // decompression).  Default: builds acc→gid from scan_genome_accessions then
+    // calls scan_taxonomy, so callers do not need to do two separate passes.
+    virtual void scan_taxonomy_with_id(
+        const std::function<void(std::string_view acc,
+                                 std::string_view taxonomy,
+                                 genopack::GenomeId id)>& cb) const {
+        std::unordered_map<std::string, genopack::GenomeId> acc_to_gid;
+        scan_genome_accessions([&](std::string_view acc, genopack::GenomeId gid) {
+            acc_to_gid.emplace(acc, gid);
+        });
+        scan_taxonomy([&](std::string_view acc, std::string_view tax) {
+            auto it = acc_to_gid.find(std::string(acc));
+            cb(acc, tax, it != acc_to_gid.end() ? it->second : 0);
+        });
+    }
 };
 
 // Thin wrapper over a single ArchiveReader.
@@ -135,19 +213,27 @@ public:
         uint32_t k, uint32_t sz,
         const std::function<void(size_t idx,
                                  const genopack::SketchResult& sk)>& cb) const override {
-        // Single archive: no inter-archive thrashing. Load SKCH once, scan all.
+        // Resolve accessions → (genome_id, original_idx), sort by genome_id so
+        // sketch_for_ids decompresses each SKCH frame at most once.
+        std::vector<std::pair<genopack::GenomeId, size_t>> id_idx;
+        id_idx.reserve(accessions.size());
         for (size_t i = 0; i < accessions.size(); ++i) {
             auto meta = reader_->genome_meta_by_accession(accessions[i]);
-            if (!meta) continue;
-            std::optional<genopack::SketchResult> sk;
-            if (k > 0 && sz > 0) {
-                sk = reader_->sketch_for(meta->genome_id, k, sz);
-                if (!sk) sk = reader_->sketch_for(meta->genome_id);
-            } else {
-                sk = reader_->sketch_for(meta->genome_id);
-            }
-            if (sk) cb(i, *sk);
+            if (meta) id_idx.emplace_back(meta->genome_id, i);
         }
+        std::sort(id_idx.begin(), id_idx.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+
+        std::vector<genopack::GenomeId> sorted_ids;
+        sorted_ids.reserve(id_idx.size());
+        for (const auto& [gid, _] : id_idx) sorted_ids.push_back(gid);
+
+        size_t pos = 0;
+        reader_->sketch_for_ids(sorted_ids, k, sz,
+            [&](size_t batch_idx, const genopack::SketchResult& sk) {
+                cb(id_idx[batch_idx].second, sk);
+            });
+        (void)pos;
     }
 
     void release_sketches() const override { reader_->release_sketches(); }
@@ -158,6 +244,16 @@ public:
     }
     const float* kmer_profile_by_accession(std::string_view acc) const override {
         return reader_->kmer_profile_by_accession(acc);
+    }
+
+    bool has_gstx() const override { return reader_->has_gstx(); }
+    const genopack::GstxEntry* gstx_for_genus(std::string_view genus) const override {
+        return reader_->gstx_for_genus(genus);
+    }
+
+    bool has_qual() const override { return reader_->has_qual(); }
+    void scan_qual(const std::function<void(const genopack::QualRecord&)>& cb) const override {
+        reader_->scan_qual(cb);
     }
 
     uint16_t archive_idx_for_accession(std::string_view /*acc*/) const override { return 0; }

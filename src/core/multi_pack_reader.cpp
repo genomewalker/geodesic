@@ -1,9 +1,12 @@
 #include "multi_pack_reader.hpp"
 #include <algorithm>
+#include <charconv>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <numeric>
 #include <stdexcept>
+#include <string_view>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -38,32 +41,53 @@ MultiPackReader::open_dir(const fs::path& parts_dir) {
     // independent on disk, so open + scan_genome_accessions run concurrently.
     std::vector<std::vector<std::pair<std::string, uint16_t>>> per_arch_accs(n_arch);
 
+    // Capture the first per-shard open error instead of letting an exception
+    // escape the OpenMP region (which would call std::terminate). One bad shard
+    // must yield a catchable error naming the file, not a hard abort (P18).
+    std::mutex open_err_mu;
+    std::string open_err;
     #pragma omp parallel for schedule(dynamic, 1) num_threads(static_cast<int>(n_arch))
     for (size_t aidx = 0; aidx < n_arch; ++aidx) {
-        ArchiveEntry entry;
-        entry.reader = std::make_unique<genopack::ArchiveReader>();
-        entry.reader->open(gpk_paths[aidx]);
-        entry.path              = gpk_paths[aidx];
-        entry.has_sketches_flag = entry.reader->has_sketches();
+        try {
+            ArchiveEntry entry;
+            entry.reader = std::make_unique<genopack::ArchiveReader>();
+            entry.reader->open(gpk_paths[aidx]);
+            entry.path              = gpk_paths[aidx];
+            entry.has_sketches_flag = entry.reader->has_sketches();
 
-        const auto aidx16 = static_cast<uint16_t>(aidx);
-        auto& local = per_arch_accs[aidx];
-        entry.reader->scan_genome_accessions(
-            [&](std::string_view acc, genopack::GenomeId /*local_id*/) {
-                local.emplace_back(std::string(acc), aidx16);
-            });
+            const auto aidx16 = static_cast<uint16_t>(aidx);
+            auto& local = per_arch_accs[aidx];
+            entry.reader->scan_genome_accessions(
+                [&](std::string_view acc, genopack::GenomeId /*local_id*/) {
+                    local.emplace_back(std::string(acc), aidx16);
+                });
 
-        spdlog::debug("multi_pack: opened {} ({} genomes)",
-                      gpk_paths[aidx].string(), local.size());
-        mp->archives_[aidx] = std::move(entry);
+            spdlog::debug("multi_pack: opened {} ({} genomes)",
+                          gpk_paths[aidx].string(), local.size());
+            mp->archives_[aidx] = std::move(entry);
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lk(open_err_mu);
+            if (open_err.empty())
+                open_err = "multi_pack: failed to open " + gpk_paths[aidx].string()
+                         + ": " + e.what();
+        }
     }
+    if (!open_err.empty())
+        throw std::runtime_error(open_err);
 
     size_t total = 0;
     for (const auto& v : per_arch_accs) total += v.size();
     mp->acc_to_arch_.reserve(total);
+    size_t n_dup = 0;
     for (auto& v : per_arch_accs)
-        for (auto& kv : v)
-            mp->acc_to_arch_.emplace(std::move(kv.first), kv.second);
+        for (auto& kv : v) {
+            auto [it, inserted] = mp->acc_to_arch_.emplace(std::move(kv.first), kv.second);
+            (void)it;
+            if (!inserted) ++n_dup;
+        }
+    if (n_dup > 0)
+        spdlog::warn("multi_pack: {} duplicate accession(s) across archives — first "
+                     "occurrence wins; cross-archive results may be ambiguous (P25)", n_dup);
 
     spdlog::info("multi_pack: {} archives, {} genomes total",
                  mp->archives_.size(), mp->acc_to_arch_.size());
@@ -342,6 +366,50 @@ void MultiPackReader::scan_taxonomy(
     const std::function<void(std::string_view, std::string_view)>& cb) const {
     for (const auto& e : archives_)
         e.reader->scan_taxonomy(cb);
+}
+
+// Fast combined taxonomy+genome-id scan using per-part .meta.tsv files.
+// Falls back to the default two-pass (TAXN section) if any TSV is missing.
+// TSV format: accession\tgenome_id\ttaxonomy (header line skipped).
+// genome_id in the TSV is the local archive id; we encode the virtual id here.
+void MultiPackReader::scan_taxonomy_with_id(
+    const std::function<void(std::string_view, std::string_view,
+                             genopack::GenomeId)>& cb) const {
+    // Check all TSV files exist before committing to the fast path.
+    std::vector<fs::path> tsv_paths;
+    tsv_paths.reserve(archives_.size());
+    for (const auto& e : archives_) {
+        auto p = e.path;
+        p.replace_extension(".meta.tsv");
+        if (!fs::exists(p)) {
+            IPackReader::scan_taxonomy_with_id(cb);
+            return;
+        }
+        tsv_paths.push_back(std::move(p));
+    }
+
+    for (size_t aidx = 0; aidx < tsv_paths.size(); ++aidx) {
+        std::ifstream f(tsv_paths[aidx]);
+        if (!f) {
+            IPackReader::scan_taxonomy_with_id(cb);
+            return;
+        }
+        std::string line;
+        std::getline(f, line); // skip header
+        while (std::getline(f, line)) {
+            std::string_view sv(line);
+            auto t1 = sv.find('\t');
+            if (t1 == std::string_view::npos) continue;
+            auto t2 = sv.find('\t', t1 + 1);
+            if (t2 == std::string_view::npos) continue;
+            std::string_view acc  = sv.substr(0, t1);
+            std::string_view gid_sv = sv.substr(t1 + 1, t2 - t1 - 1);
+            std::string_view tax  = sv.substr(t2 + 1);
+            genopack::GenomeId local_id = 0;
+            std::from_chars(gid_sv.data(), gid_sv.data() + gid_sv.size(), local_id);
+            cb(acc, tax, encode_virt(static_cast<uint16_t>(aidx), local_id));
+        }
+    }
 }
 
 } // namespace derep

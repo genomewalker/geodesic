@@ -266,7 +266,31 @@ void process_taxa_parallel(
                             }
                         };
                     }
-                    auto result = process_taxon(taxa[ti], cfg, acquired,
+                    // Optionally filter LQ genomes before processing.
+                    Taxon lq_filtered;
+                    const Taxon* work_taxon = &taxa[ti];
+                    if (cfg.skip_lq && gpk_reader_ptr && gpk_reader_ptr->has_qual()) {
+                        lq_filtered.taxonomy = taxa[ti].taxonomy;
+                        lq_filtered.forced_representative = taxa[ti].forced_representative;
+                        for (const auto& g : taxa[ti].genomes)
+                            if (!gpk_reader_ptr->is_lq(g.accession))
+                                lq_filtered.genomes.push_back(g);
+                        work_taxon = &lq_filtered;
+                    }
+                    if (work_taxon->genomes.empty()) {
+                        TaxonResult r;
+                        r.taxonomy = taxa[ti].taxonomy;
+                        r.status   = TaxonStatus::SKIPPED;
+                        r.n_genomes        = 0;
+                        r.n_representatives = 0;
+                        r.method   = "skip_lq_all_excluded";
+                        std::lock_guard dlock(done_mutex);
+                        done_queue.push(std::move(r));
+                        done_cv.notify_one();
+                        budget_release(*held);
+                        return;
+                    }
+                    auto result = process_taxon(*work_taxon, cfg, acquired,
                                                gunc_scores_ptr,
                                                gpk_reader_ptr, run_state_ptr,
                                                grd_writer_ptr,

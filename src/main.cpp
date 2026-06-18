@@ -1,6 +1,7 @@
 #include "config.hpp"
 #include "distributed.hpp"
 #include "pipeline.hpp"
+#include "check/run_check.hpp"
 #include "run_ani.hpp"
 #include "validate_ani.hpp"
 #include <Eigen/Core>
@@ -35,6 +36,8 @@ int main(int argc, char** argv) {
             return derep::run_validate_ani(cfg);
         case derep::Command::Ani:
             return derep::run_ani(cfg);
+        case derep::Command::Check:
+            return derep::run_check(cfg);
         }
     } catch (const std::exception& e) {
         spdlog::critical("Fatal: {}", e.what());

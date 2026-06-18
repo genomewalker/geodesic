@@ -6,7 +6,7 @@
 
 namespace derep {
 
-enum class Command { Derep, Update, Scatter, Gather, ValidateAni, Ani };
+enum class Command { Derep, Update, Scatter, Gather, ValidateAni, Ani, Check };
 
 struct Config {
     Command command = Command::Derep;
@@ -76,6 +76,7 @@ struct Config {
     bool copy_reps = false;
     bool debug = false;
     bool keep_intermediates = false;
+    bool skip_lq = false;
 
     // Logging verbosity: 0=quiet, 1=normal (default), 2=verbose, 3=debug
     int verbosity = 1;
@@ -91,6 +92,10 @@ struct Config {
     int validate_pairs = 500;
     std::filesystem::path validate_output;
     std::string genopack_bin;
+
+    // check (geodesic check — quality assessment without CheckM2)
+    int   check_min_genus_size       = 10;
+    float check_leakage_threshold    = 0.10f;
 
     // ani (geodesic ani — skani-style in-memory all-pairs ANI)
     std::filesystem::path ani_query_file;   // --ql

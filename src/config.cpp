@@ -111,6 +111,8 @@ Config parse_args(int argc, char** argv) {
         "Quiet output (only errors and summary)");
     derep->add_flag("--debug", cfg.debug, "Enable debug logging (sets verbosity=3)");
     derep->add_flag("--keep-intermediates", cfg.keep_intermediates, "Keep intermediate files");
+    derep->add_flag("--skip-lq", cfg.skip_lq,
+        "Exclude LQ genomes (requires pack with genopack check quality_tier_u8)");
 
     // ── update subcommand ───────────────────────────────────────────────────
     auto* update_cmd = app.add_subcommand("update",
@@ -251,6 +253,21 @@ Config parse_args(int argc, char** argv) {
     ani_cmd->add_option("-c,--compression", cfg.ani_c,
         "Compression factor: keep k-mer if hash % c == 0 (matches skani -c)")->default_val(125);
 
+    // ── check subcommand ──────────────────────────────────────────────────
+    auto* check_cmd = app.add_subcommand("check",
+        "Report quality from archive QUAL section (surfaces genopack check output)");
+
+    check_cmd->add_option("--pack", cfg.pack_dir,
+        "genopack archive (.gpk or directory of part_*.gpk)")->required();
+    check_cmd->add_option("-o,--output", cfg.validate_output,
+        "Output TSV path (default: stdout)")->default_val("");
+    check_cmd->add_option("--min-genus-size", cfg.check_min_genus_size,
+        "Skip GSTX-based completeness for genera smaller than this")->default_val(10);
+    check_cmd->add_option("--leakage-threshold", cfg.check_leakage_threshold,
+        "Flag genomes with contamination_leakage above this fraction")->default_val(0.10f);
+    check_cmd->add_option("-t,--threads", cfg.threads,
+        "Threads (unused currently, reserved)")->default_val(1);
+
     // ── parse ───────────────────────────────────────────────────────────────
     try {
         app.parse(argc, argv);
@@ -272,6 +289,8 @@ Config parse_args(int argc, char** argv) {
         cfg.command = Command::ValidateAni;
     } else if (ani_cmd->parsed()) {
         cfg.command = Command::Ani;
+    } else if (check_cmd->parsed()) {
+        cfg.command = Command::Check;
     } else {
         cfg.command = Command::Derep;
     }

@@ -1,6 +1,7 @@
 #pragma once
 #include "pack_reader.hpp"
 #include <algorithm>
+#include <cassert>
 #include <filesystem>
 #include <list>
 #include <memory>
@@ -111,6 +112,32 @@ public:
     std::string taxonomy_for_accession(std::string_view acc) const override;
     void scan_taxonomy(
         const std::function<void(std::string_view, std::string_view)>& cb) const override;
+    void scan_taxonomy_with_id(
+        const std::function<void(std::string_view, std::string_view,
+                                 genopack::GenomeId)>& cb) const override;
+
+    bool has_qual() const override {
+        for (const auto& a : archives_)
+            if (a.reader->has_qual()) return true;
+        return false;
+    }
+    void scan_qual(const std::function<void(const genopack::QualRecord&)>& cb) const override {
+        for (const auto& a : archives_)
+            a.reader->scan_qual(cb);
+    }
+
+    bool has_gstx() const override {
+        for (const auto& a : archives_)
+            if (a.reader->has_gstx()) return true;
+        return false;
+    }
+    const genopack::GstxEntry* gstx_for_genus(std::string_view genus) const override {
+        for (const auto& a : archives_) {
+            auto* e = a.reader->gstx_for_genus(genus);
+            if (e) return e;
+        }
+        return nullptr;
+    }
 
 private:
     struct ArchiveEntry {
@@ -143,6 +170,11 @@ private:
     void fadvise_dontneed_(const std::filesystem::path& p) const noexcept;
 
     static genopack::GenomeId encode_virt(uint16_t aidx, genopack::GenomeId local) noexcept {
+        // Pack the 16-bit archive index into the high bits and the 48-bit local
+        // genome id into the low bits. Assert the local id fits in 48 bits so it
+        // can never silently truncate and collide into another archive's range (P24).
+        assert((local & 0xFFFF'0000'0000'0000ull) == 0 &&
+               "local genome id exceeds 48 bits — virtual-id packing would truncate");
         return (static_cast<genopack::GenomeId>(aidx) << 48)
                | (local & 0x0000'FFFF'FFFF'FFFFull);
     }

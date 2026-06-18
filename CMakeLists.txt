@@ -154,7 +154,8 @@ add_executable(geodesic
     src/core/geodesic/geodesic.cpp
     src/parallel/taxon_processor.cpp
     src/validate_ani.cpp
-    src/core/skani.cpp
+
+    src/check/run_check.cpp
     src/run_ani.cpp
     src/state/run_state.cpp
     src/derep/derep_archive.cpp

@@ -21,11 +21,20 @@ namespace derep {
 namespace {
 
 // Build quality_score map from the taxon's genomes, keyed by accession.
-std::unordered_map<std::string, double> build_quality_map(const Taxon& taxon) {
+// If gpk_reader has QUAL section data, it overrides the TSV-derived score.
+std::unordered_map<std::string, double> build_quality_map(
+    const Taxon& taxon, IPackReader* gpk_reader = nullptr)
+{
     std::unordered_map<std::string, double> qs;
     qs.reserve(taxon.genomes.size());
-    for (const auto& g : taxon.genomes)
-        qs[g.accession] = g.quality_score();
+    for (const auto& g : taxon.genomes) {
+        double score = g.quality_score();
+        if (gpk_reader) {
+            auto q = gpk_reader->qual_score_for_accession(g.accession);
+            if (q) score = *q;
+        }
+        qs[g.accession] = score;
+    }
     return qs;
 }
 
@@ -112,7 +121,7 @@ TaxonResult process_taxon(
             return r;
         }
 
-        auto quality_scores = build_quality_map(taxon);
+        auto quality_scores = build_quality_map(taxon, gpk_reader);
 
         // Completeness lookup: accession → completeness (%) for quality floor decisions.
         std::unordered_map<std::string, double> acc_completeness;
@@ -223,8 +232,12 @@ TaxonResult process_taxon(
             std::vector<size_t> order(n);
             std::iota(order.begin(), order.end(), 0);
             std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-                const double qa = taxon.genomes[a].quality_score();
-                const double qb = taxon.genomes[b].quality_score();
+                const double qa = quality_scores.count(all_accessions[a])
+                                  ? quality_scores.at(all_accessions[a])
+                                  : taxon.genomes[a].quality_score();
+                const double qb = quality_scores.count(all_accessions[b])
+                                  ? quality_scores.at(all_accessions[b])
+                                  : taxon.genomes[b].quality_score();
                 if (qa != qb) return qa > qb;
                 return all_accessions[a] < all_accessions[b];  // tie-break on accession
             });
