@@ -96,6 +96,16 @@ public:
     }
     size_t n_archives() const override { return inner_->n_archives(); }
 
+    bool has_qual() const override { return inner_->has_qual(); }
+    void scan_qual(const std::function<void(const genopack::QualRecord&)>& cb) const override {
+        inner_->scan_qual(cb);
+    }
+
+    bool has_gstx() const override { return inner_->has_gstx(); }
+    const genopack::GstxEntry* gstx_for_genus(std::string_view g) const override {
+        return inner_->gstx_for_genus(g);
+    }
+
     std::string taxonomy_for_accession(std::string_view acc) const override {
         return inner_->taxonomy_for_accession(acc);
     }
