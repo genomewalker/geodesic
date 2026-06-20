@@ -125,6 +125,26 @@ public:
         for (const auto& a : archives_)
             a.reader->scan_qual(cb);
     }
+    // Genome IDs are local per-archive, so the base-class build_qual_cache_() (which maps
+    // genome_id → tier across all archives) aliases IDs across parts. Build a separate
+    // per-archive (genome_id → tier) map and route each lookup to the owning archive.
+    std::optional<uint8_t> quality_tier_for_accession(std::string_view acc) const override {
+        std::call_once(arch_tier_once_, [this] {
+            arch_tier_cache_.resize(archives_.size());
+            for (size_t i = 0; i < archives_.size(); ++i) {
+                if (!archives_[i].reader->has_qual()) continue;
+                archives_[i].reader->scan_qual([&](const genopack::QualRecord& r) {
+                    arch_tier_cache_[i][r.genome_id] = r.quality_tier_u8;
+                });
+            }
+        });
+        uint16_t idx = archive_idx_for_accession(acc);
+        if (idx == UINT16_MAX || idx >= arch_tier_cache_.size()) return std::nullopt;
+        auto meta = archives_[idx].reader->genome_meta_by_accession(acc);
+        if (!meta) return std::nullopt;
+        auto it = arch_tier_cache_[idx].find(meta->genome_id);
+        return it != arch_tier_cache_[idx].end() ? std::optional{it->second} : std::nullopt;
+    }
 
     bool has_gstx() const override {
         for (const auto& a : archives_)
@@ -149,6 +169,11 @@ private:
     std::vector<ArchiveEntry> archives_;
     // accession → archive_idx (for O(1) routing)
     std::unordered_map<std::string, uint16_t> acc_to_arch_;
+
+    // Per-archive quality-tier cache: built once by quality_tier_for_accession().
+    // Each element maps local genome_id → quality_tier_u8 for that archive.
+    mutable std::once_flag                                        arch_tier_once_;
+    mutable std::vector<std::unordered_map<genopack::GenomeId, uint8_t>> arch_tier_cache_;
 
     // Per-archive mutex: serialises concurrent visit_sketch_batches calls on the
     // same archive and guards release_sketches() against concurrent sketch_for_ids.

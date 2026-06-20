@@ -90,6 +90,8 @@ struct IPackReader {
 
     // Per-accession quality score: completeness_post_decontam*100 - 5*contamination_leakage*100.
     // Built once from scan_qual + scan_genome_accessions; thread-safe.
+    // NOTE: genome IDs are local per-archive. Multi-pack readers MUST override
+    // quality_tier_for_accession() and qual_score_for_accession() to avoid ID aliasing.
     std::optional<double> qual_score_for_accession(std::string_view acc) const {
         build_qual_cache_();
         auto it = qual_score_cache_.find(std::string(acc));
@@ -99,7 +101,7 @@ struct IPackReader {
     // Returns the stored quality tier (LQ/MQ/HQ) or empty if not available.
     // Requires a pack written by genopack check >= the version that stores quality_tier_u8.
     // Old packs return empty (QTIER_NOT_SET == 0).
-    std::optional<uint8_t> quality_tier_for_accession(std::string_view acc) const {
+    virtual std::optional<uint8_t> quality_tier_for_accession(std::string_view acc) const {
         build_qual_cache_();
         auto it = qual_tier_cache_.find(std::string(acc));
         return it != qual_tier_cache_.end() ? std::optional{it->second} : std::nullopt;
