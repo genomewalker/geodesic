@@ -118,7 +118,8 @@ struct SoAStore {
         masks_flat.resize(new_n * mask_words_flat);  masks_flat.shrink_to_fit();
     }
 
-    bool has_sketch_data() const noexcept { return sketch_size_flat > 0 && !sigs_flat.empty(); }
+    bool has_sketch_data()  const noexcept { return sketch_size_flat > 0 && !sigs_flat.empty(); }
+    bool has_sketch_data2() const noexcept { return sketch_size_flat > 0 && !sigs2_flat.empty(); }
 
           uint16_t* sig(size_t i)        noexcept { return sigs_flat.data()  + i * sketch_size_flat; }
     const uint16_t* sig(size_t i)  const noexcept { return sigs_flat.data()  + i * sketch_size_flat; }

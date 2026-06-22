@@ -382,7 +382,7 @@ void GeodesicDerep::finalize_embeddings_() {
     }
 
     // sigs2_flat (dual-seed) was only needed for Nyström projection above.
-    // Phase 7c uses only sig_span() (sigs_flat), so we can free ~1/3 of sketch RAM here.
+    // Phase 7 borderline refinement guards on has_sketch_data2() so it skips sig2 after this free.
     store_.sigs2_flat.clear();
     store_.sigs2_flat.shrink_to_fit();
 }
@@ -3009,7 +3009,7 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
                 double jac_exact = refine_jaccard_ptr(sig_a.data(), sig_b.data(), sig_a.size());
                 // Pre-filter: if sig1 alone is well below threshold, skip sig2
                 if (static_cast<float>(jac_exact) < cos_diversity * 0.9f) continue;
-                if (store_.has_sketch_data() && store_.has_sketch_data()) {
+                if (store_.has_sketch_data2()) {
                     const auto s2a = store_.sig2_span(i);
                     const auto s2b = store_.sig2_span(rep_emb_i);
                     double jac2 = refine_jaccard_ptr(s2a.data(), s2b.data(), s2a.size());
@@ -4174,7 +4174,7 @@ GeodesicDerep::DiversityMetrics GeodesicDerep::compute_diversity_metrics(
         // for the coverage_mean/percentile stats when Nyström has been applied.
         double min_dist;
         if (nystrom_applied_ && best_rep != SIZE_MAX &&
-            store_.has_sketch_data() && store_.has_sketch_data() &&
+            store_.has_sketch_data() &&
             !store_.mask_span(i).empty() && !store_.mask_span(best_rep).empty()) {
             const uint16_t* q_sig  = store_.sig(i);
             const uint16_t* r_sig  = store_.sig(best_rep);
