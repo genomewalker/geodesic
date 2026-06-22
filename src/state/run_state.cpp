@@ -48,4 +48,13 @@ void RunState::finalize_sort() {
               });
 }
 
+void RunState::merge(RunState&& src) {
+    std::lock_guard lock(mutex_);
+    std::lock_guard src_lock(src.mutex_);
+    taxa_.insert(taxa_.end(),
+                 std::make_move_iterator(src.taxa_.begin()),
+                 std::make_move_iterator(src.taxa_.end()));
+    src.taxa_.clear();
+}
+
 } // namespace derep

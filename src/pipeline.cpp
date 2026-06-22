@@ -266,15 +266,25 @@ void process_taxa_parallel(
                             }
                         };
                     }
-                    // Optionally filter LQ genomes before processing.
+                    // Optionally filter LQ / low-CR genomes before processing.
                     Taxon lq_filtered;
                     const Taxon* work_taxon = &taxa[ti];
-                    if (cfg.skip_lq && gpk_reader_ptr && gpk_reader_ptr->has_qual()) {
+                    const bool apply_qual_filter =
+                        (cfg.skip_lq || cfg.min_cr > 0.0f) &&
+                        gpk_reader_ptr && gpk_reader_ptr->has_qual();
+                    if (apply_qual_filter) {
                         lq_filtered.taxonomy = taxa[ti].taxonomy;
                         lq_filtered.forced_representative = taxa[ti].forced_representative;
-                        for (const auto& g : taxa[ti].genomes)
-                            if (!gpk_reader_ptr->is_lq(g.accession))
-                                lq_filtered.genomes.push_back(g);
+                        for (const auto& g : taxa[ti].genomes) {
+                            if (cfg.skip_lq && gpk_reader_ptr->is_lq(g.accession))
+                                continue;
+                            if (cfg.min_cr > 0.0f) {
+                                auto cr = gpk_reader_ptr->completeness_cr_for_accession(g.accession);
+                                if (cr && *cr < cfg.min_cr)
+                                    continue;
+                            }
+                            lq_filtered.genomes.push_back(g);
+                        }
                         work_taxon = &lq_filtered;
                     }
                     if (work_taxon->genomes.empty()) {
@@ -628,6 +638,23 @@ int run_pipeline(Config& cfg) {
     const char* no_pre = std::getenv("GEODESIC_NO_PRELOAD");
     const bool bypass_preload = (no_pre && no_pre[0] == '1');
 
+    // Resume support: create writer early so we can load checkpoints before
+    // the bucket loop starts.  On first run this is a no-op; on a resumed
+    // run it writes output-file headers + prior checkpoint rows and returns
+    // the set of already-completed taxonomy strings.
+    ResultsWriter writer(results_dir, cfg.prefix);
+    std::unordered_set<std::string> resume_completed;
+    std::unordered_set<std::string> resume_done_keys;
+    bool resume_active = false;
+    if (cfg.with_resume) {
+        resume_done_keys  = writer.scan_done_keys();
+        resume_completed  = writer.load_resume();
+        resume_active     = !resume_completed.empty();
+        if (resume_active)
+            spdlog::info("RESUME: {} waves already done; skipping {} taxa",
+                         resume_done_keys.size(), resume_completed.size());
+    }
+
     if (bypass_preload || !gpk_reader) {
         process_taxa_parallel(taxa, cfg, run_state,
                               gpk_reader.get(), gunc_scores_ptr,
@@ -719,6 +746,7 @@ int run_pipeline(Config& cfg) {
             Wave cur;
             for (size_t idx : b.taxa_indices) {
                 const auto& tx = taxa[idx];
+                if (cfg.with_resume && resume_completed.count(tx.taxonomy)) continue;
                 const size_t tx_sz = tx.genomes.size();
                 if (!cur.taxa_indices.empty()
                     && cur.total_genomes + tx_sz > wave_max_genomes) {
@@ -731,10 +759,21 @@ int run_pipeline(Config& cfg) {
             }
             if (!cur.taxa_indices.empty()) waves.push_back(std::move(cur));
 
+            if (waves.empty()) {
+                spdlog::info("BUCKET arch={}: all {} taxa already done — skipping",
+                             arch, b.taxa_indices.size());
+                continue;
+            }
             spdlog::info("BUCKET arch={}: {} taxa, {} genomes → {} wave(s)",
                          arch, b.taxa_indices.size(), b.total_genomes, waves.size());
 
             for (size_t wi = 0; wi < waves.size(); ++wi) {
+                const std::string ck_key = std::to_string(arch) + "_w" + std::to_string(wi);
+                if (cfg.with_resume && resume_done_keys.count(ck_key)) {
+                    spdlog::info("BUCKET arch={} wave {}/{}: already done — skipping",
+                                 arch, wi + 1, waves.size());
+                    continue;
+                }
                 auto& w = waves[wi];
                 spdlog::info("BUCKET arch={} wave {}/{}: {} taxa, {} genomes — preloading all ks",
                              arch, wi + 1, waves.size(),
@@ -747,29 +786,59 @@ int run_pipeline(Config& cfg) {
                 std::vector<Taxon> sub_taxa;
                 sub_taxa.reserve(w.taxa_indices.size());
                 for (size_t idx : w.taxa_indices) sub_taxa.push_back(taxa[idx]);
-                process_taxa_parallel(sub_taxa, cfg, run_state, wrapped.get(),
-                                      gunc_scores_ptr, grd_writer.get());
+
+                if (cfg.with_resume) {
+                    RunState wave_state;
+                    process_taxa_parallel(sub_taxa, cfg, wave_state, wrapped.get(),
+                                          gunc_scores_ptr, grd_writer.get());
+                    writer.write_checkpoint(wave_state, ck_key);
+                    run_state.merge(std::move(wave_state));
+                } else {
+                    process_taxa_parallel(sub_taxa, cfg, run_state, wrapped.get(),
+                                          gunc_scores_ptr, grd_writer.get());
+                }
                 wrapped->release_sketches();
                 malloc_trim(0);
             }
         }
 
         if (!cross.taxa_indices.empty()) {
-            spdlog::info("BUCKET cross-archive: {} taxa, {} genomes — processing via inner reader (no preload)",
-                         cross.taxa_indices.size(), cross.total_genomes);
+            // Filter out already-completed cross-archive taxa on resume.
             std::vector<Taxon> cross_taxa;
             cross_taxa.reserve(cross.taxa_indices.size());
-            for (size_t idx : cross.taxa_indices) cross_taxa.push_back(taxa[idx]);
-            process_taxa_parallel(cross_taxa, cfg, run_state, raw_inner,
-                                  gunc_scores_ptr, grd_writer.get());
+            for (size_t idx : cross.taxa_indices) {
+                const auto& tx = taxa[idx];
+                if (cfg.with_resume && resume_completed.count(tx.taxonomy)) continue;
+                cross_taxa.push_back(tx);
+            }
+
+            if (cross_taxa.empty() && cfg.with_resume) {
+                spdlog::info("BUCKET cross-archive: all taxa already done — skipping");
+            } else {
+                spdlog::info("BUCKET cross-archive: {} taxa, {} genomes — processing via inner reader (no preload)",
+                             cross_taxa.size(), cross.total_genomes);
+                const std::string ck_key = "cross_w0";
+                if (cfg.with_resume && !resume_done_keys.count(ck_key)) {
+                    RunState cross_state;
+                    process_taxa_parallel(cross_taxa, cfg, cross_state, raw_inner,
+                                          gunc_scores_ptr, grd_writer.get());
+                    writer.write_checkpoint(cross_state, ck_key);
+                    run_state.merge(std::move(cross_state));
+                } else if (!cfg.with_resume) {
+                    process_taxa_parallel(cross_taxa, cfg, run_state, raw_inner,
+                                          gunc_scores_ptr, grd_writer.get());
+                }
+            }
         }
 
         gpk_reader = std::move(wrapped);
     }
 
     // 11. Summary and output
-    ResultsWriter writer(results_dir, cfg.prefix);
-    writer.write_all(run_state);
+    if (resume_active)
+        writer.write_all_append(run_state);
+    else
+        writer.write_all(run_state);
 
     ReportWriter report_writer(results_dir, cfg.prefix, cfg.timestamp);
     report_writer.write(run_state);

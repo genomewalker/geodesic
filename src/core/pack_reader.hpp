@@ -112,24 +112,36 @@ struct IPackReader {
         return t && *t == genopack::QualRecord::QTIER_LQ;
     }
 
+    // Returns completeness_cluster_relative (fraction 0–1), or empty if unavailable.
+    std::optional<float> completeness_cr_for_accession(std::string_view acc) const {
+        build_qual_cache_();
+        auto it = qual_cr_cache_.find(std::string(acc));
+        return it != qual_cr_cache_.end() ? std::optional{it->second} : std::nullopt;
+    }
+
 private:
     void build_qual_cache_() const {
         std::call_once(qual_cache_once_, [this] {
             if (!has_qual()) return;
             std::unordered_map<genopack::GenomeId, double>  id_scores;
             std::unordered_map<genopack::GenomeId, uint8_t> id_tiers;
+            std::unordered_map<genopack::GenomeId, float>   id_cr;
             scan_qual([&](const genopack::QualRecord& r) {
                 float c = !std::isnan(r.completeness_post_decontam)
                           ? r.completeness_post_decontam : r.completeness_cluster_relative;
                 id_scores[r.genome_id] = static_cast<double>(c) * 100.0
                     - 5.0 * static_cast<double>(r.contamination_leakage) * 100.0;
                 id_tiers[r.genome_id]  = r.quality_tier_u8;
+                if (!std::isnan(r.completeness_cluster_relative))
+                    id_cr[r.genome_id] = r.completeness_cluster_relative;
             });
             scan_genome_accessions([&](std::string_view a, genopack::GenomeId gid) {
                 auto is = id_scores.find(gid);
                 if (is != id_scores.end()) qual_score_cache_[std::string(a)] = is->second;
                 auto it = id_tiers.find(gid);
                 if (it != id_tiers.end()) qual_tier_cache_[std::string(a)]  = it->second;
+                auto ic = id_cr.find(gid);
+                if (ic != id_cr.end()) qual_cr_cache_[std::string(a)]       = ic->second;
             });
         });
     }
@@ -137,6 +149,7 @@ private:
     mutable std::once_flag                          qual_cache_once_;
     mutable std::unordered_map<std::string, double> qual_score_cache_;
     mutable std::unordered_map<std::string, uint8_t> qual_tier_cache_;
+    mutable std::unordered_map<std::string, float>  qual_cr_cache_;
 
 public:
     // Taxonomy access (TAXN section).

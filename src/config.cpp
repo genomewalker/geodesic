@@ -113,6 +113,15 @@ Config parse_args(int argc, char** argv) {
     derep->add_flag("--keep-intermediates", cfg.keep_intermediates, "Keep intermediate files");
     derep->add_flag("--skip-lq", cfg.skip_lq,
         "Exclude LQ genomes (requires pack with genopack check quality_tier_u8)");
+    derep->add_option("--min-cr", cfg.min_cr,
+        "Exclude genomes with completeness_cluster_relative below this fraction (0–1); "
+        "use with --skip-lq to also gate MQ genomes that are biologically incomplete "
+        "(e.g. --min-cr 0.5). Requires pack with QUAL section.")
+        ->check(CLI::Range(0.0f, 1.0f));
+    derep->add_flag("--resume", cfg.with_resume,
+        "Write per-arch checkpoints to <out-dir>/.geodesic_resume/ and, if checkpoints "
+        "from a previous run exist, skip completed arches and resume from the last "
+        "crash point. Safe to pass on first run; no-op when no checkpoint exists.");
 
     // ── update subcommand ───────────────────────────────────────────────────
     auto* update_cmd = app.add_subcommand("update",

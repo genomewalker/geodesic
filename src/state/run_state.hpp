@@ -80,6 +80,9 @@ public:
     // any reader (writers, .gpd archive, etc) to make outputs bit-identical across runs.
     void finalize_sort();
 
+    // Move all taxa from src into this state (used by resume per-wave merging).
+    void merge(RunState&& src);
+
 private:
     mutable std::mutex mutex_;
     std::vector<TaxonOutput> taxa_;
