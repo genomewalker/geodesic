@@ -1,96 +1,206 @@
 # Contamination detection
 
-geodesic identifies potentially contaminated and chimeric assemblies before representative selection. Contaminated genomes receive a fitness score of zero, excluding them from being chosen as representatives while still assigning them to the nearest representative in the output.
+geodesic uses two complementary contamination tracks: an **embedding-based outlier detector** that
+runs inside the dereplication pipeline, and the **genopack QUAL suite** — a battery of k-mer-derived
+quality signals computed during archive construction that scales to tens of millions of genomes
+without any marker-gene database.
 
 ---
 
-## Why this matters
+## Why contamination matters for representative selection
 
-A contaminated or chimeric assembly contains sequence from multiple lineages and looks artificially "diverse": its k-mer composition reflects both parents, pushing it far from other taxon members in embedding space. If selected as a representative, reads from neither lineage map cleanly: species abundance is smeared across clades, lineage-specific loci lose coverage, and variant calls become unreliable. Worse, diversity-maximising selection actively favours such assemblies because they appear to fill underrepresented parts of sequence space. Contamination filtering protects the biological meaning of the representative set.
+A contaminated or chimeric assembly contains sequence from multiple lineages and looks
+artificially "diverse": its k-mer composition reflects both parents, pushing it far from other
+taxon members in embedding space. If selected as a representative, reads from neither lineage
+map cleanly — species abundance is smeared across clades, lineage-specific loci lose coverage,
+and variant calls become unreliable. Diversity-maximising selection (FPS) actively *favours*
+such assemblies because they appear to fill underrepresented parts of sequence space.
+Contamination filtering protects the biological meaning of the representative set.
 
 ---
 
-## Detection signals
+## Track 1: Embedding-based outlier detection (per-taxon, in-pipeline)
 
-Six per-genome signals are computed and stored in the outlier candidates list:
+Six per-genome signals are computed for every taxon during the dereplication run:
 
 | Signal | Description |
 |--------|-------------|
 | `isolation_score` | Mean angular distance to the $k$ nearest neighbours ($k = \max(10,\, \min(20,\, \lfloor\log_2 n\rfloor))$); high = isolated = anomalous |
-| `centroid_distance` | Angular distance from the species centroid (mean embedding vector, renormalised to unit length) |
-| `genome_size_zscore` | Z-score of genome size relative to the taxon distribution |
-| `kmer_div_zscore` | K-mer diversity z-score: occupied OPH bins per kbp relative to the taxon mean. Informational; see below. |
-| `anomaly_score` | Currently equal to `isolation_score`; field reserved for future composite scoring |
-| `nn_outlier` | Boolean flag: `isolation_score` exceeds the taxon threshold (primary exclusion criterion) |
+| `centroid_distance` | Angular distance from the species centroid |
+| `genome_size_zscore` | Z-score of genome size relative to taxon distribution |
+| `kmer_div_zscore` | Occupied OPH bins per kbp relative to taxon mean; a chimeric assembly (two organisms joined) has anomalously high k-mer diversity per kbp |
+| `anomaly_score` | Currently equal to `isolation_score`; reserved for future composite scoring |
+| `nn_outlier` | Boolean: `isolation_score` exceeds the taxon threshold — primary exclusion criterion |
 
----
-
-## Flagging criterion
-
-A genome is excluded from representative selection when `nn_outlier = TRUE`. The threshold is `max(per_component_thr, global_thr)` — both computed with the MAD estimator (50% breakdown point):
+A genome is excluded from representative selection when `nn_outlier = TRUE`. The threshold
+uses the MAD estimator (50% breakdown point), taking the max of a per-MST-component and
+global threshold:
 
 $$
 \text{threshold} = \tilde{\mu} + z \cdot 1.4826 \cdot \text{MAD}, \qquad \text{MAD} = \text{median}(|x_i - \tilde{\mu}|)
 $$
 
-The **per-component** threshold uses only genomes in the same MST component; the **global** threshold uses all non-excluded genomes. Taking the max means a genome must exceed both its local and global distributions. $z$ is configurable via `--z-threshold` (default 2.0). When MAD=0 (all isolation scores identical in a component), the code falls back to IQR. Ordinary mean/SD are not used because contaminated genomes form a long right tail.
+$z$ is configurable via `--z-threshold` (default 2.0). When MAD = 0 (all isolation scores
+identical in a component) the code falls back to IQR. Ordinary mean/SD are never used because
+contaminated genomes form a long right tail.
 
-Genomes with `isolation_score > threshold` have anomalously large mean distance to their nearest neighbours in embedding space, the primary signal of taxonomic misassignment or cross-species contamination. Their fitness is set to zero: they cannot be selected as representatives but remain in the output assigned to their nearest representative.
-
----
-
-## K-mer diversity z-score
-
-The `kmer_div_zscore` is a population-aware signal intended to detect chimeric assemblies. A chimeric assembly (two organisms stitched together) contains k-mers from both genomes, resulting in more occupied OPH bins per kilobase than any single-organism genome in the taxon.
-
-For each genome $G_i$, let $r_i$ be occupied OPH bins per kbp:
-
-$$
-r_i = \frac{n_{\text{real},i}}{L_i / 1000}
-$$
-
-The z-score relative to the taxon distribution:
-
-$$
-z_i = \frac{r_i - \bar{r}}{s_r}
-$$
-
-This signal is computed and stored for analysis. It is not currently used as a flagging criterion.
+Excluded genomes retain their cluster assignment in `_derep_genomes.tsv`; they are mapped to
+the nearest clean representative rather than dropped entirely.
 
 ---
 
-## CheckM2 integration
+## Track 2: genopack QUAL suite (at-scale, marker-gene-free)
 
-When CheckM2 quality estimates are available (`--checkm2`), contamination enters directly through the fitness function:
+The genopack archive stores a QUAL section for every genome produced by `geodesic check`.
+Unlike CheckM2 and GUNC — which require a marker-gene database and scale roughly linearly with
+genome count — the QUAL signals are derived entirely from k-mer statistics and run as part of
+the archive construction pipeline. At 9.3 M genomes (GTDB r232) the QUAL section achieves
+**100 % coverage with zero null values**.
+
+### Completeness signals
+
+| Column | Description |
+|--------|-------------|
+| `genome_fill` | Total occupied FracMinHash bins / expected fill for a complete genome of this taxon's median size |
+| `completeness_cluster_relative` | Occupied OPH bins relative to the taxon cluster median; 1.0 = median-sized genome for this taxon |
+| `completeness_sketch_fill` | OPH bin occupancy fraction (k-mer sketch saturation) |
+| `completeness_fragmentation` | Assembly fragmentation penalty: penalises high contig count relative to genome size |
+| `completeness_post_decontam` | Effective completeness after removing contaminated k-mer windows |
+| `completeness_aamer_core` | AAMER-based core k-mer completeness (genus-level conserved k-mers) |
+| `completeness_aamer_family_core` | AAMER-based completeness using family-level conserved k-mers |
+
+`completeness_cluster_relative` is the most reliable single completeness proxy at scale: it
+compares a genome's k-mer count against the median k-mer count of all genomes in the same GTDB
+species cluster. Values below 0.5 reliably identify assemblies that CheckM2 rates below 50 %
+completeness (88 % concordance validated on 17 R. *rectalis* cases spanning 37–49 % CheckM2
+completeness, CR 0.26–0.39).
+
+**Important distinction from `sketch_fill`**: `sketch_fill` measures k-mer sketch saturation —
+whether enough total sequence is present to fill all OPH bins. A genome with 1.5 Mb of
+repetitive or contaminant sequence can achieve `sketch_fill = 1.0` while having only 37 %
+CheckM2 completeness. `completeness_cluster_relative` normalises by the expected k-mer count
+for the taxon and is immune to this failure mode.
+
+### Contamination signals
+
+| Column | Description |
+|--------|-------------|
+| `fmh_contamination` | FracMinHash-based contamination fraction: k-mers mapping to out-of-taxon references |
+| `contamination_leakage` | Cross-taxon k-mer leakage fraction in the OPH sketch; penalises genomes with k-mers pulled from a neighbouring taxon |
+| `contamination_tnf_excess` | Tetranucleotide frequency excess: excess non-taxon TNF signal, flags chimeric assemblies |
+| `contamination_contig_outlier` | Fraction of contigs whose k-mer profiles are outliers relative to the genome's own distribution |
+| `contamination_contig_outlier_adj` | Contig outlier fraction adjusted for assembly size |
+| `contamination_cross_genus` | k-mer signal from cross-genus contamination |
+| `contamination_contig_split` | Fraction of contigs that appear split (two incompatible k-mer pools within a single contig) |
+| `contamination_duplication` | Excess k-mer duplication relative to taxon expectation |
+| `contamination_mixture` | Fraction of windows best explained by a two-genome mixture model |
+| `contamination_spe` | Single-pass entropy contamination estimate |
+| `contamination_rho_outlier` | Rank-correlation outlier score across the k-mer distribution |
+
+### Genome-coherence signals
+
+| Column | Description |
+|--------|-------------|
+| `chromosome_skew_closure` | GC/AT skew closure metric for complete/circular chromosomes |
+| `chargaff_parity` | Deviation from Chargaff's second parity rule; violations flag inter-strand contamination |
+| `self_coherence` | Internal k-mer self-consistency score |
+| `spectral_gap` | Spectral gap in the k-mer hash density spectrum; large gaps indicate compositional discontinuities |
+| `scale_kink` | Scale-space kink in the hash density spectrum; detects chimeric junctions |
+| `leakage_residual` | Residual leakage signal after contamination removal |
+
+### Quality tier
+
+All signals feed into a single `quality_tier` (LQ / MQ / HQ) and a MIMAG-compatible
+`mimag_tier` output. The composite score used for the tier:
 
 $$
-q = \text{completeness} - 5 \times \text{contamination}
+q = c_{\text{eff}} \times 100 - 5 \times \text{contamination\_leakage} \times 100
 $$
 
-$$
-\text{fitness}_i = d_i \cdot \sqrt{\frac{L_i}{L_m}}
-$$
+where $c_{\text{eff}} = \text{completeness\_post\_decontam}$ when not NaN, else
+`completeness_cluster_relative`.
 
-where $d_i$ is the distance to the nearest current representative, $L_i$ is genome length, and $L_m$ is the taxon median genome length. The quality score $q_i$ acts as a **tie-breaker only** — when two candidates have equal fitness, the one with higher quality score is preferred. This keeps the primary selection signal (diversity) independent of quality noise.
+### GTDB r232 results (9.3 M genomes)
 
-A genome with 10% CheckM2 contamination loses 50 quality points, making it less likely to win ties. The embedding-based `nn_outlier` flag remains the primary contamination filter; CheckM2 quality only modulates selection among clean candidates.
+| Tier | Count | % |
+|------|------:|--:|
+| HQ | 4,522,037 | 48.7 % |
+| MQ | 4,544,766 | 49.0 % |
+| LQ | 210,790 | 2.3 % |
+| **Total** | **9,277,593** | **100 %** |
+
+Zero genomes with missing quality data. CheckM2 on 1,067 genomes took 26 min on 48 cores;
+extrapolated to 9.3 M that is ~14,500 CPU-hours. genopack QUAL runs during archive construction
+with no additional wall-clock cost.
 
 ---
 
-## GUNC integration
+## Integrating QUAL into dereplication
 
-[GUNC](https://doi.org/10.1186/s13059-021-02393-0) (Orakov et al. 2021) detects chimeric assemblies using phylogenetically diverse marker genes. A genome is chimeric if its marker genes span multiple clades inconsistently. GUNC is more reliable than k-mer-based approaches for subtle contamination.
+### `--skip-lq`
 
-Pass GUNC output with `--gunc-scores gunc_output.tsv`. Genomes with `pass.GUNC = False` are excluded from representative selection.
+Excludes all genomes with `quality_tier = LQ` from FPS representative selection.
+Genomes without a QUAL record pass through (the three-state rule: LQ → skip, HQ/MQ → keep,
+unknown → keep).
+
+### `--min-cr FLOAT`
+
+Excludes genomes with `completeness_cluster_relative` below the given threshold (0–1),
+regardless of their tier. Use this to also gate MQ genomes that are biologically incomplete:
+
+```bash
+geodesic derep \
+    --skip-lq \
+    --min-cr 0.5 \
+    ...
+```
+
+`--min-cr 0.5` maps to ~50 % CheckM2 completeness based on the validated concordance above.
+It correctly excludes the 17 R. *rectalis* MQ genomes (CR 0.26–0.39, CheckM2 37–49 %) that
+`--skip-lq` alone misses, because those genomes have `completeness_post_decontam = 1.0`
+(their k-mers are taxonomically clean) while being genuinely incomplete.
+
+Genomes with no QUAL record in the archive are never excluded by `--min-cr`.
+
+---
+
+## Optional integrations: CheckM2 and GUNC
+
+These external tools provide independent quality estimates and can be used alongside — not
+instead of — the QUAL-based gates above.
+
+### CheckM2
+
+When CheckM2 quality estimates are available (`--checkm2`), contamination enters the fitness
+function as a tie-breaker:
+
+$$
+\text{fitness}_i = d_i \cdot \sqrt{L_i / L_m}
+$$
+
+where quality $q = \text{completeness} - 5 \times \text{contamination}$ modulates selection
+only between candidates with equal fitness. A genome with 10 % CheckM2 contamination loses
+50 quality points, making it less likely to win ties while keeping the primary selection
+signal (diversity) unaffected.
+
+### GUNC
+
+Pass GUNC output with `--gunc-scores gunc_output.tsv`. Genomes with `pass.GUNC = False` are
+excluded from representative selection. GUNC is more reliable than k-mer methods for subtle
+contamination involving phylogenetically diverse marker gene sets. Practical limitation: GUNC
+does not scale to millions of genomes; use it for targeted validation of representative sets.
 
 ---
 
 ## Output
 
-The `_outliers.tsv` file contains all flagged candidates with columns:
+`_outliers.tsv` contains all flagged candidates:
 
 ```
-taxonomy  accession  category  nn_outlier  isolation_score  kmer_div_zscore  genome_size_zscore  centroid_distance  anomaly_score  genome_length_bp  n_contigs  margin_to_threshold  flag_reason  excluded
+taxonomy  accession  category  nn_outlier  isolation_score  kmer_div_zscore
+genome_size_zscore  centroid_distance  anomaly_score  genome_length_bp
+n_contigs  margin_to_threshold  flag_reason  excluded
 ```
 
-All genomes still appear in `_derep_genomes.tsv` assigned to their nearest representative; contamination detection only affects selection eligibility, not assignment.
+All genomes still appear in `_derep_genomes.tsv` assigned to their nearest representative;
+contamination detection only affects selection eligibility, not assignment.

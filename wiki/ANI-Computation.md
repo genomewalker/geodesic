@@ -16,6 +16,70 @@ materialise genomes on disk.
 
 ---
 
+## Implementation
+
+`geodesic ani` is a purpose-built FracMinHash ANI engine tightly integrated with
+the genopack archive format. It shares the same algorithmic core as
+[skani](https://github.com/bluenote-1577/skani) but is designed for zero-disk-I/O
+operation against large pre-built archives.
+
+### k-mer encoding and hashing
+
+Each FASTA position is encoded as a canonical 2-bit k-mer (forward vs.
+reverse-complement minimum). The rolling hash uses an ntHash-style update
+function: constant-time per position with no re-hashing of the full k-mer window.
+
+### Subsampling: Lemire fast-divisibility
+
+A k-mer enters the sketch when `hash % c == 0`. Rather than a hardware `div`
+instruction, this uses Lemire's fast-divisibility check:
+
+```
+hash * (2^64 / c) < 2^64 / c
+```
+
+This is a multiply + compare — ~4× faster than `%` on modern CPUs — and produces
+a sketch whose expected size is `genome_length / c`, matching skani's `-c`
+compression parameter. Default: `c = 125` (sketch ~32k hashes for a 4 Mb genome).
+
+### All-pairs intersection: AVX2 merge
+
+Each sketch is a sorted array of 64-bit hashes. Pairwise ANI is computed from
+the sorted-set intersection size via a two-pointer merge, auto-vectorised with
+AVX2 SIMD on x86: 8 × 64-bit comparisons per cycle. The merge produces
+intersection size, union size, and both directional containments in a single pass.
+
+### Integration advantage over standalone skani
+
+| | `geodesic ani` | skani |
+|---|---|---|
+| Input | Accession list; FASTAs read from genopack archive | FASTA files on disk |
+| Disk I/O | None (in-memory shard reader) | Reads and decompresses every input file |
+| Temp files | None | Optional sketch cache |
+| AF semantics | `af = intersection / min(sketch_a, sketch_b)` — same as skani | Same |
+| Parallelism | Per-pair work-stealing thread pool | Per-genome thread pool |
+| Pack integration | Direct; accessions not in the pack are silently skipped with a count | Requires file paths |
+
+The elimination of disk I/O is the primary throughput advantage for archive-resident genomes.
+On a shared-filesystem cluster where FASTA decompression is I/O bound, `geodesic ani`
+avoids the decompression bottleneck entirely: the shard reader returns raw FASTA bytes from
+the mmap'd archive in ~1 µs per genome regardless of genome count.
+
+### GTDB r232 representative validation (measured)
+
+Inter-representative all-pairs ANI for three gut species (500 reps each → ~125k pairs/taxon),
+run as part of the r232 dereplication validation on 48 threads:
+
+| Taxon | Reps sampled | Pairs | Wall time |
+|---|---:|---:|---:|
+| *Bifidobacterium longum* | 500 | 124,750 | < 2 min |
+| *Phocaeicola vulgatus* | 500 | 124,750 | < 2 min |
+| *Roseburia rectalis* | 492 | 120,786 | < 2 min |
+
+All three taxa completed back-to-back in a single job under 10 minutes total on 48 cores.
+
+---
+
 ## `geodesic ani`
 
 Computes pairwise FracMinHash ANI between genomes in a pack.
