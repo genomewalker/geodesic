@@ -256,8 +256,11 @@ Higher isolation = more separated from neighbours = stronger candidate for a rep
 The diversity threshold $\theta$ controls when FPS terminates. It is derived from the k-NN graph of the taxon, capped at the user ANI threshold:
 
 $$
-\theta = \min\!\left(\theta_{\mathrm{MST}},\ \frac{\arccos(J_{\mathrm{ANI}})}{\pi}\right)
+\theta = \min\!\left(\theta_{\mathrm{ANI}},\ \max\!\left(\theta_{\mathrm{MST}},\ \frac{\theta_{\mathrm{ANI}}}{4}\right)\right),
+\qquad \theta_{\mathrm{ANI}} = \frac{\arccos(J_{\mathrm{ANI}})}{\pi}
 $$
+
+The $\theta_{\mathrm{ANI}}/4$ floor prevents clonal databases (where all $K$ nearest neighbours are near-duplicates) from driving $\theta_{\mathrm{MST}}$ far below the biological ANI scale. By the triangle inequality, a floor of $\theta_{\mathrm{ANI}}/4$ ensures the coverage-preserving merge property.
 
 **$\theta_{\mathrm{MST}}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding a $\bar{x} + 2\sigma$ threshold excluded from the MST — note this is a simpler mean+2σ pre-filter, not the MAD threshold used for final outlier classification) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_{\mathrm{MST}}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
 
@@ -382,7 +385,7 @@ $$
 q_{\mathrm{cert}} = p^k, \qquad J_{\mathrm{cert}} = \frac{q_{\mathrm{cert}}}{2 - q_{\mathrm{cert}}}
 $$
 
-At 95% ANI with $k = 21$: $q_{\mathrm{cert}} \approx 0.341$, $J_{\mathrm{cert}} \approx 0.212$.
+At 95% ANI with $k = 21$: $q_{\mathrm{cert}} = 0.95^{21} \approx 0.3406$, $J_{\mathrm{cert}} = q/(2-q) \approx 0.2052$.
 
 $J_{\mathrm{cert}}$ is used for the symmetric Jaccard arm (equal-size genomes). $q_{\mathrm{cert}}$ is used directly for the containment arm (sparse genomes), where the genome size asymmetry means Jaccard underestimates similarity.
 

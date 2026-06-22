@@ -28,7 +28,7 @@ Six per-genome signals are computed for every taxon during the dereplication run
 | `isolation_score` | Mean angular distance to the $k$ nearest neighbours ($k = \max(10,\, \min(20,\, \lfloor\log_2 n\rfloor))$); high = isolated = anomalous |
 | `centroid_distance` | Angular distance from the species centroid |
 | `genome_size_zscore` | Z-score of genome size relative to taxon distribution |
-| `kmer_div_zscore` | Occupied OPH bins per kbp relative to taxon mean; a chimeric assembly (two organisms joined) has anomalously high k-mer diversity per kbp |
+| `kmer_div_zscore` | GUNC clade-separation score (CSS) when GUNC output is available (`--gunc-scores`); 0 otherwise. A chimeric assembly scores high CSS because its marker genes span multiple clades. The field name is a historical artefact — it does not store a k-mer density z-score. |
 | `anomaly_score` | Currently equal to `isolation_score`; reserved for future composite scoring |
 | `nn_outlier` | Boolean: `isolation_score` exceeds the taxon threshold — primary exclusion criterion |
 

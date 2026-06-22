@@ -32,14 +32,18 @@ function: constant-time per position with no re-hashing of the full k-mer window
 ### Subsampling: Lemire fast-divisibility
 
 A k-mer enters the sketch when `hash % c == 0`. Rather than a hardware `div`
-instruction, this uses Lemire's fast-divisibility check:
+instruction, the code uses Lemire's fast-divisibility trick:
 
 ```
-hash * (2^64 / c) < 2^64 / c
+h % c == 0  iff  (h & mask2) == 0  &&  h * c_inv <= UINT64_MAX / c_odd
 ```
 
-This is a multiply + compare — ~4× faster than `%` on modern CPUs — and produces
-a sketch whose expected size is `genome_length / c`, matching skani's `-c`
+where `c_odd = c >> trailing_zeros(c)` (odd part of `c`), `mask2 = (1 << trailing_zeros(c)) - 1`
+(low-bit mask for the power-of-2 factor), and `c_inv = c_odd⁻¹ mod 2⁶⁴` computed
+by six Newton–Raphson steps (`x ← x(2 − c·x)` mod 2⁶⁴).
+
+The check is two multiplies and two comparisons — ~4× faster than a hardware `div`
+on modern CPUs. The expected sketch size is `genome_length / c`, matching skani's `-c`
 compression parameter. Default: `c = 125` (sketch ~32k hashes for a 4 Mb genome).
 
 ### All-pairs intersection: AVX2 merge
