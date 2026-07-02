@@ -88,11 +88,23 @@ struct IPackReader {
     virtual bool has_qual() const { return false; }
     virtual void scan_qual(const std::function<void(const genopack::QualRecord&)>& /*cb*/) const {}
 
-    // Per-accession quality score: completeness_post_decontam*100 - 5*contamination_leakage*100.
+    // Per-record ranking score, 0–100. Prefers genopack's continuous quality_score
+    // (threshold-free, [0,1] → ×100); falls back to the legacy completeness−5·contamination
+    // proxy only for packs predating the stored score.
+    static double genome_quality_score(const genopack::QualRecord& r) {
+        const float gp = r.quality_score();
+        if (!std::isnan(gp)) return static_cast<double>(gp) * 100.0;
+        const float c = !std::isnan(r.completeness_post_decontam)
+                        ? r.completeness_post_decontam : r.completeness_cluster_relative;
+        return static_cast<double>(c) * 100.0
+             - 5.0 * static_cast<double>(r.contamination_leakage) * 100.0;
+    }
+
+    // Per-accession quality score (see genome_quality_score).
     // Built once from scan_qual + scan_genome_accessions; thread-safe.
     // NOTE: genome IDs are local per-archive. Multi-pack readers MUST override
     // quality_tier_for_accession() and qual_score_for_accession() to avoid ID aliasing.
-    std::optional<double> qual_score_for_accession(std::string_view acc) const {
+    virtual std::optional<double> qual_score_for_accession(std::string_view acc) const {
         build_qual_cache_();
         auto it = qual_score_cache_.find(std::string(acc));
         return it != qual_score_cache_.end() ? std::optional{it->second} : std::nullopt;
@@ -127,10 +139,7 @@ private:
             std::unordered_map<genopack::GenomeId, uint8_t> id_tiers;
             std::unordered_map<genopack::GenomeId, float>   id_cr;
             scan_qual([&](const genopack::QualRecord& r) {
-                float c = !std::isnan(r.completeness_post_decontam)
-                          ? r.completeness_post_decontam : r.completeness_cluster_relative;
-                id_scores[r.genome_id] = static_cast<double>(c) * 100.0
-                    - 5.0 * static_cast<double>(r.contamination_leakage) * 100.0;
+                id_scores[r.genome_id] = genome_quality_score(r);
                 id_tiers[r.genome_id]  = r.quality_tier_u8;
                 if (!std::isnan(r.completeness_cluster_relative))
                     id_cr[r.genome_id] = r.completeness_cluster_relative;

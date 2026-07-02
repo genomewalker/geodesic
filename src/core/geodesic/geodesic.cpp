@@ -2713,7 +2713,8 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
         for (size_t i = 0; i < n; ++i) {
             int cid = component_ids_[i];
             if (cid < 0 || store_.quality_scores[i] == 0.0f) continue;
-            float score = store_.isolation_scores[i] * length_factors[i];
+            float qfac = 0.5f + 0.5f * std::clamp(store_.quality_scores[i] * 0.01f, 0.0f, 1.0f);
+            float score = store_.isolation_scores[i] * length_factors[i] * qfac;
             auto it = comp_best_score.find(cid);
             if (it == comp_best_score.end() || score > it->second) {
                 comp_best_score[cid] = score;
@@ -2772,8 +2773,11 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
     // Phase 1: Start with most isolated genome (skip if pinned reps already seeded).
     // Data is sorted by genome_id (deterministic), not isolation score, so we scan
-    // for argmax of isolation × sqrt(size), with quality as tie-breaker.
-    // Quality should NOT multiply the score — it conflicts with isolation for ad-hoc scores.
+    // for argmax of isolation × sqrt(size) × (0.5+0.5·quality).
+    // Quality folds in as a BOUNDED multiplier (factor ∈ [0.5,1.0], ≤2× swing) so it decides
+    // among geometrically-comparable genomes but never overrides a much-more-isolated pick.
+    // Ad-hoc/unknown quality defaults to 50 → uniform ×0.75, so relative order of ad-hoc-only
+    // taxa is unchanged; only real CheckM2 spread differentiates. (Fable design 2026-07.)
     if (representatives.empty()) {
         size_t first_idx = 0;
         {
@@ -2787,8 +2791,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             for (size_t i = 0; i < n; ++i) {
                 if (store_.quality_scores[i] == 0.0f) continue;
                 float len = std::sqrt(static_cast<float>(store_.genome_sizes[i]) / median_sz);
-                // Primary: isolation × sqrt(size)
-                float score = store_.isolation_scores[i] * len;
+                // Primary: isolation × sqrt(size) × (0.5+0.5·quality) — bounded quality nudge
+                float qfac = 0.5f + 0.5f * std::clamp(store_.quality_scores[i] * 0.01f, 0.0f, 1.0f);
+                float score = store_.isolation_scores[i] * len * qfac;
                 if (score > best || (score == best && store_.quality_scores[i] > best_quality)) {
                     best = score;
                     best_quality = store_.quality_scores[i];
@@ -2867,7 +2872,10 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
 
     while (!active.empty() && representatives.size() < max_reps) {
         // Compute fitness for all active members in parallel
-        // FPS fitness = distance × sqrt(size) — quality is a tie-breaker only
+        // FPS fitness = distance × sqrt(size) × (0.5+0.5·quality). Coverage/stopping uses
+        // raw similarity (max_sim_to_rep) not fitness, so the bounded quality factor shifts
+        // WHICH genome faces a region toward higher quality without changing how MANY reps
+        // are chosen or their ANI spread (Fable guardrail: FPS distance stays pure geometry).
         struct FitEntry { float dist_fit; float quality; size_t idx; };
         std::vector<FitEntry> fit_active(active.size());
         par_workers(cfg_.pool, cfg_.threads, [&](int _t, int _nt) {
@@ -2877,8 +2885,9 @@ std::vector<SimilarityEdge> GeodesicDerep::select_representatives() {
             // Fast angular distance proxy: sqrt(2(1-sim)) ≈ acos(sim) for sim near 1.
             // Preserves ranking for FPS candidate selection (monotonic in sim).
             float d_proxy = std::sqrt(2.0f * std::max(0.0f, 1.0f - sim));
-            // Primary fitness: distance × sqrt(size) — pure diversity signal
-            fit_active[ai] = {d_proxy * length_factors[i], store_.quality_scores[i], i};
+            // Primary fitness: distance × sqrt(size) × (0.5+0.5·quality) — diversity, quality-nudged
+            float qfac = 0.5f + 0.5f * std::clamp(store_.quality_scores[i] * 0.01f, 0.0f, 1.0f);
+            fit_active[ai] = {d_proxy * length_factors[i] * qfac, store_.quality_scores[i], i};
         }
         }); // par_workers fit_active
 

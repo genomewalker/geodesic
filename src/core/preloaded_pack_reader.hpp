@@ -103,6 +103,9 @@ public:
     std::optional<uint8_t> quality_tier_for_accession(std::string_view acc) const override {
         return inner_->quality_tier_for_accession(acc);
     }
+    std::optional<double> qual_score_for_accession(std::string_view acc) const override {
+        return inner_->qual_score_for_accession(acc);
+    }
 
     bool has_gstx() const override { return inner_->has_gstx(); }
     const genopack::GstxEntry* gstx_for_genus(std::string_view g) const override {
