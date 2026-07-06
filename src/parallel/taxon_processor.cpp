@@ -452,7 +452,10 @@ TaxonResult process_taxon(
         // count cutoff.  A genome with many contigs but decent average size (e.g. 600
         // contigs × 5 kb = 3 Mbp) is fine; one with avg < 1 kb is genuinely junk.
         // Only applied when a .gpk archive is available (provides metadata without FASTA read).
-        static constexpr double MIN_AVG_CONTIG_BP = 1000.0;  // 1 kb average contig size floor
+        // r232_v5 audit: at 1000bp, 56% of flags sat within 5% of the cutoff (900+
+        // genuinely-borderline exclusions) with a clean gap in the distribution between
+        // 657bp and 803bp; lowered to keep the genuinely fragmented tail out only.
+        static constexpr double MIN_AVG_CONTIG_BP = 700.0;  // avg contig size floor
         std::vector<GeodesicDerep::OutlierCandidate> preflagged_fragmented;
         if (gpk_reader && !taxon.genomes.empty()) {
             std::vector<Genome> clean_genomes;
