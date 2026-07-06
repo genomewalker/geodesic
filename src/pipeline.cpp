@@ -10,7 +10,7 @@
 #include "core/multi_pack_reader.hpp"
 #include "core/preloaded_pack_reader.hpp"
 #include "core/kmer_probe.hpp"
-#include "taxonomy/normalize.hpp"
+#include "taxonomy/species.hpp"
 #include "db/geodf/geodf_writer.hpp"
 #include "db/geodf/geodf_reader.hpp"
 #include "db/grd/grd_writer.hpp"
@@ -101,7 +101,7 @@ std::vector<Genome> accessions_to_genomes(
             ++n_missing_tax;
             continue;
         }
-        g.taxonomy = taxonomy::normalize_taxonomy(g.taxonomy, acc);
+        // Taxonomy is normalised at build time by genopack; trust the pack verbatim.
         auto canon = canonical_accession(acc);
         if (auto it = checkm2.find(canon); it != checkm2.end()) {
             g.completeness = it->second.completeness;
@@ -279,8 +279,12 @@ void process_taxa_parallel(
                             if (cfg.skip_lq && gpk_reader_ptr->is_lq(g.accession))
                                 continue;
                             if (cfg.min_cr > 0.0f) {
-                                auto cr = gpk_reader_ptr->completeness_cr_for_accession(g.accession);
-                                if (cr && *cr < cfg.min_cr)
+                                // Gate on INTRINSIC completeness (CheckM2-aligned genus-core
+                                // recovery), NOT completeness_cluster_relative — the latter is
+                                // pangenome breadth and would wrongly drop finished isolates in
+                                // diverse genera. See pack_reader completeness_effective_for_accession.
+                                auto comp = gpk_reader_ptr->completeness_effective_for_accession(g.accession);
+                                if (comp && *comp < cfg.min_cr)
                                     continue;
                             }
                             lq_filtered.genomes.push_back(g);

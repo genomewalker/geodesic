@@ -113,10 +113,13 @@ Config parse_args(int argc, char** argv) {
     derep->add_flag("--keep-intermediates", cfg.keep_intermediates, "Keep intermediate files");
     derep->add_flag("--skip-lq", cfg.skip_lq,
         "Exclude LQ genomes (requires pack with genopack check quality_tier_u8)");
-    derep->add_option("--min-cr", cfg.min_cr,
-        "Exclude genomes with completeness_cluster_relative below this fraction (0–1); "
-        "use with --skip-lq to also gate MQ genomes that are biologically incomplete "
-        "(e.g. --min-cr 0.5). Requires pack with QUAL section.")
+    derep->add_option("--min-completeness,--min-cr", cfg.min_cr,
+        "Exclude genomes whose INTRINSIC completeness (CheckM2-aligned genus single-copy/"
+        "prevalence-core recovery, completeness_aamer_core; post-decontam bp-retention as "
+        "fallback) is below this fraction (0–1), e.g. --min-completeness 0.5. This is genome "
+        "completeness, NOT pangenome breadth: it does not penalise finished isolates in "
+        "diverse genera. (--min-cr is a deprecated alias for the same intrinsic gate.) "
+        "Requires pack with QUAL section.")
         ->check(CLI::Range(0.0f, 1.0f));
     derep->add_flag("--resume", cfg.with_resume,
         "Write per-arch checkpoints to <out-dir>/.geodesic_resume/ and, if checkpoints "

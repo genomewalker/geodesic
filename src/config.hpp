@@ -77,7 +77,7 @@ struct Config {
     bool debug = false;
     bool keep_intermediates = false;
     bool  skip_lq    = false;
-    float min_cr     = 0.0f;   // min completeness_cluster_relative (0–1); 0 = disabled
+    float min_cr     = 0.0f;   // min INTRINSIC completeness (completeness_effective, 0–1); 0 = disabled. --min-cr is a deprecated alias for --min-completeness.
     bool  with_resume = false;  // write per-arch checkpoints; resume from them on restart
 
     // Logging verbosity: 0=quiet, 1=normal (default), 2=verbose, 3=debug

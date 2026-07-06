@@ -150,6 +150,20 @@ public:
         return it != arch_score_cache_[idx].end() ? std::optional{it->second} : std::nullopt;
     }
 
+    // Per-archive routing for intrinsic completeness (base build_qual_cache_() aliases
+    // local genome_ids across parts). Recomputes completeness_effective from the owning
+    // archive's QualRecord, matching pack_reader.hpp / genopack completeness_effective().
+    std::optional<float> completeness_effective_for_accession(std::string_view acc) const override {
+        build_arch_qual_cache_();
+        uint16_t idx = archive_idx_for_accession(acc);
+        if (idx == UINT16_MAX || idx >= arch_comp_eff_cache_.size()) return std::nullopt;
+        auto meta = archives_[idx].reader->genome_meta_by_accession(acc);
+        if (!meta) return std::nullopt;
+        auto it = arch_comp_eff_cache_[idx].find(meta->genome_id);
+        return it != arch_comp_eff_cache_[idx].end()
+             ? std::optional{it->second} : std::nullopt;
+    }
+
     bool has_gstx() const override {
         for (const auto& a : archives_)
             if (a.reader->has_gstx()) return true;
@@ -179,16 +193,37 @@ private:
     mutable std::once_flag                                        arch_tier_once_;
     mutable std::vector<std::unordered_map<genopack::GenomeId, uint8_t>> arch_tier_cache_;
     mutable std::vector<std::unordered_map<genopack::GenomeId, double>>  arch_score_cache_;
+    mutable std::vector<std::unordered_map<genopack::GenomeId, float>>   arch_comp_eff_cache_;
+
+    // Intrinsic completeness_effective from a single QualRecord. Mirrors
+    // pack_reader.hpp / genopack run_check.cpp: aamer_core (CheckM2-aligned genus
+    // core) primary, post_decontam fallback, cluster_relative only as a soft
+    // corroborator when the intrinsic signal also reads incomplete.
+    static std::optional<float> comp_eff_from_record_(const genopack::QualRecord& r) {
+        const float ac = r.completeness_aamer_core;
+        const float pd = r.completeness_post_decontam;
+        const float cr = r.completeness_cluster_relative;
+        const float intrinsic = !std::isnan(ac) ? ac : pd;
+        if (std::isnan(intrinsic))
+            return std::isnan(cr) ? std::nullopt : std::optional{cr};
+        if (intrinsic < 0.90f && !std::isnan(cr) && cr < intrinsic
+            && (intrinsic - cr) > 0.30f)
+            return std::sqrt(intrinsic * cr);
+        return intrinsic;
+    }
 
     void build_arch_qual_cache_() const {
         std::call_once(arch_tier_once_, [this] {
             arch_tier_cache_.resize(archives_.size());
             arch_score_cache_.resize(archives_.size());
+            arch_comp_eff_cache_.resize(archives_.size());
             for (size_t i = 0; i < archives_.size(); ++i) {
                 if (!archives_[i].reader->has_qual()) continue;
                 archives_[i].reader->scan_qual([&](const genopack::QualRecord& r) {
                     arch_tier_cache_[i][r.genome_id]  = r.quality_tier_u8;
                     arch_score_cache_[i][r.genome_id] = genome_quality_score(r);
+                    if (auto ce = comp_eff_from_record_(r))
+                        arch_comp_eff_cache_[i][r.genome_id] = *ce;
                 });
             }
         });

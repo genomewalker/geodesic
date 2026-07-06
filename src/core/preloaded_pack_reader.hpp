@@ -106,6 +106,10 @@ public:
     std::optional<double> qual_score_for_accession(std::string_view acc) const override {
         return inner_->qual_score_for_accession(acc);
     }
+    // Forward to inner so a multi-pack inner uses its per-archive (non-aliasing) path.
+    std::optional<float> completeness_effective_for_accession(std::string_view acc) const override {
+        return inner_->completeness_effective_for_accession(acc);
+    }
 
     bool has_gstx() const override { return inner_->has_gstx(); }
     const genopack::GstxEntry* gstx_for_genus(std::string_view g) const override {

@@ -125,10 +125,42 @@ struct IPackReader {
     }
 
     // Returns completeness_cluster_relative (fraction 0–1), or empty if unavailable.
+    // NOTE: this is PANGENOME FRACTION (genus-pangenome breadth), NOT intrinsic
+    // completeness. A finished isolate in a diverse genus reports a low value here.
+    // Kept for reporting; do NOT use it as a completeness quality gate — use
+    // completeness_effective_for_accession() instead.
     std::optional<float> completeness_cr_for_accession(std::string_view acc) const {
         build_qual_cache_();
         auto it = qual_cr_cache_.find(std::string(acc));
         return it != qual_cr_cache_.end() ? std::optional{it->second} : std::nullopt;
+    }
+
+    // Intrinsic completeness in [0,1], or empty if no QUAL signal.
+    // Mirrors genopack run_check.cpp completeness_effective(): the CheckM2-aligned
+    // genus single-copy/prevalence core coverage (completeness_aamer_core) is the
+    // primary signal, bp-retention (completeness_post_decontam) the fallback.
+    // completeness_cluster_relative enters only as a soft corroborator: it pulls the
+    // estimate down solely when the intrinsic signal ALSO reads incomplete and the
+    // two disagree by >0.30 — never on its own (a low cr in a diverse genus is genus
+    // breadth, not missing sequence).
+    virtual std::optional<float> completeness_effective_for_accession(std::string_view acc) const {
+        build_qual_cache_();
+        const std::string key(acc);
+        auto ia = qual_aamer_core_cache_.find(key);
+        auto ip = qual_post_decontam_cache_.find(key);
+        const float ac = ia != qual_aamer_core_cache_.end()   ? ia->second : NAN;
+        const float pd = ip != qual_post_decontam_cache_.end() ? ip->second : NAN;
+        const float intrinsic = !std::isnan(ac) ? ac : pd;
+        auto ic = qual_cr_cache_.find(key);
+        const float cr = ic != qual_cr_cache_.end() ? ic->second : NAN;
+        if (std::isnan(intrinsic)) {
+            // No intrinsic signal at all → cluster_relative is the only proxy.
+            return std::isnan(cr) ? std::nullopt : std::optional{cr};
+        }
+        if (intrinsic < 0.90f && !std::isnan(cr) && cr < intrinsic
+            && (intrinsic - cr) > 0.30f)
+            return std::sqrt(intrinsic * cr);
+        return intrinsic;
     }
 
 private:
@@ -138,11 +170,17 @@ private:
             std::unordered_map<genopack::GenomeId, double>  id_scores;
             std::unordered_map<genopack::GenomeId, uint8_t> id_tiers;
             std::unordered_map<genopack::GenomeId, float>   id_cr;
+            std::unordered_map<genopack::GenomeId, float>   id_aamer_core;
+            std::unordered_map<genopack::GenomeId, float>   id_post_decontam;
             scan_qual([&](const genopack::QualRecord& r) {
                 id_scores[r.genome_id] = genome_quality_score(r);
                 id_tiers[r.genome_id]  = r.quality_tier_u8;
                 if (!std::isnan(r.completeness_cluster_relative))
                     id_cr[r.genome_id] = r.completeness_cluster_relative;
+                if (!std::isnan(r.completeness_aamer_core))
+                    id_aamer_core[r.genome_id] = r.completeness_aamer_core;
+                if (!std::isnan(r.completeness_post_decontam))
+                    id_post_decontam[r.genome_id] = r.completeness_post_decontam;
             });
             scan_genome_accessions([&](std::string_view a, genopack::GenomeId gid) {
                 auto is = id_scores.find(gid);
@@ -151,6 +189,12 @@ private:
                 if (it != id_tiers.end()) qual_tier_cache_[std::string(a)]  = it->second;
                 auto ic = id_cr.find(gid);
                 if (ic != id_cr.end()) qual_cr_cache_[std::string(a)]       = ic->second;
+                auto iac = id_aamer_core.find(gid);
+                if (iac != id_aamer_core.end())
+                    qual_aamer_core_cache_[std::string(a)] = iac->second;
+                auto ipd = id_post_decontam.find(gid);
+                if (ipd != id_post_decontam.end())
+                    qual_post_decontam_cache_[std::string(a)] = ipd->second;
             });
         });
     }
@@ -159,6 +203,8 @@ private:
     mutable std::unordered_map<std::string, double> qual_score_cache_;
     mutable std::unordered_map<std::string, uint8_t> qual_tier_cache_;
     mutable std::unordered_map<std::string, float>  qual_cr_cache_;
+    mutable std::unordered_map<std::string, float>  qual_aamer_core_cache_;
+    mutable std::unordered_map<std::string, float>  qual_post_decontam_cache_;
 
 public:
     // Taxonomy access (TAXN section).
