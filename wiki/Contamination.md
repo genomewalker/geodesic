@@ -5,6 +5,10 @@ runs inside the dereplication pipeline, and the **genopack QUAL suite** — a ba
 quality signals computed during archive construction that scales to tens of millions of genomes
 without any marker-gene database.
 
+The QUAL scoring methods (completeness, contamination aggregate, quality score, tiers) are
+specified in the genopack [Quality Scoring](https://genomewalker.github.io/genopack/quality/) docs;
+this page covers how geodesic consumes them plus its own embedding-based outlier track.
+
 ---
 
 ## Why contamination matters for representative selection
