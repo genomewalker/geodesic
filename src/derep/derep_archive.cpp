@@ -88,8 +88,7 @@ struct GpdHeader {
     uint16_t n_parts;
     uint16_t embedding_dim;
     uint8_t  embedding_dtype;
-    uint8_t  has_cstats;
-    uint8_t  pad0[2];
+    uint8_t  pad0[3];
     uint64_t n_genomes;
     uint64_t n_reps;
     uint64_t n_unclustered;
@@ -124,7 +123,7 @@ struct GpdRepEntry {
     uint16_t sketch_kmer;
     uint8_t  flags;
     uint8_t  pad;
-    uint32_t cstat_offset;
+    uint32_t reserved;
 };
 static_assert(sizeof(GpdRepEntry) == 24);
 
@@ -498,7 +497,7 @@ void DerepArchiveBuilder::finalize() {
         e.sketch_kmer   = rep_rows[r].sketch_kmer;
         e.flags         = 0x01; // has_embedding
         e.pad           = 0;
-        e.cstat_offset  = 0xFFFFFFFFu;
+        e.reserved      = 0;
     }
 
     // ── EMBD raw ──────────────────────────────────────────────────────────────
@@ -534,7 +533,6 @@ void DerepArchiveBuilder::finalize() {
     hdr.n_parts        = static_cast<uint16_t>(imp.parts.size());
     hdr.embedding_dim  = cfg.embedding_dim;
     hdr.embedding_dtype = cfg.embedding_dtype;
-    hdr.has_cstats     = 0;
     hdr.n_genomes      = n_genomes;
     hdr.n_reps         = n_reps;
     hdr.n_unclustered  = n_unclustered;

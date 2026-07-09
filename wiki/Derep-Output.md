@@ -136,7 +136,7 @@ A `.gpd` is a **single file**, not a directory:
 
 ```
 [GpdFileHeader               64 B]
-[Section blobs ...] (HDR · ASTR · ASOF · ARMP · RTBL · G2RM · EMBD · [CSTAT])
+[Section blobs ...] (HDR · ASTR · ASOF · ARMP · RTBL · G2RM · EMBD)
 [TOC                                ]
 [GpdTailLocator             16 B   ]
 ```
@@ -173,7 +173,6 @@ All multi-byte integers are little-endian; section payloads are 8-byte aligned (
 | `GRTB` | RTBL | Rep table (one entry per representative) |
 | `G2RM` | G2RM | `uint32_t rep_id[n_genomes]` (sentinels: `0xFFFFFFFE` unclustered, `0xFFFFFFFF` tombstoned) |
 | `GEMB` | EMBD | Rep-only embedding matrix (default f16 × dim, typically 256) |
-| `GCST` | CSTAT| Optional per-cluster QC statistics |
 | `GTOC` | TOC  | Section descriptor table |
 
 ### TOC section
@@ -211,8 +210,7 @@ struct GpdHeader {
     uint16_t n_parts;          // source pack parts at derep time
     uint16_t embedding_dim;    // typically 256
     uint8_t  embedding_dtype;  // 0=f32, 1=f16
-    uint8_t  has_cstats;       // 1 if CSTAT section is present
-    uint8_t  pad0[2];
+    uint8_t  pad0[3];
     uint64_t n_genomes;        // total genomes covered (= sum of part live_counts)
     uint64_t n_reps;
     uint64_t n_unclustered;
@@ -296,7 +294,7 @@ struct GpdRepEntry {           // 24 bytes
     uint16_t sketch_kmer;      // which k-mer size produced the winning sketch
     uint8_t  flags;            // bit0=has_embedding (must be 1 in v1)
     uint8_t  pad;
-    uint32_t cstat_offset;     // index into CSTAT, or 0xFFFFFFFF if absent
+    uint32_t reserved;         // reserved (zero)
 } entries[n_reps];
 ```
 
@@ -328,26 +326,6 @@ uint32_t pad1;
 ```
 
 Default dtype is **f16** (~270 MB for 546k × 256). Loss is acceptable for cosine search; mapping pipelines that need f32 can request via `--emit-gpd-embedding-dtype f32` at write time (when exposed; currently fixed at f16 from geodesic).
-
-## CSTAT section — cluster stats (reserved, not currently emitted)
-
-```c
-uint32_t magic = 'GCST';
-uint32_t n_entries;            // ≤ n_reps; sparse if cstat_offset != UINT32_MAX in RTBL
-uint64_t pad;
-struct GpdClusterStat {        // 12 bytes
-    float    mean_jaccard;     // mean pairwise jaccard within cluster
-    float    max_distance;     // max member-to-rep jaccard distance
-    uint16_t n_members_used;   // sample size for the stats above
-    uint8_t  flags;            // bit0=outlier
-    uint8_t  pad;
-} stats[n_entries];
-```
-
-This layout is reserved but **not currently written**: the writer hardcodes
-`has_cstats = 0` (`src/derep/derep_archive.cpp:537`), so no CSTAT section and no
-`cstat_offset` entries are emitted. The struct is documented here for the format
-spec; readers should treat the section as absent.
 
 ---
 

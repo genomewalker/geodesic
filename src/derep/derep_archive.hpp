@@ -15,7 +15,6 @@ struct DerepArchiveBuilderConfig {
     uint16_t              embedding_dim;
     uint8_t               embedding_dtype; // 0=f32, 1=f16
     bool                  emit_armp  = true;
-    bool                  emit_cstat = false;
     int                   zstd_level = 19;
     std::string           geodesic_version;
 };

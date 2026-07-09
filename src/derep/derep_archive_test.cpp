@@ -55,7 +55,7 @@ struct GpdHeader {
     uint32_t magic; uint16_t format_major; uint16_t format_minor;
     uint64_t created_at_unix; uint8_t run_id[16];
     uint16_t n_parts; uint16_t embedding_dim;
-    uint8_t embedding_dtype; uint8_t has_cstats; uint8_t pad0[2];
+    uint8_t embedding_dtype; uint8_t pad0[3];
     uint64_t n_genomes; uint64_t n_reps; uint64_t n_unclustered;
 };
 static_assert(sizeof(GpdHeader) == 64);
@@ -67,7 +67,7 @@ struct RtblHeader { uint32_t magic; uint32_t n_reps; uint64_t pad; };
 struct GpdRepEntry {
     uint32_t rep_acc_ord; uint32_t cluster_size;
     uint64_t source_locator; uint16_t sketch_kmer;
-    uint8_t flags; uint8_t pad; uint32_t cstat_offset;
+    uint8_t flags; uint8_t pad; uint32_t reserved;
 };
 static_assert(sizeof(GpdRepEntry) == 24);
 
