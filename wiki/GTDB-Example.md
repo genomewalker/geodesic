@@ -201,7 +201,7 @@ The CheckM2 TSV should have columns `accession`, `completeness`, `contamination`
 | `gtdb_r232_diversity_stats.tsv` | Per-taxon coverage and diversity metrics |
 | `gtdb_r232_stats.tsv` | Per-taxon pipeline stats (MST edges, ANI threshold, outlier counts) |
 | `gtdb_r232_outliers.tsv` | Contamination candidates flagged by the MAD-based estimator |
-| `gtdb_r232_failed.tsv` | Genomes that failed sketching or embedding (`accession`, `taxonomy`, `reason`) |
+| `gtdb_r232_failed.tsv` | Unresolvable accessions (`accession`, `taxonomy`, `file`, `reason`). Genomes that resolve in the pack but lack a sketch are kept as self-representative singletons, not failed |
 | `gtdb_r232.gpd` | Geodesic Derep Archive — machine-readable rep set consumed by `genopack::DerepView` |
 | `gtdb_r232.lock` | JSON provenance file; input to `geodesic update` for incremental re-runs |
 

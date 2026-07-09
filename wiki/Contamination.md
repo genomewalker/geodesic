@@ -69,17 +69,17 @@ the archive construction pipeline. At 9.3 M genomes (GTDB r232) the QUAL section
 | `completeness_aamer_core` | AAMER-based core k-mer completeness (genus-level conserved k-mers) |
 | `completeness_aamer_family_core` | AAMER-based completeness using family-level conserved k-mers |
 
-`completeness_cluster_relative` is the most reliable single completeness proxy at scale: it
-compares a genome's k-mer count against the median k-mer count of all genomes in the same GTDB
-species cluster. Values below 0.5 reliably identify assemblies that CheckM2 rates below 50 %
-completeness (88 % concordance validated on 17 R. *rectalis* cases spanning 37–49 % CheckM2
-completeness, CR 0.26–0.39).
+`completeness_cluster_relative` compares a genome's occupied-bin count against the median of
+its GTDB species cluster. It reflects pangenome breadth relative to the cluster, not intrinsic
+completeness: a finished isolate in a diverse genus reports a low value because the cluster
+median carries more accessory content, not because sequence is missing. geodesic does not gate
+on it directly — the intrinsic gate (`--min-completeness`, below) uses genus single-copy-core
+recovery, and folds `completeness_cluster_relative` in only as a soft corroborator when the
+core signal also reads incomplete.
 
-**Important distinction from `sketch_fill`**: `sketch_fill` measures k-mer sketch saturation —
-whether enough total sequence is present to fill all OPH bins. A genome with 1.5 Mb of
-repetitive or contaminant sequence can achieve `sketch_fill = 1.0` while having only 37 %
-CheckM2 completeness. `completeness_cluster_relative` normalises by the expected k-mer count
-for the taxon and is immune to this failure mode.
+`sketch_fill` measures OPH bin saturation — whether enough total sequence is present to fill
+all bins. A genome with 1.5 Mb of repetitive or contaminant sequence can reach
+`sketch_fill = 1.0` while being incomplete, so it is not a completeness gate either.
 
 ### Contamination signals
 
@@ -143,24 +143,25 @@ Excludes all genomes with `quality_tier = LQ` from FPS representative selection.
 Genomes without a QUAL record pass through (the three-state rule: LQ → skip, HQ/MQ → keep,
 unknown → keep).
 
-### `--min-cr FLOAT`
+### `--min-completeness FLOAT` (alias `--min-cr`)
 
-Excludes genomes with `completeness_cluster_relative` below the given threshold (0–1),
-regardless of their tier. Use this to also gate MQ genomes that are biologically incomplete:
+Excludes genomes whose intrinsic completeness is below the given threshold (0–1), regardless
+of tier. The intrinsic estimate is genus single-copy/prevalence-core recovery
+(`completeness_aamer_core`), with post-decontam bp-retention (`completeness_post_decontam`) as
+fallback; `completeness_cluster_relative` corroborates only when the core signal also reads
+incomplete. This is genome completeness, not pangenome breadth — it does not penalise finished
+isolates in diverse genera.
 
 ```bash
 geodesic derep \
     --skip-lq \
-    --min-cr 0.5 \
+    --min-completeness 0.5 \
     ...
 ```
 
-`--min-cr 0.5` maps to ~50 % CheckM2 completeness based on the validated concordance above.
-It correctly excludes the 17 R. *rectalis* MQ genomes (CR 0.26–0.39, CheckM2 37–49 %) that
-`--skip-lq` alone misses, because those genomes have `completeness_post_decontam = 1.0`
-(their k-mers are taxonomically clean) while being genuinely incomplete.
-
-Genomes with no QUAL record in the archive are never excluded by `--min-cr`.
+Use it to gate MQ genomes that are biologically incomplete but pass `--skip-lq` because their
+k-mers are taxonomically clean. Genomes with no QUAL record are never excluded. `--min-cr` is a
+deprecated alias for the same gate.
 
 ---
 
@@ -171,17 +172,18 @@ instead of — the QUAL-based gates above.
 
 ### CheckM2
 
-When CheckM2 quality estimates are available (`--checkm2`), contamination enters the fitness
-function as a tie-breaker:
+When CheckM2 quality estimates are available (`--checkm2`), quality enters the fitness function
+as a bounded factor $\hat{q} = \mathrm{clamp}(q/100,\ 0,\ 1)$, with
+$q = \text{completeness} - 5 \times \text{contamination}$:
 
 $$
-\text{fitness}_i = d_i \cdot \sqrt{L_i / L_m}
+\text{fitness}_i = d_i \cdot \sqrt{L_i / L_m} \cdot (0.5 + 0.5\,\hat{q}_i)
 $$
 
-where quality $q = \text{completeness} - 5 \times \text{contamination}$ modulates selection
-only between candidates with equal fitness. A genome with 10 % CheckM2 contamination loses
-50 quality points, making it less likely to win ties while keeping the primary selection
-signal (diversity) unaffected.
+The factor lies in $[0.5, 1.0]$; coverage and the stopping test use raw similarity, so it
+shifts which genome is chosen for a region toward higher quality without changing the number of
+representatives or their ANI spread. A genome with 10 % CheckM2 contamination loses 50 quality
+points and is deprioritised.
 
 ### GUNC
 

@@ -6,7 +6,7 @@
 
 ## Overview
 
-`geodesic` selects a diverse set of representative genomes per taxon for reference-based short-read mapping. The core challenge is scale: a species like *E. coli* may have 200,000+ assemblies, making all-pairs comparison infeasible. geodesic sidesteps this by placing all genomes on a unit sphere via a compact sketch-based embedding, then greedily picking the most spread-out subset using Farthest Point Sampling. A final sketch-space certification pass guarantees that every genome lands within the ANI threshold of at least one representative.
+`geodesic` selects a diverse set of representative genomes per taxon for reference-based short-read mapping. All-pairs comparison is infeasible at scale — a species like *E. coli* has 200,000+ assemblies. geodesic embeds all genomes on a unit sphere from their sketches, greedily picks the most spread-out subset by Farthest Point Sampling, then runs a sketch-space certification pass so every genome lands within the ANI threshold of at least one representative.
 
 The pipeline has eight phases:
 
@@ -310,19 +310,19 @@ Per-component thresholds are used for FPS when the graph remains disconnected.
 
 [Farthest point sampling (FPS)](https://en.wikipedia.org/wiki/Farthest-first_traversal) selects representatives greedily: each step adds the uncovered genome with the highest fitness score. For unweighted FPS on a metric space, this gives a 2-approximation to the k-center problem (Gonzalez 1985).
 
-**Fitness score.** Each genome is scored by distance and size:
+**Fitness score.** Each genome is scored by distance, size, and a bounded quality factor:
 
 $$
-\mathrm{fitness}_i = d_i \cdot \sqrt{\frac{L_i}{L_m}}
+\mathrm{fitness}_i = d_i \cdot \sqrt{\frac{L_i}{L_m}} \cdot \left(0.5 + 0.5\,\hat{q}_i\right), \qquad \hat{q}_i = \mathrm{clamp}(q_i / 100,\ 0,\ 1)
 $$
 
-where $d_i = \sqrt{2(1 - s_i)}$ is the angular distance proxy to the nearest representative (monotonic in true angular distance), $L_i$ is genome length, and $L_m$ is the taxon median genome length. Quality serves as a **tie-breaker only** -- it does not multiply into fitness. This preserves the pure FPS objective (maximize diversity) while preferring higher-quality assemblies among equidistant candidates.
+where $d_i = \sqrt{2(1 - s_i)}$ is the angular distance proxy to the nearest representative (monotonic in true angular distance), $L_i$ is genome length, and $L_m$ is the taxon median genome length. The quality factor lies in $[0.5, 1.0]$, so it shifts which genome is chosen for a region toward higher quality without dominating the distance term. Coverage and the stopping test use raw similarity, not fitness, so quality changes which representatives are picked but not how many or their ANI spread. Quality also breaks exact fitness ties (higher $q_i$ wins).
 
 **Quality score** $q_i$ is:
 - **With CheckM2** (`--checkm2`): $q_i = \mathrm{completeness} - 5 \times \mathrm{contamination}$
 - **Without CheckM2**: $q_i = (n_{\mathrm{real\_bins}} / \mathrm{sketch\_size}) \times 100$ (sketch completeness)
 
-The ad-hoc proxy measures what fraction of the OPH sketch bins are filled -- a simple, geometry-independent proxy for assembly completeness. Unlike the previous centrality-based formula, sketch completeness does not anti-correlate with isolation, avoiding the parabolic fitness that selected mid-isolation genomes.
+The sketch-completeness proxy is the fraction of OPH bins filled. It does not anti-correlate with isolation, so it avoids the parabolic fitness of a centrality-based proxy.
 
 **Algorithm:**
 1. Seed: select the genome maximising $\mathrm{isolation} \times \sqrt{L_i / L_{\mathrm{med}}}$ as the first representative (quality breaks ties)

@@ -18,10 +18,9 @@ materialise genomes on disk.
 
 ## Implementation
 
-`geodesic ani` is a purpose-built FracMinHash ANI engine tightly integrated with
-the genopack archive format. It shares the same algorithmic core as
-[skani](https://github.com/bluenote-1577/skani) but is designed for zero-disk-I/O
-operation against large pre-built archives.
+`geodesic ani` computes FracMinHash ANI directly from a genopack archive. It uses
+the same k-mer Jaccard core as [skani](https://github.com/bluenote-1577/skani), but
+reads sketches from the pack in memory with no FASTA extraction to disk.
 
 ### k-mer encoding and hashing
 

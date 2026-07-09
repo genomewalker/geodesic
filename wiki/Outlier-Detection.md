@@ -69,15 +69,15 @@ $$
 q = \text{completeness} - 5 \times \text{contamination}
 $$
 
-This score is used as a **tie-breaker** in FPS, not as a multiplier in the primary fitness:
+This score enters FPS as a bounded factor $\hat{q} = \mathrm{clamp}(q/100,\ 0,\ 1)$ on the fitness:
 
 $$
-\text{fitness}_i = d_i \cdot \sqrt{\frac{L_i}{L_m}}
+\text{fitness}_i = d_i \cdot \sqrt{\frac{L_i}{L_m}} \cdot \left(0.5 + 0.5\,\hat{q}_i\right)
 $$
 
-where $d_i$ is the angular-distance proxy to the nearest current representative and $L_m$ is the taxon median genome length. When two candidates have fitness values within $10^{-5}$ of each other, the one with higher $q$ is selected. This preserves the pure diversity objective (maximise spread) while preferring higher-quality assemblies among equidistant candidates.
+where $d_i$ is the angular-distance proxy to the nearest current representative and $L_m$ is the taxon median genome length. The factor lies in $[0.5, 1.0]$, so it nudges selection toward higher-quality assemblies without overriding the distance term; coverage and the stopping test use raw similarity, not fitness, so the number of representatives and their ANI spread are unchanged. When two candidates have fitness within $10^{-5}$, the one with higher $q$ is selected.
 
-A genome with 10% CheckM2 contamination loses 50 quality points and is consistently deprioritised as a tie-break loser. Heavily contaminated genomes that are also isolation-score outliers are excluded entirely via the `nn_outlier` flag. The embedding-based `nn_outlier` flag is the fallback when CheckM2 scores are unavailable.
+A genome with 10% CheckM2 contamination loses 50 quality points and is deprioritised. Heavily contaminated genomes that are also isolation-score outliers are excluded entirely via the `nn_outlier` flag. The embedding-based `nn_outlier` flag is the fallback when CheckM2 scores are unavailable.
 
 ---
 
