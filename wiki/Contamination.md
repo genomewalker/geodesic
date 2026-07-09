@@ -32,7 +32,7 @@ Six per-genome signals are computed for every taxon during the dereplication run
 | `isolation_score` | Mean angular distance to the $k$ nearest neighbours ($k = \max(10,\, \min(20,\, \lfloor\log_2 n\rfloor))$); high = isolated = anomalous |
 | `centroid_distance` | Angular distance from the species centroid |
 | `genome_size_zscore` | Z-score of genome size relative to taxon distribution |
-| `kmer_div_zscore` | GUNC clade-separation score (CSS) when GUNC output is available (`--gunc-scores`); 0 otherwise. A chimeric assembly scores high CSS because its marker genes span multiple clades. The field name is a historical artefact — it does not store a k-mer density z-score. |
+| `kmer_div_zscore` | K-mer diversity z-score: occupied OPH bins per kbp ($n_{\text{real}}/\text{kbp}$) relative to the taxon mean. Informational only — computed and stored, never used as a flagging criterion. A chimeric assembly tends to score high (k-mers from both parents inflate occupied bins per kbp). |
 | `anomaly_score` | Currently equal to `isolation_score`; reserved for future composite scoring |
 | `nn_outlier` | Boolean: `isolation_score` exceeds the taxon threshold — primary exclusion criterion |
 
@@ -98,7 +98,7 @@ all bins. A genome with 1.5 Mb of repetitive or contaminant sequence can reach
 | `contamination_contig_split` | Fraction of contigs that appear split (two incompatible k-mer pools within a single contig) |
 | `contamination_duplication` | Excess k-mer duplication relative to taxon expectation |
 | `contamination_mixture` | Fraction of windows best explained by a two-genome mixture model |
-| `contamination_spe` | Single-pass entropy contamination estimate |
+| `contamination_spe` | PCA Squared Prediction Error (residual outside the retained principal-component subspace), paired with the Hotelling $T^2$ statistic to flag genomes whose k-mer composition departs from the taxon's PCA model |
 | `contamination_rho_outlier` | Rank-correlation outlier score across the k-mer distribution |
 
 ### Genome-coherence signals
@@ -115,14 +115,13 @@ all bins. A genome with 1.5 Mb of repetitive or contaminant sequence can reach
 ### Quality tier
 
 All signals feed into a single `quality_tier` (LQ / MQ / HQ) and a MIMAG-compatible
-`mimag_tier` output. The composite score used for the tier:
-
-$$
-q = c_{\text{eff}} \times 100 - 5 \times \text{contamination\_leakage} \times 100
-$$
-
-where $c_{\text{eff}} = \text{completeness\_post\_decontam}$ when not NaN, else
-`completeness_cluster_relative`.
+`mimag_tier` output. The tier is not a single linear formula — genopack assigns it via a
+rule chain over: an effective completeness (`comp_eff`, taken from the first available of
+marker → `completeness_aamer_core` → `completeness_post_decontam`), an NA-safe contamination
+aggregate over the contamination signals above, a count of trusted quality axes, and the
+Fiedler coherence value. The exact rule chain and thresholds are specified in the genopack
+[Quality Scoring](https://genomewalker.github.io/genopack/quality/) docs and are not restated
+here to avoid drift.
 
 ### GTDB r232 results (9.3 M genomes)
 

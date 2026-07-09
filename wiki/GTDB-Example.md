@@ -162,7 +162,7 @@ geodesic derep \
     --pack gtdb_r232.gpk \
     --threads 24 \
     -p gtdb_r232 \
-    --emit-gpd \
+    --emit-gpd gtdb_r232.gpd \
     --lock-output gtdb_r232.lock
 ```
 
@@ -175,7 +175,7 @@ geodesic derep \
     --threads 24 \
     -p gtdb_r232 \
     --checkm2 checkm2_quality.tsv \
-    --emit-gpd \
+    --emit-gpd gtdb_r232.gpd \
     --lock-output gtdb_r232.lock
 ```
 
@@ -299,7 +299,9 @@ will be very slow.
 
 **Sketch preload memory scales with sketch budget, not genome count.** The default
 sketch budget is 64 GB; geodesic loads as many genus-level sketches as fit, then
-processes in waves. You can lower it with `--sketch-budget-mb` if RAM is limited.
+processes in waves. You can lower it via the `GEODESIC_BUCKET_RAM_GB` environment
+variable (or `GEODESIC_BUCKET_RAM_MB` for finer control) if RAM is limited, e.g.
+`GEODESIC_BUCKET_RAM_GB=32 geodesic derep …`.
 
 **`--taxon-rank g` during build is critical for NFS performance.** Genomes from the
 same genus end up in the same shard file. Geodesic reads sketches genus by genus,

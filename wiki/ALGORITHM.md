@@ -227,7 +227,7 @@ Beyond $d=256$, accuracy improves by $< 0.1\%$ while cost doubles. The embedding
 
 ## Phase 3: HNSW index
 
-A [Hierarchical Navigable Small World (HNSW)](https://arxiv.org/abs/1603.09320) index (Malkov & Yashunin 2018) is built over all $n$ unit-sphere embeddings using inner product as the metric. HNSW is a graph-based approximate nearest-neighbour structure that supports sub-linear query time by navigating a layered proximity graph from coarse to fine resolution. Default parameters: $M = 48$, ef\_construction $= 400$, ef\_search $= 200$ (raised dynamically during K_cap retries).
+A [Hierarchical Navigable Small World (HNSW)](https://arxiv.org/abs/1603.09320) index (Malkov & Yashunin 2018) is built over all $n$ unit-sphere embeddings using inner product as the metric. HNSW is a graph-based approximate nearest-neighbour structure that supports sub-linear query time by navigating a layered proximity graph from coarse to fine resolution. Default parameters: $M = 48$, ef\_construction $= 400$, ef\_search $= 50$ at build; the isolation pass raises it to $\max(2\,K_{\mathrm{cap}},\, \min(200,\, n/100))$ during querying, and it is raised further at each $K_{\mathrm{cap}}$ retry level.
 
 The index serves two purposes:
 - Computing isolation scores (Phase 4): finding the $k_{\mathrm{iso}} = \max(10, \min(20, \lfloor\log_2 n\rfloor))$ nearest neighbours of each genome; collecting up to $K_{\mathrm{cap}}$ edges per genome for the adaptive MST threshold derivation
@@ -493,8 +493,8 @@ Typical values: $p \approx 512$, $m \in \{5{,}000,\, 10{,}000,\, 20{,}000\}$ (ti
 - **GEODF**: results written to flat binary file; interrupted runs resume via GEODF crash recovery.
 - **Anchor slab**: anchor signatures ($p \times m \times 2$ bytes, e.g. $512 \times 4{,}096 \times 2 = 4\ \mathrm{MB}$ at the medium tier or $512 \times 10{,}000 \times 2 \approx 10\ \mathrm{MB}$ at the typical tier) packed into a contiguous aligned buffer for cache-friendly Gram matrix computation.
 - **Producer-consumer I/O**: genome decompression overlapped with k-mer computation via bounded semaphore.
-- **Async DB writer**: taxon results are pushed to a `AsyncDBWriter` background thread that micro-batches writes (up to 500 taxa or 100,000 rows per transaction, flushed every 500 ms or when the batch fills). This decouples DB I/O from the compute workers; the queue capacity is 2,000 pending payloads before back-pressure kicks in.
-- **NFS robustness**: `embed_genome()` retries failed reads up to 3 times with 500 ms / 1 s backoff; permanently failed genomes recorded in the `jobs_failed` table.
+- **Binary result writer**: taxon results are written to the GEODF flat binary (and the optional GRD archive for visualization) via positioned `pwrite` at computed offsets. There is no SQLite database or background batching thread in the tree.
+- **NFS robustness**: the GEODF/GRD writers retry a failed `pwrite` on `ENOSPC`/`EIO` with exponential backoff — `retry_secs` starts at 5 s and doubles, capped at 300 s; any other error throws immediately.
 
 ---
 

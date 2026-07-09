@@ -16,9 +16,9 @@ cmake --build build --parallel
 ## Usage
 
 ```bash
-geodesic derep -g accessions.txt --pack mydb.gpk -p run1 -t 16
+geodesic derep -g accessions.txt --pack mydb.gpk -p run1 --threads 16
 geodesic ani   --ql queries.txt  --pack mydb.gpk -t 16 -o ani.tsv
-geodesic update -g new.txt --lock run1.lock --pack mydb.gpk -t 16
+geodesic update -g new.txt --lock run1.lock --pack mydb.gpk --threads 16
 ```
 
 `--ani-threshold` (default 95.0), `--seed` (default 42), `--threads`, `--tmp-dir`, `--checkm2`, `--gunc-scores`.
@@ -29,9 +29,11 @@ geodesic update -g new.txt --lock run1.lock --pack mydb.gpk -t 16
 
 | File | Contents |
 |------|----------|
-| `<prefix>_derep_genomes.tsv` | accession, taxon, rep, cluster_rep, nn_dist, sketch_fill |
+| `<prefix>_derep_genomes.tsv` | accession, taxonomy, representative, cluster_rep, nn_dist, sketch_fill |
 | `<prefix>_results.tsv` | per-taxon: method, n_genomes, n_genomes_derep, communities, weight |
 | `<prefix>_stats.tsv` | per-taxon: preflight/quality counts, θ used |
+| `<prefix>_diversity_stats.tsv` | per-taxon: diversity ANI range, n_pairs, outliers excluded/retained |
+| `<prefix>_outliers.tsv` | flagged candidates: category, nn_outlier, isolation_score, kmer_div_zscore, flag_reason, excluded |
 | `<prefix>_failed.tsv` | accession, taxonomy, file, reason (resolve/embed failures; sketch-less-but-resolvable genomes are kept as self-reps) |
 
 `--grd-output`, `--geodf-output`, `--lock-output` needed for distributed/incremental runs.
@@ -39,7 +41,7 @@ geodesic update -g new.txt --lock run1.lock --pack mydb.gpk -t 16
 ## Distributed
 
 ```bash
-geodesic scatter -g genomes.txt --pack mydb.gpk -n 4 -o dist/ -t 16
+geodesic scatter -g genomes.txt --pack mydb.gpk -n 4 -o dist/ --threads 16
 parallel -j4 < dist/run.sh
 geodesic gather -d dist/ -o dist/merged.grd -p merged
 ```
@@ -49,7 +51,7 @@ geodesic gather -d dist/ -o dist/merged.grd -p merged
 1. Two OPH signatures per genome (k=21, m=10,000 by default).
 2. Nyström extension onto the unit sphere; symmetric Laplacian + Tikhonov regularisation.
 3. HNSW index on the sphere.
-4. Isolation scores from k_iso = max(10, min(20, ⌊log₂n⌋)) neighbours; θ = longest MST edge; outliers by MAD Z-score.
+4. Isolation scores from k_iso = max(10, min(20, ⌊log₂n⌋)) neighbours; θ = min(θ_ANI, max(θ_MST, θ_ANI/4)), where θ_MST is the MST max edge with outlier bridges excluded and capped at the closest cross-cluster pair; outliers by MAD Z-score.
 5. Greedy FPS θ-cover; fitness = d·√(L/L_m)·(0.5+0.5·q̂), q̂ = clamp(quality/100, 0, 1).
 6. Union-Find coalescence within d_min; borderline non-reps rechecked by OPH Jaccard.
 7. Each non-rep vs its rep by Jaccard and containment.
