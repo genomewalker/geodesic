@@ -223,9 +223,9 @@ A full end-to-end run over all of GTDB r232, built as a 10-part multipack.
 
 **Result:** 1,300,340 representatives — 7.33× reduction (13.6% retained), 0 failures.
 
-**Storage:** the 6.1 TB pack vs ~8.4 TB of gzipped source FASTA (~1.4×) and ~27 TB
-uncompressed (~4.4×). The pack additionally holds sketches, QUAL, GSTX, taxonomy, and
-indexes — not just sequence.
+**Storage:** the 6.1 TB pack vs 8.6 TB of gzipped source FASTA (1.4×; measured over
+all 9,530,982 `.fna.gz` files) and ~27 TB uncompressed (~4.4×). The pack additionally
+holds sketches, QUAL, GSTX, taxonomy, and indexes — not just sequence.
 
 ---
 
