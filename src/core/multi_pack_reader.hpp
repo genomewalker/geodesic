@@ -196,17 +196,23 @@ private:
     mutable std::vector<std::unordered_map<genopack::GenomeId, float>>   arch_comp_eff_cache_;
 
     // Intrinsic completeness_effective from a single QualRecord. Mirrors
-    // pack_reader.hpp / genopack run_check.cpp: aamer_core (CheckM2-aligned genus
-    // core) primary, post_decontam fallback, cluster_relative only as a soft
-    // corroborator when the intrinsic signal also reads incomplete.
+    // pack_reader.hpp / genopack run_check.cpp exactly: intrinsic priority
+    // marker_completeness → aamer_core → aamer_family_core → post_decontam, with
+    // cluster_relative only as a soft corroborator when the intrinsic signal also
+    // reads genuinely partial (< 0.50).
     static std::optional<float> comp_eff_from_record_(const genopack::QualRecord& r) {
+        const float mc = r.marker_completeness_u8 > 0
+                       ? (r.marker_completeness_u8 - 1) / 254.0f : NAN;
         const float ac = r.completeness_aamer_core;
+        const float fc = r.completeness_aamer_family_core;
         const float pd = r.completeness_post_decontam;
         const float cr = r.completeness_cluster_relative;
-        const float intrinsic = !std::isnan(ac) ? ac : pd;
+        const float intrinsic = !std::isnan(mc) ? mc
+                              : (!std::isnan(ac) ? ac
+                              : (!std::isnan(fc) ? fc : pd));
         if (std::isnan(intrinsic))
             return std::isnan(cr) ? std::nullopt : std::optional{cr};
-        if (intrinsic < 0.90f && !std::isnan(cr) && cr < intrinsic
+        if (intrinsic < 0.50f && !std::isnan(cr) && cr < intrinsic
             && (intrinsic - cr) > 0.30f)
             return std::sqrt(intrinsic * cr);
         return intrinsic;
