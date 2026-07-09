@@ -63,9 +63,9 @@ intersection size, union size, and both directional containments in a single pas
 | Parallelism | Per-pair work-stealing thread pool | Per-genome thread pool |
 | Pack integration | Direct; accessions not in the pack are silently skipped with a count | Requires file paths |
 
-The elimination of disk I/O is the primary throughput advantage for archive-resident genomes.
+Eliminating disk I/O is the main throughput advantage for archive-resident genomes.
 On a shared-filesystem cluster where FASTA decompression is I/O bound, `geodesic ani`
-avoids the decompression bottleneck entirely: the shard reader returns raw FASTA bytes from
+avoids the decompression bottleneck: the shard reader returns raw FASTA bytes from
 the mmap'd archive in ~1 µs per genome regardless of genome count.
 
 ### GTDB r232 representative validation (measured)
@@ -261,7 +261,7 @@ The `err_k<N>` distribution shows how each k-mer size tracks exact ANI:
   `k=31` spreads clonal (>99% ANI) pairs apart but loses signal below ~90% ANI.
   `k=21` is the default species-level compromise.
 - A right-tail of large `|err|` concentrated at low `fill_*` is the expected
-  signature of incomplete assemblies, not a model failure — this is exactly the
+  signature of incomplete assemblies, not a model failure — this is the
   regime where geodesic switches to containment-based corrections during derep.
 
 ---
@@ -277,7 +277,7 @@ The `err_k<N>` distribution shows how each k-mer size tracks exact ANI:
 
 Dereplication uses OPH because its fixed footprint makes 5M-genome runs
 tractable and the per-bin occupancy bitmask gives containment for free.
-`validate-ani` exists precisely to confirm that this cheaper sketch stays within
+`validate-ani` exists to confirm that this cheaper sketch stays within
 tolerance of the FracMinHash ANI that `geodesic ani` reports.
 
 See the [Algorithm reference](ALGORITHM) for the full OPH derivation and the

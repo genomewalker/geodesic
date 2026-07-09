@@ -1,12 +1,12 @@
 # Outlier detection
 
-geodesic identifies potential outlier and chimeric assemblies before representative selection. Outlier genomes receive a fitness score of zero, excluding them from being chosen as representatives while still assigning them to the nearest representative in the output.
+geodesic identifies potential outlier and chimeric assemblies before representative selection. Outlier genomes receive a fitness score of zero: they cannot be selected as representatives but are still assigned to the nearest representative in the output.
 
 ---
 
 ## Why this matters
 
-A contaminated or chimeric assembly contains sequence from multiple lineages and looks artificially "diverse": its k-mer composition reflects both parents, pushing it far from other taxon members in embedding space. If selected as a representative, reads from neither lineage map cleanly: species abundance is smeared across clades, lineage-specific loci lose coverage, and variant calls become unreliable. Worse, diversity-maximising selection actively favours such assemblies because they appear to fill underrepresented parts of sequence space. Contamination filtering protects the biological meaning of the representative set.
+A contaminated or chimeric assembly contains sequence from multiple lineages and looks artificially "diverse": its k-mer composition reflects both parents, pushing it far from other taxon members in embedding space. If selected as a representative, reads from neither lineage map cleanly: species abundance is smeared across clades, lineage-specific loci lose coverage, and variant calls become unreliable. Diversity-maximising selection actively favours such assemblies because they appear to fill underrepresented parts of sequence space. Contamination filtering protects the biological meaning of the representative set.
 
 ---
 
@@ -35,7 +35,7 @@ $$
 \text{threshold} = \tilde{\mu} + z \cdot 1.4826 \cdot \mathrm{MAD}
 $$
 
-where $\tilde{\mu}$ is the component median isolation score, $\mathrm{MAD} = \text{median}(|x_i - \tilde{\mu}|)$, and $z$ is configurable via `--z-threshold` (default 2.0). The factor 1.4826 makes MAD consistent with standard deviation for normal distributions. Ordinary mean and SD are not used because contaminated genomes form a long right tail in the isolation score distribution; including them in the estimator inflates $\sigma$ and raises the threshold, masking the very outliers we want to detect.
+where $\tilde{\mu}$ is the component median isolation score, $\mathrm{MAD} = \text{median}(|x_i - \tilde{\mu}|)$, and $z$ is configurable via `--z-threshold` (default 2.0). The factor 1.4826 makes MAD consistent with standard deviation for normal distributions. Ordinary mean and SD are not used because contaminated genomes form a long right tail in the isolation score distribution; including them in the estimator inflates $\sigma$ and raises the threshold, masking the outliers being flagged.
 
 Genomes with `isolation_score > threshold` have anomalously large mean distance to their nearest neighbours in embedding space, the primary signal of taxonomic misassignment or cross-species contamination. Their fitness is set to zero: they cannot be selected as representatives but remain in the output assigned to their nearest representative.
 

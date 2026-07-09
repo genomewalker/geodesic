@@ -60,7 +60,7 @@ $$
 t = \left\lfloor \frac{h \cdot m}{2^{64}} \right\rfloor, \qquad \mathrm{sig}[t] = \min\!\left(\mathrm{sig}[t],\ \mathrm{hi32}(h)\right)
 $$
 
-The stored uint32 value is truncated to uint16 at storage time (retaining bits 32–47 of $h$). A single hash call per k-mer determines both bin index and comparison value.
+The stored uint32 value is truncated to uint16 at storage time (retaining bits 32–47 of $h$).
 
 **Densification.** After scanning all k-mers, empty bins are filled by nearest-neighbour propagation, following the OPH densification scheme of Li, Owen & Zhang (2012):
 
@@ -260,7 +260,7 @@ $$
 \qquad \theta_{\mathrm{ANI}} = \frac{\arccos(J_{\mathrm{ANI}})}{\pi}
 $$
 
-The $\theta_{\mathrm{ANI}}/4$ floor prevents clonal databases (where all $K$ nearest neighbours are near-duplicates) from driving $\theta_{\mathrm{MST}}$ far below the biological ANI scale. By the triangle inequality, a floor of $\theta_{\mathrm{ANI}}/4$ ensures the coverage-preserving merge property.
+The $\theta_{\mathrm{ANI}}/4$ floor prevents clonal databases (where all $K$ nearest neighbours are near-duplicates) from driving $\theta_{\mathrm{MST}}$ far below the biological ANI scale. By the triangle inequality, this floor also ensures the coverage-preserving merge property.
 
 **$\theta_{\mathrm{MST}}$: MST max-edge threshold.** After the isolation-score pass, k-NN edges are collected (genomic outliers with isolation score exceeding a $\bar{x} + 2\sigma$ threshold excluded from the MST — note this is a simpler mean+2σ pre-filter, not the MAD threshold used for final outlier classification) and [Kruskal's algorithm](https://en.wikipedia.org/wiki/Kruskal%27s_algorithm) builds the minimum spanning tree of the remaining genomes. The longest MST edge $\theta_{\mathrm{MST}}$ is the minimum angular distance at which the k-NN proximity graph becomes connected: the natural inter-strain scale of the taxon.
 
@@ -331,7 +331,7 @@ The sketch-completeness proxy is the fraction of OPH bins filled. It does not an
 4. Remove newly covered genomes ($(1 - s_i) < \theta$) from the active set
 5. Terminate when the active set is empty, or the top candidate's angular distance $\arccos(s_i)/\pi < \theta$
 
-Batching $B = 16$ candidates fuses 16 distance updates into one parallel pass, reducing thread-pool synchronisation overhead.
+Batching $B = 16$ candidates fuses their distance updates into one parallel pass, reducing thread-pool synchronisation overhead.
 
 ---
 
@@ -463,7 +463,7 @@ The thresholds follow from the OPH Jaccard ↔ ANI table above: at $k = 31$, $d 
 
 If the taxon has fewer than 20 genomes, or the archive stores only one k, the probe is skipped and the configured default ($k = 21$) is used.
 
-After Phase 4 (Score), geodesic may additionally call `maybe_reselect_k` if the post-embedding $p_{95}$ nearest-neighbour distance warrants a different k, triggering a full re-embedding with the new k.
+After Phase 4 (Score), geodesic may also call `maybe_reselect_k` if the post-embedding $p_{95}$ nearest-neighbour distance warrants a different k, triggering a full re-embedding with the new k.
 
 ---
 
