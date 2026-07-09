@@ -209,6 +209,26 @@ See [Derep Output](Derep-Output) for full column descriptions.
 
 ---
 
+## Scale example (GTDB r232)
+
+A full end-to-end run over all of GTDB r232, built as a 10-part multipack.
+
+**Input:** 9,530,982 genomes across 695,904 taxa.
+
+| Step | Layout | Resources | Time | Peak RAM |
+|------|--------|-----------|------|----------|
+| Build | per part, 10-way array | 24 CPU, 80 GB | ~5.4–7.8 h | 40.7 GB |
+| Check `--recompute` | per part, 10-way array | 24 CPU, 40 GB | ~1.9–4.2 h | 24.2 GB |
+| Derep | single node | 24 CPU, 192 GB | 7.5 h | 128 GB |
+
+**Result:** 1,300,340 representatives — 7.33× reduction (13.6% retained), 0 failures.
+
+**Storage:** the 6.1 TB pack vs ~8.4 TB of gzipped source FASTA (~1.4×) and ~27 TB
+uncompressed (~4.4×). The pack additionally holds sketches, QUAL, GSTX, taxonomy, and
+indexes — not just sequence.
+
+---
+
 ## 8. (Optional) Validate the sketches and spot-check ANI
 
 Before trusting a large run, confirm that the pack's OPH sketches track exact ANI

@@ -8,6 +8,128 @@ This page is the byte-level spec; for the consumer-side API see the [genopack fo
 
 ---
 
+## Output TSV files
+
+Every derep run writes six tab-separated files under the output directory, prefixed
+with `-p <prefix>` (all written unconditionally, `src/io/results_writer.cpp:219-226`).
+These are the human-readable companions to the binary `.gpd`.
+
+### `<prefix>_derep_genomes.tsv`
+
+Every input genome mapped to its representative. One row per genome.
+
+| Column | Description |
+|--------|-------------|
+| `accession` | Genome accession |
+| `taxonomy` | Taxon lineage string |
+| `representative` | `1` if this genome is a representative, `0` if a clustered member |
+| `cluster_rep` | Accession of the representative this genome maps to (its own when it is a rep) |
+| `nn_dist` | Angular distance from the member to its assigned representative (`0` for reps) |
+| `sketch_fill` | OPH sketch occupancy fraction of the genome (`1.0` default) |
+
+### `<prefix>_results.tsv`
+
+Per-taxon summary. One row per taxon.
+
+| Column | Description |
+|--------|-------------|
+| `taxonomy` | Taxon lineage string |
+| `method` | Selection method: `geodesic`, `geodesic-self-rep`, `singleton`, or `fixed` |
+| `n_genomes` | Input genomes in the taxon |
+| `n_genomes_derep` | Representatives retained |
+| `communities` | Number of communities detected in the taxon |
+| `weight` | Reserved; always emitted as `NA` (`results_writer.cpp:159`) |
+
+### `<prefix>_stats.tsv`
+
+Per-taxon pipeline counts and MST diagnostics. One row per non-failed taxon.
+
+| Column | Description |
+|--------|-------------|
+| `taxonomy` | Taxon lineage string |
+| `method` | Selection method (as above) |
+| `n_input` | Input genomes |
+| `n_preflight_excluded` | Genomes dropped in preflight (before embedding) |
+| `n_quality_floor_excluded` | Genomes dropped by the quality floor (e.g. `--skip-lq`, `--min-completeness`) |
+| `n_outliers_excluded` | Outliers removed from representative selection |
+| `n_outliers_retained` | Outliers flagged but still eligible as reps |
+| `n_failed` | Genomes that failed to resolve/embed |
+| `n_embedded` | Genomes embedded = `n_input − n_preflight_excluded − n_failed` |
+| `n_representatives` | Representatives retained |
+| `rep_fraction` | `n_representatives / n_input` |
+| `mst_p90_edge` | 90th-percentile MST edge length (angular distance) |
+| `mst_true_max` | Largest raw MST edge (before bridge-conditioning) |
+| `ani_threshold_used` | ANI threshold applied for this taxon |
+| `n_outliers_fragmented` | Outliers whose `flag_reason` includes `fragmented` |
+| `n_outliers_size` | Outliers whose `flag_reason` includes `size_outlier` (non-fragmented) |
+| `n_outliers_distance` | Remaining outliers (nn/distance-driven) |
+
+### `<prefix>_diversity_stats.tsv`
+
+Per-taxon coverage (member→rep) and diversity (rep↔rep) ANI metrics. One row per taxon with diversity stats.
+
+| Column | Description |
+|--------|-------------|
+| `taxonomy` | Taxon lineage string |
+| `method` | Selection method |
+| `n_genomes` | Input genomes |
+| `n_representatives` | Representatives retained |
+| `reduction_ratio` | Fraction of genomes removed = `1 − n_representatives / n_genomes` |
+| `runtime_seconds` | Per-taxon processing time |
+| `coverage_mean_ani` | Mean ANI of members to their assigned representative |
+| `coverage_min_ani` | Robust worst-case coverage ANI (p5 ANI, from p95 distance) |
+| `coverage_max_ani` | Best-covered ANI (p95 ANI, from p5 distance) |
+| `coverage_below_99` | Count of member→rep pairs with ANI < 99% |
+| `coverage_below_98` | Count of member→rep pairs with ANI < 98% |
+| `coverage_below_97` | Count of member→rep pairs with ANI < 97% |
+| `coverage_below_95` | Count of member→rep pairs with ANI < 95% |
+| `diversity_mean_ani` | Mean pairwise ANI among representatives |
+| `diversity_min_ani` | ANI of the most divergent rep pair (p95 distance) |
+| `diversity_max_ani` | ANI of the most similar rep pair (p5 distance) |
+| `diversity_ani_range` | `diversity_max_ani − diversity_min_ani` |
+| `diversity_n_pairs` | Number of rep–rep pairs compared |
+| `n_outliers_excluded` | Outliers removed from selection |
+| `n_outliers_retained` | Outliers flagged but retained |
+
+### `<prefix>_failed.tsv`
+
+Genomes that could not be embedded/clustered. One row per failure.
+
+| Column | Description |
+|--------|-------------|
+| `accession` | Genome accession |
+| `taxonomy` | Taxon lineage string |
+| `file` | Source file path (if known) |
+| `reason` | Failure reason, e.g. `accession not found …` (`NA` when unset) |
+
+Note: genomes with a resolvable accession but no sketch ("sketch not found …") are
+**not** listed here — they are kept as self-representatives.
+
+### `<prefix>_outliers.tsv`
+
+All flagged outlier candidates. One row per flagged genome. The per-genome signals
+reuse the definitions in [Outlier detection](Outlier-Detection.md) and
+[Contamination detection](Contamination.md).
+
+| Column | Description |
+|--------|-------------|
+| `taxonomy` | Taxon lineage string |
+| `accession` | Genome accession |
+| `category` | `misassigned` (nn/distance), `low_quality` (`fragmented:pre_filter`), or `contaminated` (GUNC) |
+| `nn_outlier` | Boolean: `isolation_score` exceeds the taxon threshold |
+| `isolation_score` | Mean angular distance to the k nearest neighbours |
+| `kmer_div_zscore` | Occupied-OPH-bins-per-kbp z-score (informational only) |
+| `genome_size_zscore` | Z-score of genome size within the taxon |
+| `centroid_distance` | Angular distance from the taxon centroid |
+| `anomaly_score` | Currently equal to `isolation_score` |
+| `genome_length_bp` | Genome length in base pairs |
+| `n_contigs` | Contig count |
+| `margin_to_threshold` | `isolation_score − threshold` (positive = above threshold) |
+| `flag_reason` | Raw flag string (e.g. `nn_outlier`, `nn_outlier+size_outlier`, `:fragmented`) |
+| `excluded` | Boolean: `1` = removed from selection, `0` = flagged only, still eligible |
+
+---
+
 ## File layout
 
 A `.gpd` is a **single file**, not a directory:
@@ -207,7 +329,7 @@ uint32_t pad1;
 
 Default dtype is **f16** (~270 MB for 546k × 256). Loss is acceptable for cosine search; mapping pipelines that need f32 can request via `--emit-gpd-embedding-dtype f32` at write time (when exposed; currently fixed at f16 from geodesic).
 
-## CSTAT section — cluster stats (optional)
+## CSTAT section — cluster stats (reserved, not currently emitted)
 
 ```c
 uint32_t magic = 'GCST';
@@ -222,7 +344,10 @@ struct GpdClusterStat {        // 12 bytes
 } stats[n_entries];
 ```
 
-Optional, used for QC reports; mapping pipelines ignore.
+This layout is reserved but **not currently written**: the writer hardcodes
+`has_cstats = 0` (`src/derep/derep_archive.cpp:537`), so no CSTAT section and no
+`cstat_offset` entries are emitted. The struct is documented here for the format
+spec; readers should treat the section as absent.
 
 ---
 
