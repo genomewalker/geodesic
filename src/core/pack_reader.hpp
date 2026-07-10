@@ -137,7 +137,7 @@ struct IPackReader {
 
     // Intrinsic completeness in [0,1], or empty if no QUAL signal. Mirrors genopack
     // run_check.cpp completeness_effective() exactly: intrinsic priority
-    // marker_completeness → aamer_core → aamer_family_core → post_decontam, with
+    // marker_completeness → aamer_core → post_decontam, with
     // cluster_relative as a soft corroborator (geomean) only when intrinsic reads
     // genuinely partial (< 0.50) and the two disagree by > 0.30 — never on its own.
     virtual std::optional<float> completeness_effective_for_accession(std::string_view acc) const {
@@ -145,15 +145,12 @@ struct IPackReader {
         const std::string key(acc);
         auto im  = qual_marker_cache_.find(key);
         auto ia  = qual_aamer_core_cache_.find(key);
-        auto ifc = qual_family_core_cache_.find(key);
         auto ip  = qual_post_decontam_cache_.find(key);
         const float mc = im  != qual_marker_cache_.end()        ? im->second  : NAN;
         const float ac = ia  != qual_aamer_core_cache_.end()    ? ia->second  : NAN;
-        const float fc = ifc != qual_family_core_cache_.end()   ? ifc->second : NAN;
         const float pd = ip  != qual_post_decontam_cache_.end() ? ip->second  : NAN;
         const float intrinsic = !std::isnan(mc) ? mc
-                              : (!std::isnan(ac) ? ac
-                              : (!std::isnan(fc) ? fc : pd));
+                              : (!std::isnan(ac) ? ac : pd);
         auto ic = qual_cr_cache_.find(key);
         const float cr = ic != qual_cr_cache_.end() ? ic->second : NAN;
         if (std::isnan(intrinsic)) {
@@ -174,7 +171,6 @@ private:
             std::unordered_map<genopack::GenomeId, uint8_t> id_tiers;
             std::unordered_map<genopack::GenomeId, float>   id_cr;
             std::unordered_map<genopack::GenomeId, float>   id_aamer_core;
-            std::unordered_map<genopack::GenomeId, float>   id_family_core;
             std::unordered_map<genopack::GenomeId, float>   id_marker;
             std::unordered_map<genopack::GenomeId, float>   id_post_decontam;
             scan_qual([&](const genopack::QualRecord& r) {
@@ -184,8 +180,6 @@ private:
                     id_cr[r.genome_id] = r.completeness_cluster_relative;
                 if (!std::isnan(r.completeness_aamer_core))
                     id_aamer_core[r.genome_id] = r.completeness_aamer_core;
-                if (!std::isnan(r.completeness_aamer_family_core))
-                    id_family_core[r.genome_id] = r.completeness_aamer_family_core;
                 if (r.marker_completeness_u8 > 0)
                     id_marker[r.genome_id] = (r.marker_completeness_u8 - 1) / 254.0f;
                 if (!std::isnan(r.completeness_post_decontam))
@@ -201,9 +195,6 @@ private:
                 auto iac = id_aamer_core.find(gid);
                 if (iac != id_aamer_core.end())
                     qual_aamer_core_cache_[std::string(a)] = iac->second;
-                auto ifc = id_family_core.find(gid);
-                if (ifc != id_family_core.end())
-                    qual_family_core_cache_[std::string(a)] = ifc->second;
                 auto imk = id_marker.find(gid);
                 if (imk != id_marker.end())
                     qual_marker_cache_[std::string(a)] = imk->second;
@@ -219,7 +210,6 @@ private:
     mutable std::unordered_map<std::string, uint8_t> qual_tier_cache_;
     mutable std::unordered_map<std::string, float>  qual_cr_cache_;
     mutable std::unordered_map<std::string, float>  qual_aamer_core_cache_;
-    mutable std::unordered_map<std::string, float>  qual_family_core_cache_;
     mutable std::unordered_map<std::string, float>  qual_marker_cache_;
     mutable std::unordered_map<std::string, float>  qual_post_decontam_cache_;
 
