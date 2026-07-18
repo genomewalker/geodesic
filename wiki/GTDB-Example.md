@@ -219,7 +219,7 @@ A full end-to-end run over all of GTDB r232, built as a 10-part multipack.
 |------|--------|-----------|------|----------|
 | Build | per part, 10-way array | 24 CPU, 80 GB | ~5.4–7.8 h | 40.7 GB |
 | Check `--recompute` | per part, 10-way array | 24 CPU, 40 GB | ~1.9–4.2 h | 24.2 GB |
-| Derep | single node | 24 CPU, 192 GB | ~4.4 h | ~47 GB SKCH |
+| Derep | single node | 24 CPU, 192 GB | ~4.4 h | 127 GB |
 
 **Result:** 1,300,606 representatives — 7.33× reduction (13.6% retained), 0 failures.
 
