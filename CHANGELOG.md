@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.1.0 — 2026-07-18
+
+### Dereplication quality gating
+
+- **`--skip-lq`** excludes LQ genomes using the pack's `quality_tier_u8` (genopack's completeness-only tier). On GTDB r232 the corrected tier holds out 535,855 LQ genomes; the native reference-free derep drops from 1,300,606 representatives (no gate) to 1,164,985, and the retained representatives are more complete (mean `comp_eff` 0.777 → 0.837).
+- **`--min-completeness` (alias `--min-cr`)** gates on intrinsic `completeness_effective` (`marker → aamer_core → post_decontam`), not pangenome breadth, so finished isolates in diverse genera are not penalised.
+- **Continuous quality score for representative ranking.** When the pack carries a genopack QUAL section (the default for `derep --pack`), representatives are ranked by genopack's completeness-only `quality_score`, overriding the CheckM2 `completeness − 5×contamination` form (which remains the fallback).
+- **`--resume`**: per-wave checkpoints for crash recovery.
+- Genomes absent from the SKCH section are kept as self-representatives rather than dropped.
+- Fixed `quality_tier_for_accession` ID aliasing across multipart archives.
+
+### Documentation
+
+- Corrected the quality/contamination wiki to the decoupled model (Contamination.md, ALGORITHM.md, Outlier-Detection.md): completeness-only tier, three reported D/S/G contamination channels, current GTDB r232 tier counts (HQ 55.16% / MQ 39.22% / LQ 5.62%), and removed QUAL columns that no longer exist in the `check` output.
+
 ## 1.0.0 — 2026-05-10
 
 Initial stable release.
