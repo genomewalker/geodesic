@@ -166,6 +166,21 @@ geodesic derep \
     --lock-output gtdb_r232.lock
 ```
 
+For the reference-free quality-gated catalog (recommended), add `--skip-lq`. It excludes genomes the
+pack's completeness-only tier marks LQ — no external tool needed, provided the pack was scored by
+`genopack check --markers`:
+
+```bash
+geodesic derep \
+    -g accessions.txt \
+    --pack gtdb_r232.gpk \
+    --skip-lq \
+    --threads 24 \
+    -p gtdb_r232 \
+    --emit-gpd gtdb_r232.gpd \
+    --lock-output gtdb_r232.lock
+```
+
 With CheckM2 quality scores for quality-weighted representative selection:
 
 ```bash
@@ -221,7 +236,11 @@ A full end-to-end run over all of GTDB r232, built as a 10-part multipack.
 | Check `--recompute` | per part, 10-way array | 24 CPU, 40 GB | ~1.9–4.2 h | 24.2 GB |
 | Derep | single node | 24 CPU, 192 GB | ~4.4 h | 127 GB |
 
-**Result:** 1,300,606 representatives — 7.33× reduction (13.6% retained), 0 failures.
+**Result (no quality gate):** 1,300,606 representatives — 7.33× reduction (13.6% retained), 0 failures.
+
+**Result with `--skip-lq`** (reference-free quality gate, recommended): the completeness-only tier
+holds out 535,855 LQ genomes, leaving 8,995,122; dereplication returns **1,164,985 representatives**,
+and the retained representatives are more complete than the ungated set (mean `comp_eff` 0.777 → 0.837).
 
 **Storage:** 5.77 TB pack vs 8.6 TB gzipped FASTA (1.5×), ~27 TB uncompressed (~4.7×).
 The pack also holds sketches, QUAL, GSTX, taxonomy, and indexes.
