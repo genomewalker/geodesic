@@ -63,7 +63,12 @@ This signal is computed and stored for analysis. It is not currently used as a f
 
 ## CheckM2 integration
 
-When CheckM2 quality estimates are available (`--checkm2`), the quality score per genome is:
+When the pack carries a genopack QUAL section — the default for `derep --pack` — representative
+ranking uses genopack's **completeness-only** `quality_score` (`taxon_processor.cpp:24-38` overrides
+the TSV-derived score with `pack_reader.hpp:94-101`), so the CheckM2 form below applies only as the
+fallback when no pack QUAL score is present.
+
+When CheckM2 estimates are used (`--checkm2`, no pack QUAL score), the quality score per genome is:
 
 $$
 q = \text{completeness} - 5 \times \text{contamination}

@@ -219,9 +219,9 @@ A full end-to-end run over all of GTDB r232, built as a 10-part multipack.
 |------|--------|-----------|------|----------|
 | Build | per part, 10-way array | 24 CPU, 80 GB | ~5.4–7.8 h | 40.7 GB |
 | Check `--recompute` | per part, 10-way array | 24 CPU, 40 GB | ~1.9–4.2 h | 24.2 GB |
-| Derep | single node | 24 CPU, 192 GB | 7.5 h | 128 GB |
+| Derep | single node | 24 CPU, 192 GB | ~4.4 h | ~47 GB SKCH |
 
-**Result:** 1,300,340 representatives — 7.33× reduction (13.6% retained), 0 failures.
+**Result:** 1,300,606 representatives — 7.33× reduction (13.6% retained), 0 failures.
 
 **Storage:** 5.77 TB pack vs 8.6 TB gzipped FASTA (1.5×), ~27 TB uncompressed (~4.7×).
 The pack also holds sketches, QUAL, GSTX, taxonomy, and indexes.

@@ -58,20 +58,18 @@ the nearest clean representative rather than dropped entirely.
 The genopack archive stores a QUAL section for every genome produced by `geodesic check`.
 Unlike CheckM2 and GUNC — which require a marker-gene database and scale roughly linearly with
 genome count — the QUAL signals are derived entirely from k-mer statistics and run as part of
-the archive construction pipeline. At 9.3 M genomes (GTDB r232) the QUAL section achieves
+the archive construction pipeline. At 9.53 M genomes (GTDB r232) the QUAL section achieves
 **100 % coverage with zero null values**.
 
 ### Completeness signals
 
 | Column | Description |
 |--------|-------------|
-| `genome_fill` | Total occupied FracMinHash bins / expected fill for a complete genome of this taxon's median size |
-| `completeness_cluster_relative` | Occupied OPH bins relative to the taxon cluster median; 1.0 = median-sized genome for this taxon |
-| `completeness_sketch_fill` | OPH bin occupancy fraction (k-mer sketch saturation) |
-| `completeness_fragmentation` | Assembly fragmentation penalty: penalises high contig count relative to genome size |
-| `completeness_post_decontam` | Effective completeness after removing contaminated k-mer windows |
-| `completeness_aamer_core` | AAMER-based core k-mer completeness (genus-level conserved k-mers) |
-| `completeness_aamer_family_core` | AAMER-based completeness using family-level conserved k-mers |
+| `completeness_marker` | Present / expected single-copy genus markers (CheckM2-aligned, genus-calibrated); the **primary** intrinsic estimate, fraction-tracking (declines with fragmentation). NA without a `--markers` panel |
+| `completeness_aamer_core` | AAMER genus prevalence-core completeness (amino-acid 8-mers); first fallback, presence-saturating near 1.0 |
+| `completeness_post_decontam` | bp retained after the contig contamination scan; last-resort fallback |
+| `completeness_cluster_relative` (TSV alias `pangenome_fraction`) | Occupied aamer content relative to the genus **pangenome** median — accessory breadth, **not** intrinsic completeness; admitted only as a soft corroborator |
+| `completeness_effective` | The single value fed to tier/score: `marker → aamer_core → post_decontam`, with `cluster_relative` folded in only when the intrinsic signal also reads incomplete |
 
 `completeness_cluster_relative` compares a genome's occupied-bin count against the median of
 its GTDB species cluster. It reflects pangenome breadth relative to the cluster, not intrinsic
@@ -81,60 +79,49 @@ on it directly — the intrinsic gate (`--min-completeness`, below) uses genus s
 recovery, and folds `completeness_cluster_relative` in only as a soft corroborator when the
 core signal also reads incomplete.
 
-`sketch_fill` measures OPH bin saturation — whether enough total sequence is present to fill
-all bins. A genome with 1.5 Mb of repetitive or contaminant sequence can reach
-`sketch_fill = 1.0` while being incomplete, so it is not a completeness gate either.
-
 ### Contamination signals
 
-| Column | Description |
-|--------|-------------|
-| `fmh_contamination` | FracMinHash-based contamination fraction: k-mers mapping to out-of-taxon references |
-| `contamination_leakage` | Cross-taxon k-mer leakage fraction in the OPH sketch; penalises genomes with k-mers pulled from a neighbouring taxon |
-| `contamination_tnf_excess` | Tetranucleotide frequency excess: excess non-taxon TNF signal, flags chimeric assemblies |
-| `contamination_contig_outlier` | Fraction of contigs whose k-mer profiles are outliers relative to the genome's own distribution |
-| `contamination_contig_outlier_adj` | Contig outlier fraction adjusted for assembly size |
-| `contamination_cross_genus` | k-mer signal from cross-genus contamination |
-| `contamination_contig_split` | Fraction of contigs that appear split (two incompatible k-mer pools within a single contig) |
-| `contamination_duplication` | Excess k-mer duplication relative to taxon expectation |
-| `contamination_mixture` | Fraction of windows best explained by a two-genome mixture model |
-| `contamination_spe` | PCA Squared Prediction Error (residual outside the retained principal-component subspace), paired with the Hotelling $T^2$ statistic to flag genomes whose k-mer composition departs from the taxon's PCA model |
-| `contamination_rho_outlier` | Rank-correlation outlier score across the k-mer distribution |
-
-### Genome-coherence signals
+Contamination is **reported, never a discard gate** (see [Quality tier](#quality-tier)).
+The raw axes collapse into three near-independent **channels** consumed by dereplication as a
+D → S → G tiebreak; the raw axes are emitted alongside for inspection.
 
 | Column | Description |
 |--------|-------------|
-| `chromosome_skew_closure` | GC/AT skew closure metric for complete/circular chromosomes |
-| `chargaff_parity` | Deviation from Chargaff's second parity rule; violations flag inter-strand contamination |
-| `self_coherence` | Internal k-mer self-consistency score |
-| `spectral_gap` | Spectral gap in the k-mer hash density spectrum; large gaps indicate compositional discontinuities |
-| `scale_kink` | Scale-space kink in the hash density spectrum; detects chimeric junctions |
-| `leakage_residual` | Residual leakage signal after contamination removal |
+| `contam_D` | **Channel D** — calibrated single-copy-core duplication (`contamination_duplication` / `core_dup_mass` mapped to CheckM2 units); the only CheckM2-calibrated channel and the only contamination signal that touches the tier (caps HQ → MQ at ≥ 0.05) |
+| `contam_S` | **Channel S** — `fmh_contamination`, FracMinHash k-mer minority mass |
+| `contam_G` | **Channel G** — median of the present geometry axes (`contamination_rho_outlier`, `contamination_spe`, `contamination_contig_outlier_adj`, `contamination_tnf_minor`), collapsing the one correlated TNF/GCOV signal to a single vote |
+| `contam_score` | Noisy-OR union of the present channels — **display only**, not a gate |
+| `channels_fired` | Count of channels over threshold (geometry counts only when ≥ 2 of its four axes agree) |
+| `contamination_contig_outlier[_adj]`, `contamination_spe`, `contamination_rho_outlier`, `contamination_tnf_minor` | Raw geometry axes behind channel G (Hotelling $T^2$/SPE outlier fraction, rank-correlation outlier, TNF-GMM minority mass) |
+| `contamination_leakage`, `contamination_tnf_excess`, `contamination_cross_genus`, `contamination_contig_split` | Reported diagnostics only — **not** gates. leakage and tnf_excess are dropped from the channels (mathematically dead / untrusted); `cross_genus` is a ranker (2.8% PPV as a demotion rule), never a veto |
 
 ### Quality tier
 
-All signals feed into a single `quality_tier` (LQ / MQ / HQ) and a MIMAG-compatible
-`mimag_tier` output. The tier is not a single linear formula — genopack assigns it via a
-rule chain over: an effective completeness (`comp_eff`, taken from the first available of
-marker → `completeness_aamer_core` → `completeness_post_decontam`), an NA-safe contamination
-aggregate over the contamination signals above, a count of trusted quality axes, and the
-Fiedler coherence value. The exact rule chain and thresholds are specified in the genopack
-[Quality Scoring](https://genomewalker.github.io/genopack/quality/) docs and are not restated
-here to avoid drift.
+The `quality_tier` (LQ / MQ / HQ) is **completeness-only** — contamination is decoupled
+from it entirely (genopack commit `61e8a84`). A genome is LQ solely on genuine incompleteness
+(`comp_eff < 0.50`); MQ up to 0.90; HQ at ≥ 0.90 unless the single CheckM2-calibrated
+duplication channel caps it to MQ (`D ≥ 0.05`) or completeness rests only on the saturating
+`aamer_core` fallback. `comp_eff` is the first available of `completeness_marker` →
+`completeness_aamer_core` → `completeness_post_decontam`. The contamination channels (D/S/G,
+below) are reported for dereplication's D → S → G tiebreak, never a discard. The exact rule
+chain is in the genopack [Quality Scoring](https://genomewalker.github.io/genopack/quality/)
+docs and not restated here to avoid drift.
 
-### GTDB r232 results (9.3 M genomes)
+### GTDB r232 results (9.53 M genomes)
 
 | Tier | Count | % |
 |------|------:|--:|
-| HQ | 4,522,037 | 48.7 % |
-| MQ | 4,544,766 | 49.0 % |
-| LQ | 210,790 | 2.3 % |
-| **Total** | **9,277,593** | **100 %** |
+| HQ | 5,257,430 | 55.16 % |
+| MQ | 3,737,697 | 39.22 % |
+| LQ | 535,855 | 5.62 % |
+| **Total** | **9,530,982** | **100 %** |
 
-Zero genomes with missing quality data. CheckM2 on 1,067 genomes took 26 min on 48 cores;
-extrapolated to 9.3 M that is ~14,500 CPU-hours. genopack QUAL runs during archive construction
-with no additional wall-clock cost.
+Zero genomes with missing quality data, and `completeness_marker` populated for ~99% of
+genomes — every genome is routed through the marker stage when `--markers` is supplied
+(genopack commit `ae70b1b`), rather than only the ~34% flagged by pass-A. The LQ floor is
+genuine incompleteness only: decoupling contamination from the tier removed 362,935 wrongful
+contamination demotions that had scored 6.9% PPV against CheckM2. genopack QUAL runs during
+archive construction with no additional wall-clock cost.
 
 ---
 
@@ -149,11 +136,11 @@ unknown → keep).
 ### `--min-completeness FLOAT` (alias `--min-cr`)
 
 Excludes genomes whose intrinsic completeness is below the given threshold (0–1), regardless
-of tier. The intrinsic estimate is genus single-copy/prevalence-core recovery
-(`completeness_aamer_core`), with post-decontam bp-retention (`completeness_post_decontam`) as
-fallback; `completeness_cluster_relative` corroborates only when the core signal also reads
-incomplete. This is genome completeness, not pangenome breadth — it does not penalise finished
-isolates in diverse genera.
+of tier. The intrinsic estimate is `completeness_effective`: single-copy marker recovery
+(`completeness_marker`) first, then genus prevalence-core (`completeness_aamer_core`), then
+post-decontam bp-retention (`completeness_post_decontam`); `completeness_cluster_relative`
+corroborates only when the intrinsic signal also reads incomplete. This is genome completeness,
+not pangenome breadth — it does not penalise finished isolates in diverse genera.
 
 ```bash
 geodesic derep \

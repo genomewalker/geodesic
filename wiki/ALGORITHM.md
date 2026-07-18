@@ -318,9 +318,10 @@ $$
 
 where $d_i = \sqrt{2(1 - s_i)}$ is the angular distance proxy to the nearest representative (monotonic in true angular distance), $L_i$ is genome length, and $L_m$ is the taxon median genome length. The quality factor lies in $[0.5, 1.0]$, so it shifts which genome is chosen for a region toward higher quality without dominating the distance term. Coverage and the stopping test use raw similarity, not fitness, so quality changes which representatives are picked but not how many or their ANI spread. Quality also breaks exact fitness ties (higher $q_i$ wins).
 
-**Quality score** $q_i$ is:
-- **With CheckM2** (`--checkm2`): $q_i = \mathrm{completeness} - 5 \times \mathrm{contamination}$
-- **Without CheckM2**: $q_i = (n_{\mathrm{real\_bins}} / \mathrm{sketch\_size}) \times 100$ (sketch completeness)
+**Quality score** $q_i$, in priority order (`taxon_processor.cpp:24-38`):
+- **From the pack QUAL section** (default for `derep --pack`): genopack's per-genome `quality_score`, which is **completeness-only** (equal to `completeness_effective`; `pack_reader.hpp:94-101`). This overrides the forms below whenever the pack carries QUAL — the standard case — so contamination does not enter representative ranking.
+- **With CheckM2** and no pack QUAL score (`--checkm2`): $q_i = \mathrm{completeness} - 5 \times \mathrm{contamination}$
+- **Otherwise**: $q_i = (n_{\mathrm{real\_bins}} / \mathrm{sketch\_size}) \times 100$ (sketch completeness)
 
 The sketch-completeness proxy is the fraction of OPH bins filled. It does not anti-correlate with isolation, so it avoids the parabolic fitness of a centrality-based proxy.
 
