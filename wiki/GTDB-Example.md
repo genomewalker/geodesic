@@ -166,9 +166,11 @@ geodesic derep \
     --lock-output gtdb_r232.lock
 ```
 
-For the reference-free quality-gated catalog (recommended), add `--skip-lq`. It excludes genomes the
-pack's completeness-only tier marks LQ — no external tool needed, provided the pack was scored by
-`genopack check --markers`:
+The default output is **self-describing** (geodesic v1.2.0): each `derep_genomes.tsv` row carries
+`quality_tier`, `contam_D`, and `is_singleton`, so you keep every lineage and apply any quality policy
+as a reproducible filter (see [Result](#result)). For a strict quality bar that hard-excludes LQ
+genomes from the candidate pool at derep time, add `--skip-lq` — no external tool needed, provided the
+pack was scored by `genopack check --markers`:
 
 ```bash
 geodesic derep \
@@ -236,17 +238,21 @@ A full end-to-end run over all of GTDB r232, built as a 10-part multipack.
 | Check `--recompute` | per part, 10-way array | 24 CPU, 40 GB | ~1.9–4.2 h | 24.2 GB |
 | Derep | single node | 24 CPU, 192 GB | ~4.4 h | 127 GB |
 
-**Result (no `--skip-lq`):** 1,300,606 representatives — 7.33× reduction (13.6% retained), 0 failures.
-Quality still shapes selection here — the FPS fitness carries a bounded `0.5 + 0.5·q` completeness
-factor (`geodesic.cpp:2889`), so higher-completeness genomes are preferred as the representative of a
-cluster — but LQ genomes are **not excluded**: coverage and the stopping test use raw similarity, so
-an LQ genome that is a singleton or the best in its cluster still becomes a representative. 128,758 of
-these 1,300,606 representatives are genomes the completeness tier marks LQ.
+**Result:** the default `derep_genomes.tsv` is **self-describing** — every genome row carries
+`quality_tier`, `contam_D` (calibrated duplication contamination), and `is_singleton` — so a quality
+policy is a reproducible filter over one catalog, not a separate run. On GTDB r232:
 
-**Result with `--skip-lq`** (reference-free quality gate, recommended): the completeness-only tier
-**hard-excludes** 535,855 LQ genomes from the candidate pool, leaving 8,995,122; dereplication returns
-**1,164,985 representatives**, dropping those 128,758 LQ representatives, and the retained set is more
-complete than the ungated one (mean `comp_eff` 0.777 → 0.837).
+| policy | representatives | filter |
+|--------|----------------:|--------|
+| keep-all | 1,311,595 | every `representative == 1` |
+| **recommended** | **1,291,315** | drop LQ singletons with `contam_D ≥ 0.05` (likely chimeras) |
+| strict (`--skip-lq`) | 1,187,150 | drop all `quality_tier == LQ` |
+
+The default keeps every lineage and already prefers non-LQ representatives (the tiny-taxon path picks
+by quality descending; the FPS fitness carries a bounded `0.5 + 0.5·q` factor). The **recommended**
+view removes only the 20,280 LQ singletons a calibrated signal flags as chimeras, while keeping 73,426
+genuine single-genome lineages that strict `--skip-lq` would delete. Regenerate any view with one
+`awk` over the self-describing columns; 0 failures.
 
 **Storage:** 5.77 TB pack vs 8.6 TB gzipped FASTA (1.5×), ~27 TB uncompressed (~4.7×).
 The pack also holds sketches, QUAL, GSTX, taxonomy, and indexes.
