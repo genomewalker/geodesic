@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0 — 2026-07-19
+
+### Self-describing dereplication output
+
+- `derep_genomes.tsv` now emits three per-genome columns from the pack QUAL — **`quality_tier`** (HQ/MQ/LQ), **`contam_D`** (the calibrated single-copy-core duplication contamination channel, in CheckM2 units), and **`is_singleton`** — whenever the run reads a genopack pack (the default). Columns are appended, so existing 6-column parsers are unaffected.
+- This makes any quality policy a **reproducible filter over one catalog** instead of a lossy rerun: keep-all, the recommended *drop LQ singletons with `contam_D ≥ 0.05`* (removes likely chimeras, keeps genuine partial lineages), and strict `--skip-lq` are all queries over the same flagged object. On GTDB r232: keep-all 1,311,598 reps, recommended 1,291,318 (−20,280 contaminated LQ singletons), strict 1,187,153 (−124,445, which also deletes 73,426 clean single-genome lineages).
+- `contam_D` is computed from `core_dup_mass`/`duplication` via the genopack calibration (`run_check.cpp:87-96`), verified to match genopack's own emitted `contam_D` exactly (154,654/154,654 reps, part_2). Multi-part packs route per-archive.
+
 ## 1.1.0 — 2026-07-18
 
 ### Dereplication quality gating

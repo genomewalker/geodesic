@@ -164,6 +164,18 @@ public:
              ? std::optional{it->second} : std::nullopt;
     }
 
+    // Route contam_D to the owning archive's reader (which computes it from its own QUAL), avoiding
+    // the base build_qual_cache_() cross-archive genome_id aliasing.
+    std::optional<double> contam_D_for_accession(std::string_view acc) const override {
+        build_arch_qual_cache_();
+        uint16_t idx = archive_idx_for_accession(acc);
+        if (idx == UINT16_MAX || idx >= arch_contamD_cache_.size()) return std::nullopt;
+        auto meta = archives_[idx].reader->genome_meta_by_accession(acc);
+        if (!meta) return std::nullopt;
+        auto it = arch_contamD_cache_[idx].find(meta->genome_id);
+        return it != arch_contamD_cache_[idx].end() ? std::optional{it->second} : std::nullopt;
+    }
+
     bool has_gstx() const override {
         for (const auto& a : archives_)
             if (a.reader->has_gstx()) return true;
@@ -194,6 +206,7 @@ private:
     mutable std::vector<std::unordered_map<genopack::GenomeId, uint8_t>> arch_tier_cache_;
     mutable std::vector<std::unordered_map<genopack::GenomeId, double>>  arch_score_cache_;
     mutable std::vector<std::unordered_map<genopack::GenomeId, float>>   arch_comp_eff_cache_;
+    mutable std::vector<std::unordered_map<genopack::GenomeId, double>>  arch_contamD_cache_;
 
     // Intrinsic completeness_effective from a single QualRecord. Mirrors
     // pack_reader.hpp / genopack run_check.cpp exactly: intrinsic priority
@@ -221,6 +234,7 @@ private:
             arch_tier_cache_.resize(archives_.size());
             arch_score_cache_.resize(archives_.size());
             arch_comp_eff_cache_.resize(archives_.size());
+            arch_contamD_cache_.resize(archives_.size());
             for (size_t i = 0; i < archives_.size(); ++i) {
                 if (!archives_[i].reader->has_qual()) continue;
                 archives_[i].reader->scan_qual([&](const genopack::QualRecord& r) {
@@ -228,6 +242,7 @@ private:
                     arch_score_cache_[i][r.genome_id] = genome_quality_score(r);
                     if (auto ce = comp_eff_from_record_(r))
                         arch_comp_eff_cache_[i][r.genome_id] = *ce;
+                    { double d = contam_D(r); if (!std::isnan(d)) arch_contamD_cache_[i][r.genome_id] = d; }
                 });
             }
         });

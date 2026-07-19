@@ -647,6 +647,11 @@ int run_pipeline(Config& cfg) {
     // run it writes output-file headers + prior checkpoint rows and returns
     // the set of already-completed taxonomy strings.
     ResultsWriter writer(results_dir, cfg.prefix);
+    // Raw pointer to the pack reader for self-describing quality_tier/contam_D output columns.
+    // Captured before gpk_reader may be std::move'd into the PreloadedPackReader wrapper below: the
+    // underlying reader object outlives this pointer (the wrapper owns it to end of run_derep), so
+    // it stays valid through write_all.
+    writer.set_pack_reader(gpk_reader.get());
     std::unordered_set<std::string> resume_completed;
     std::unordered_set<std::string> resume_done_keys;
     bool resume_active = false;

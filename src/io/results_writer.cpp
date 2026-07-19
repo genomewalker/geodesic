@@ -1,5 +1,7 @@
 #include "io/results_writer.hpp"
 #include "state/run_state.hpp"
+#include "core/pack_reader.hpp"
+#include <genopack/qual.hpp>
 
 #include <fstream>
 #include <stdexcept>
@@ -19,7 +21,22 @@ void ResultsWriter::write_derep_genomes(const RunState& state) const {
     std::ofstream out(path);
     if (!out) throw std::runtime_error("Cannot open output file: " + path.string());
 
-    out << "accession\ttaxonomy\trepresentative\tcluster_rep\tnn_dist\tsketch_fill\n";
+    // quality_tier + contam_D are emitted only when a pack reader is attached (set_pack_reader);
+    // is_singleton is derived from the cluster size. Together they make the catalog self-describing
+    // so a quality policy (e.g. drop LQ singletons with contam_D >= 0.05) is a reproducible filter.
+    const bool with_qual = pack_reader_ != nullptr;
+    auto tier_str = [](uint8_t t) -> const char* {
+        switch (t) {
+            case genopack::QualRecord::QTIER_LQ: return "LQ";
+            case genopack::QualRecord::QTIER_MQ: return "MQ";
+            case genopack::QualRecord::QTIER_HQ: return "HQ";
+            default: return "NA";
+        }
+    };
+
+    out << "accession\ttaxonomy\trepresentative\tcluster_rep\tnn_dist\tsketch_fill";
+    if (with_qual) out << "\tquality_tier\tcontam_D\tis_singleton";
+    out << '\n';
 
     for (const auto& taxon : state.taxa()) {
         const std::string& taxonomy = taxon.result.taxonomy;
@@ -40,10 +57,18 @@ void ResultsWriter::write_derep_genomes(const RunState& state) const {
             if (fit != taxon.member_fill_ratio.end()) fill = fit->second;
             out << acc << '\t' << taxonomy << '\t' << is_rep << '\t'
                 << cluster_rep << '\t';
-            if (is_rep)
-                out << "0\t" << fill << '\n';
-            else
-                out << nn_dist_val << '\t' << fill << '\n';
+            if (is_rep) out << "0\t" << fill;
+            else        out << nn_dist_val << '\t' << fill;
+            if (with_qual) {
+                auto t = pack_reader_->quality_tier_for_accession(acc);
+                auto d = pack_reader_->contam_D_for_accession(acc);
+                auto cs = taxon.rep_cluster_size.find(cluster_rep);
+                int is_singleton = (cs != taxon.rep_cluster_size.end() && cs->second == 1) ? 1 : 0;
+                out << '\t' << (t ? tier_str(*t) : "NA") << '\t';
+                if (d) out << *d; else out << "NA";
+                out << '\t' << is_singleton;
+            }
+            out << '\n';
         }
     }
 

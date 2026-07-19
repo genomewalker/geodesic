@@ -7,9 +7,15 @@
 
 namespace derep {
 
+class IPackReader;
+
 class ResultsWriter {
 public:
     explicit ResultsWriter(std::filesystem::path output_dir, std::string prefix);
+
+    // Optional pack reader; when set, write_derep_genomes emits per-genome quality_tier and
+    // contam_D columns (from the pack QUAL) so the catalog is self-describing.
+    void set_pack_reader(const IPackReader* r) { pack_reader_ = r; }
 
     void write_derep_genomes(const RunState& state) const;
     void write_stats(const RunState& state) const;
@@ -38,6 +44,7 @@ public:
 private:
     std::filesystem::path output_dir_;
     std::string prefix_;
+    const IPackReader* pack_reader_ = nullptr;
 
     std::filesystem::path resume_dir() const { return output_dir_ / ".geodesic_resume"; }
     std::filesystem::path ckpt_path(const std::string& ck_key,

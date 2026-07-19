@@ -100,6 +100,22 @@ struct IPackReader {
              - 5.0 * static_cast<double>(r.contamination_leakage) * 100.0;
     }
 
+    // Calibrated single-copy-core duplication contamination (contam_D), in CheckM2 units.
+    // Formula + constants are the single source of truth in genopack run_check.cpp:87-96
+    // (kDupMassSlope 1.448954, kDupMassIntercept 0.009998, legacy excess/8 fallback) -- replicated
+    // here (like genome_quality_score above) so geodesic can surface the channel without a genopack
+    // API. mass = core_dup_mass (NaN = not scored); excess from duplication_u16 (0 = not scored,
+    // else (u16-1)/65534). Returns NaN when neither input is scored. Keep in sync with genopack.
+    static double contam_D(const genopack::QualRecord& r) {
+        const float mass = r.contamination_core_dup_mass;
+        if (!std::isnan(mass)) {
+            const double c = 1.448954 * static_cast<double>(mass) + 0.009998;
+            return c < 0.0 ? 0.0 : c;
+        }
+        if (r.contamination_duplication_u16 == 0) return std::nan("");
+        return (static_cast<double>(r.contamination_duplication_u16) - 1.0) / 65534.0 * 0.125;
+    }
+
     // Per-accession quality score (see genome_quality_score).
     // Built once from scan_qual + scan_genome_accessions; thread-safe.
     // NOTE: genome IDs are local per-archive. Multi-pack readers MUST override
@@ -122,6 +138,13 @@ struct IPackReader {
     bool is_lq(std::string_view acc) const {
         auto t = quality_tier_for_accession(acc);
         return t && *t == genopack::QualRecord::QTIER_LQ;
+    }
+
+    // Calibrated duplication contamination channel (contam_D) in CheckM2 units, or empty if unscored.
+    virtual std::optional<double> contam_D_for_accession(std::string_view acc) const {
+        build_qual_cache_();
+        auto it = qual_contamD_cache_.find(std::string(acc));
+        return it != qual_contamD_cache_.end() ? std::optional{it->second} : std::nullopt;
     }
 
     // Returns completeness_cluster_relative (fraction 0–1), or empty if unavailable.
@@ -173,9 +196,11 @@ private:
             std::unordered_map<genopack::GenomeId, float>   id_aamer_core;
             std::unordered_map<genopack::GenomeId, float>   id_marker;
             std::unordered_map<genopack::GenomeId, float>   id_post_decontam;
+            std::unordered_map<genopack::GenomeId, double>  id_contamD;
             scan_qual([&](const genopack::QualRecord& r) {
                 id_scores[r.genome_id] = genome_quality_score(r);
                 id_tiers[r.genome_id]  = r.quality_tier_u8;
+                { double d = contam_D(r); if (!std::isnan(d)) id_contamD[r.genome_id] = d; }
                 if (!std::isnan(r.completeness_cluster_relative))
                     id_cr[r.genome_id] = r.completeness_cluster_relative;
                 if (!std::isnan(r.completeness_aamer_core))
@@ -201,6 +226,9 @@ private:
                 auto ipd = id_post_decontam.find(gid);
                 if (ipd != id_post_decontam.end())
                     qual_post_decontam_cache_[std::string(a)] = ipd->second;
+                auto idd = id_contamD.find(gid);
+                if (idd != id_contamD.end())
+                    qual_contamD_cache_[std::string(a)] = idd->second;
             });
         });
     }
@@ -212,6 +240,7 @@ private:
     mutable std::unordered_map<std::string, float>  qual_aamer_core_cache_;
     mutable std::unordered_map<std::string, float>  qual_marker_cache_;
     mutable std::unordered_map<std::string, float>  qual_post_decontam_cache_;
+    mutable std::unordered_map<std::string, double>  qual_contamD_cache_;
 
 public:
     // Taxonomy access (TAXN section).
