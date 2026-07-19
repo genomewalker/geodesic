@@ -4,7 +4,7 @@
 
 ### Dereplication quality gating
 
-- **`--skip-lq`** excludes LQ genomes using the pack's `quality_tier_u8` (genopack's completeness-only tier). On GTDB r232 the corrected tier holds out 535,855 LQ genomes; the native reference-free derep drops from 1,300,606 representatives (no gate) to 1,164,985, and the retained representatives are more complete (mean `comp_eff` 0.777 → 0.837).
+- **`--skip-lq`** hard-excludes LQ genomes from the candidate pool using the pack's `quality_tier_u8` (genopack's completeness-only tier). Without it, LQ genomes are still *included* — quality only downweights representative selection via a bounded `0.5 + 0.5·q` FPS factor, so an LQ singleton or best-in-cluster genome can still be a representative (128,758 of the 1,300,606 ungated GTDB r232 representatives are LQ). With `--skip-lq`, the corrected tier holds out 535,855 LQ genomes and the derep returns 1,164,985 representatives, more complete than the ungated set (mean `comp_eff` 0.777 → 0.837).
 - **`--min-completeness` (alias `--min-cr`)** gates on intrinsic `completeness_effective` (`marker → aamer_core → post_decontam`), not pangenome breadth, so finished isolates in diverse genera are not penalised.
 - **Continuous quality score for representative ranking.** When the pack carries a genopack QUAL section (the default for `derep --pack`), representatives are ranked by genopack's completeness-only `quality_score`, overriding the CheckM2 `completeness − 5×contamination` form (which remains the fallback).
 - **`--resume`**: per-wave checkpoints for crash recovery.

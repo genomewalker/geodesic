@@ -236,11 +236,17 @@ A full end-to-end run over all of GTDB r232, built as a 10-part multipack.
 | Check `--recompute` | per part, 10-way array | 24 CPU, 40 GB | ~1.9–4.2 h | 24.2 GB |
 | Derep | single node | 24 CPU, 192 GB | ~4.4 h | 127 GB |
 
-**Result (no quality gate):** 1,300,606 representatives — 7.33× reduction (13.6% retained), 0 failures.
+**Result (no `--skip-lq`):** 1,300,606 representatives — 7.33× reduction (13.6% retained), 0 failures.
+Quality still shapes selection here — the FPS fitness carries a bounded `0.5 + 0.5·q` completeness
+factor (`geodesic.cpp:2889`), so higher-completeness genomes are preferred as the representative of a
+cluster — but LQ genomes are **not excluded**: coverage and the stopping test use raw similarity, so
+an LQ genome that is a singleton or the best in its cluster still becomes a representative. 128,758 of
+these 1,300,606 representatives are genomes the completeness tier marks LQ.
 
 **Result with `--skip-lq`** (reference-free quality gate, recommended): the completeness-only tier
-holds out 535,855 LQ genomes, leaving 8,995,122; dereplication returns **1,164,985 representatives**,
-and the retained representatives are more complete than the ungated set (mean `comp_eff` 0.777 → 0.837).
+**hard-excludes** 535,855 LQ genomes from the candidate pool, leaving 8,995,122; dereplication returns
+**1,164,985 representatives**, dropping those 128,758 LQ representatives, and the retained set is more
+complete than the ungated one (mean `comp_eff` 0.777 → 0.837).
 
 **Storage:** 5.77 TB pack vs 8.6 TB gzipped FASTA (1.5×), ~27 TB uncompressed (~4.7×).
 The pack also holds sketches, QUAL, GSTX, taxonomy, and indexes.
