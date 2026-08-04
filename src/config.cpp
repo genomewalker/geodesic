@@ -72,8 +72,6 @@ Config parse_args(int argc, char** argv) {
     derep->add_option("--geodesic-syncmer-s", cfg.syncmer_s,
         "GEODESIC open-syncmer submer length (0=disabled, smaller=faster/sparser OPH)")
         ->default_val(0);
-    derep->add_option("--geodesic-diversity-threshold", cfg.diversity_threshold,
-        "Min embedding distance gain to add representative (lower = more reps)")->default_val(0.02f);
     derep->add_option("--geodesic-max-rep-fraction", cfg.max_rep_fraction,
         "Max fraction of genomes as representatives")->default_val(0.2f);
     derep->add_option("--k-cap-max", cfg.k_cap_max,

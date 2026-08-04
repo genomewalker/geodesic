@@ -624,7 +624,7 @@ TaxonResult process_taxon(
                 spdlog::warn("[{}] Threshold instability detected: low_pairs={} bridge={} disconnected={} "
                              "heavy_tail={} (tail_ratio={:.2f}). "
                              "diversity_threshold={:.4f} ani_floor={:.4f} "
-                             "(use --geodesic-diversity-threshold to override)",
+                             "(inferred from ANI cap + MST; adjust --ani-threshold if unsuitable)",
                              taxon.taxonomy,
                              nn.low_pair_count, nn.pathological_bridge, nn.disconnected_mst,
                              heavy_tail, nn.tail_ratio,

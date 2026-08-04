@@ -290,7 +290,7 @@ For clonal taxa (tight NN distribution), $\theta_{\mathrm{MST}}$ is small and dr
 
 `disconnected_mst` is only raised when the graph remains disconnected even at the adaptive $k_{\mathrm{stable}}$ (i.e., $k_{\mathrm{conn}} = -1$). A graph that is disconnected at $k_{\mathrm{iso}}$ but connects before $K_{\mathrm{cap}}$ logs an info message instead.
 
-When any warning flag is set, the MST threshold is used as-is. Override with `--geodesic-diversity-threshold` if the inferred threshold is unsuitable.
+When any warning flag is set, the MST threshold is used as-is. The threshold is always inferred from the data (ANI cap + MST bottleneck); it is not a user-tunable parameter.
 
 When $\theta_{\mathrm{MST}}$ is unavailable (small-$n$ brute-force path), $\mathrm{NN}_{P95}$ is used directly.
 
