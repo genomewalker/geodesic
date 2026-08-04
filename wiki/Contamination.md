@@ -55,7 +55,7 @@ the nearest clean representative rather than dropped entirely.
 
 ## Track 2: genopack QUAL suite (at-scale, marker-gene-free)
 
-The genopack archive stores a QUAL section for every genome produced by `geodesic check`.
+The QUAL section is **computed and written by `genopack check`** (the contamination/quality engine — `contam_D`/`S`/`G`, completeness, tier — lives in genopack, not geodesic). geodesic only *consumes* it: the derep pipeline reads QUAL for quality-weighted selection, `--skip-lq`, and the self-describing `quality_tier`/`contam_D` output columns, and `geodesic check` merely surfaces (reports) the genopack QUAL. Track 2 below documents the genopack model for reference; the authoritative spec is the genopack [Quality Scoring](https://genomewalker.github.io/genopack/quality/) docs.
 Unlike CheckM2 and GUNC — which require a marker-gene database and scale roughly linearly with
 genome count — the QUAL signals are derived entirely from k-mer statistics and run as part of
 the archive construction pipeline. At 9.53 M genomes (GTDB r232) the QUAL section achieves
