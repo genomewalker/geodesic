@@ -214,7 +214,7 @@ The CheckM2 TSV should have columns `accession`, `completeness`, `contamination`
 | File | Contents |
 |------|----------|
 | `gtdb_r232_results.tsv` | Per-taxon summary: `taxonomy`, `method`, `n_genomes`, `n_genomes_derep`, `communities`, `weight` |
-| `gtdb_r232_derep_genomes.tsv` | Per-genome: `accession`, `taxonomy`, `representative` (0/1), `cluster_rep`, `nn_dist`, `sketch_fill` |
+| `gtdb_r232_derep_genomes.tsv` | Per-genome: `accession`, `taxonomy`, `representative` (0/1), `cluster_rep`, `nn_dist`, `sketch_fill`; with `--pack` also `quality_tier`, `contam_D`, `is_singleton` |
 | `gtdb_r232_diversity_stats.tsv` | Per-taxon coverage and diversity metrics |
 | `gtdb_r232_stats.tsv` | Per-taxon pipeline stats (MST edges, ANI threshold, outlier counts) |
 | `gtdb_r232_outliers.tsv` | Contamination candidates flagged by the MAD-based estimator |

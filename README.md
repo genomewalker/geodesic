@@ -29,7 +29,7 @@ geodesic update -g new.txt --lock run1.lock --pack mydb.gpk --threads 16
 
 | File | Contents |
 |------|----------|
-| `<prefix>_derep_genomes.tsv` | accession, taxonomy, representative, cluster_rep, nn_dist, sketch_fill |
+| `<prefix>_derep_genomes.tsv` | accession, taxonomy, representative, cluster_rep, nn_dist, sketch_fill; with `--pack`, also quality_tier, contam_D, is_singleton (self-describing output) |
 | `<prefix>_results.tsv` | per-taxon: method, n_genomes, n_genomes_derep, communities, weight |
 | `<prefix>_stats.tsv` | per-taxon: preflight/quality counts, θ used |
 | `<prefix>_diversity_stats.tsv` | per-taxon: diversity ANI range, n_pairs, outliers excluded/retained |

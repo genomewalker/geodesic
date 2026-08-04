@@ -123,7 +123,7 @@ For complete bacterial genomes ($|G| \sim 10^6$ k-mers, $m = 10{,}000$), $f \app
 
 ### K-mer size and OPH accuracy
 
-The default is $k = 21$. The k-mer size determines how quickly Jaccard drops with ANI (Mash model: $q = \mathrm{ANI}^k$, $J = q/(2-q)$):
+The default is $k = 21$. The k-mer size determines how quickly Jaccard drops with ANI (Mash model, with $p = \mathrm{ANI}/100$: $q = p^k$, $J = q/(2-q)$):
 
 | ANI  | k=16  | k=21  | k=31  |
 |------|-------|-------|-------|
@@ -178,7 +178,7 @@ $$
 K_{\mathrm{norm}}[i,j] = \frac{K_{\mathrm{raw}}[i,j]}{\sqrt{d_i \cdot d_j}}, \qquad d_i = \sum_j K_{\mathrm{raw}}[i,j]
 $$
 
-equivalently $K_{\mathrm{norm}} = D^{-1/2} K_{\mathrm{blend}} D^{-1/2}$. After this step, dot products approximate a normalised-graph similarity, not raw Jaccard. Phase 7 corrects borderline decisions back to raw sketch Jaccard space.
+equivalently $K_{\mathrm{norm}} = D^{-1/2} K_{\mathrm{raw}} D^{-1/2}$. After this step, dot products approximate a normalised-graph similarity, not raw Jaccard. Phase 7 corrects borderline decisions back to raw sketch Jaccard space.
 
 **Tikhonov ridge** prevents near-zero eigenvalues from blowing up the projection:
 

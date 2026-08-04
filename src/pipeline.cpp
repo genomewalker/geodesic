@@ -438,7 +438,7 @@ void emit_gpd_archive(const Config& cfg, const RunState& run_state,
         gcfg.embedding_dtype  = 1; // f16
         gcfg.emit_armp        = true;
         gcfg.zstd_level       = 6;
-        gcfg.geodesic_version = "geodesic 1.0.0";
+        gcfg.geodesic_version = "geodesic 1.2.0";
 
         geodesic::DerepArchiveBuilder ab(gcfg);
         ab.set_source_pack(src);

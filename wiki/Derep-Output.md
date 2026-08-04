@@ -26,6 +26,13 @@ Every input genome mapped to its representative. One row per genome.
 | `cluster_rep` | Accession of the representative this genome maps to (its own when it is a rep) |
 | `nn_dist` | Angular distance from the member to its assigned representative (`0` for reps) |
 | `sketch_fill` | OPH sketch occupancy fraction of the genome (`1.0` default) |
+| `quality_tier` | (with `--pack`) genopack quality tier for the genome, or `NA` |
+| `contam_D` | (with `--pack`) duplication-contamination channel `contam_D`, or `NA` |
+| `is_singleton` | (with `--pack`) `1` if the genome's cluster has size 1, else `0` |
+
+The last three columns are the **self-describing output** (v1.2.0): they are appended
+whenever a genopack pack is attached (`--pack`), so quality policy can be applied
+directly from the derep table without a separate join.
 
 ### `<prefix>_results.tsv`
 
@@ -37,7 +44,7 @@ Per-taxon summary. One row per taxon.
 | `method` | Selection method: `geodesic`, `geodesic-self-rep`, `singleton`, or `fixed` |
 | `n_genomes` | Input genomes in the taxon |
 | `n_genomes_derep` | Representatives retained |
-| `communities` | Number of communities detected in the taxon |
+| `communities` | Reserved; always `0` (no community-detection phase in the current algorithm) |
 | `weight` | Reserved; always emitted as `NA` (`results_writer.cpp:159`) |
 
 ### `<prefix>_stats.tsv`
