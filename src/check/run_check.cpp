@@ -72,7 +72,8 @@ int run_check(const Config& cfg) {
         << "\tcontamination_leakage"
         << "\tcontamination_contig_outlier"
         << "\tcontamination_cross_genus"
-        << "\tmimag_tier"
+        << "\tquality_tier"      // genopack's authoritative tier (completeness-decoupled)
+        << "\tmimag_tier"        // derived classic MIMAG view (completeness AND contamination)
         << "\tqual_flags"
         << "\n";
 
@@ -91,6 +92,11 @@ int run_check(const Config& cfg) {
         // Use FMH as primary contamination signal for tier; fall back to leakage if FMH not scored
         const float cont_primary = !std::isnan(fmh) ? fmh : cont;
         const char* tier = mimag_tier(comp, cont_primary);
+        // genopack's authoritative tier from the QUAL section (do not recompute).
+        const char* gp_tier =
+            r.quality_tier_u8 == genopack::QualRecord::QTIER_HQ ? "HQ" :
+            r.quality_tier_u8 == genopack::QualRecord::QTIER_MQ ? "MQ" :
+            r.quality_tier_u8 == genopack::QualRecord::QTIER_LQ ? "LQ" : "NA";
 
         auto fmt_f = [](float v) -> std::string {
             if (std::isnan(v)) return "NA";
@@ -106,6 +112,7 @@ int run_check(const Config& cfg) {
             << '\t' << fmt_f(cont)
             << '\t' << fmt_f(cco)
             << '\t' << fmt_f(cg)
+            << '\t' << gp_tier
             << '\t' << tier
             << '\t' << static_cast<int>(r.qual_flags)
             << '\n';
