@@ -20,6 +20,11 @@ Config parse_args(int argc, char** argv) {
         ->required()
         ->check(CLI::ExistingFile);
 
+    derep->add_option("--unnamed-species", cfg.unnamed_species, "Unnamed species: cluster (default) or singleton")
+        ->check(CLI::IsMember({"cluster", "singleton"}));
+    derep->add_option("--skani-bin", cfg.skani_bin, "skani executable for unnamed species clustering");
+    derep->add_option("--species-radii", cfg.species_radii, "GTDB species radii TSV")->check(CLI::ExistingFile);
+
     derep->add_option("--references", cfg.references_file,
         "Accessions to pin as representatives (one per line)")
         ->check(CLI::ExistingFile);

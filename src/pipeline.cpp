@@ -11,6 +11,7 @@
 #include "core/preloaded_pack_reader.hpp"
 #include "core/kmer_probe.hpp"
 #include "taxonomy/species.hpp"
+#include "taxonomy/unnamed.hpp"
 #include "db/geodf/geodf_writer.hpp"
 #include "db/geodf/geodf_reader.hpp"
 #include "db/grd/grd_writer.hpp"
@@ -622,7 +623,9 @@ int run_pipeline(Config& cfg) {
     auto genomes = accessions_to_genomes(accessions, *gpk_reader, checkm2);
 
     // Group by taxonomy and build Taxon objects.
-    auto taxa = group_by_taxonomy(genomes, fixed_taxa);
+    auto taxa = cfg.unnamed_species == "singleton"
+        ? group_by_taxonomy(genomes, fixed_taxa)
+        : cluster_unnamed_species(genomes, fixed_taxa, *gpk_reader, cfg);
 
     // Log stats
     std::size_t total_genomes = 0;
