@@ -47,7 +47,26 @@ The check is two multiplies and two comparisons — ~4× faster than a hardware 
 on modern CPUs. The expected sketch size is `genome_length / c`, matching skani's `-c`
 compression parameter. Default: `c = 125` (sketch ~32k hashes for a 4 Mb genome).
 
-### All-pairs intersection: AVX2 merge
+### Marker screen and streaming sketches
+
+FASTA sequences are sketched inside each shard-batch callback, in parallel, and
+released after sketching. Memory therefore holds all sketches plus one sequence
+batch rather than all sequences. Sketches are rebuilt on every run.
+
+By default, `--screen 80` selects markers directly from sorted sketch hashes with
+`hash % 8 == 0` (expected density 1/1000 at `c=125`). A sorted inverted index
+accumulates shared markers per query. Only pairs with
+`shared / min(query_markers, ref_markers) >= (screen/100)^k` reach the full merge.
+The screen is a sampled candidate filter and can lose pairs near its threshold;
+it does not change the ANI or containment calculation for retained pairs.
+`--screen 0` disables the screen for exhaustive results. Sketches with no markers
+produce no candidates when screening is enabled.
+
+`--max-marker-df N` optionally removes markers appearing in more than N distinct
+reference genomes (default 0: no cap). The denominator still counts all markers;
+a cap can therefore reduce recall, including for highly similar pairs.
+
+### Candidate intersection: AVX2 merge
 
 Each sketch is a sorted array of 64-bit hashes. Pairwise ANI is computed from
 the sorted-set intersection size via a two-pointer merge, auto-vectorised with
@@ -59,23 +78,23 @@ intersection size, union size, and both directional containments in a single pas
 | | `geodesic ani` | skani |
 |---|---|---|
 | Input | Accession list; FASTAs read from genopack archive | FASTA files on disk |
-| Disk I/O | None (in-memory shard reader) | Reads and decompresses every input file |
+| Disk I/O | Reads archive shards; no intermediate FASTA export | Reads input sequences or existing sketch files |
 | Temp files | None | Optional sketch cache |
 | AF semantics | `af = intersection / min(sketch_a, sketch_b)`: shared sampled k-mers (containment), and `ani = af^(1/k)` is derived from the same number, so partial overlap lowers both | Alignment fraction: share of the genome covered by chained k-mer matches (approximate alignment), with ANI estimated separately on those regions |
-| Parallelism | Per-pair work-stealing thread pool | Per-genome thread pool |
+| Parallelism | OpenMP over each sketch batch and over queries | Per-genome thread pool |
 | Pack integration | Direct; accessions not in the pack are silently skipped with a count | Requires file paths |
 
-Eliminating disk I/O is the main throughput advantage for archive-resident genomes.
-On a shared-filesystem cluster where FASTA decompression is I/O bound, `geodesic ani`
-avoids the decompression bottleneck: the shard reader returns raw FASTA bytes from
-the mmap'd archive in ~1 µs per genome regardless of genome count.
+Reading directly from the archive avoids exporting and reopening individual FASTA
+files. Archive reads, sequence decoding, and sketch construction still contribute
+to runtime; their cost depends on the pack and filesystem cache.
 
-> **The speed gain applies only when no precomputed sketches exist.** Returning the
-> FASTA bytes is ~1 µs per genome, but `geodesic ani` then builds every FracMinHash
-> sketch in memory on each run; skani reading its own `.sketch` files skips both steps.
+> **The comparison depends on whether precomputed sketches exist.** `geodesic ani`
+> builds every FracMinHash sketch from archive sequences on each run; skani reading
+> its own `.sketch` files skips sequence loading and sketch construction.
 > Measured on dandycomp08fl, 32 threads, random GTDB r232 self-named reps from one phylum
 > (2026-10-21): 5,000 genomes, skani triangle on existing sketches 6 s / 4.5 GB versus
-> `geodesic ani` 450 s / 10.4 GB; 35,000 genomes, 72 s / 31.8 GB versus 1,468 s / 68.7 GB
+> exhaustive `geodesic ani` before streaming and screening: 450 s / 10.4 GB;
+> 35,000 genomes, 72 s / 31.8 GB versus 1,468 s / 68.7 GB
 > (about half loading and sketching, half the exhaustive all-pairs merge). On 1,189 genomes
 > the pair merge alone took ~4 s against 4.6 s for the whole skani run.
 >
@@ -83,6 +102,30 @@ the mmap'd archive in ~1 µs per genome regardless of genome count.
 > `af >= 0.5` is not GTDB's species rule: on that 1,189-genome family it missed 344 of
 > 3,302 skani pairs with ANI >= 95 and alignment fraction >= 50 %. As a candidate filter
 > it works: containment ANI >= 94 recovered all 3,302.
+
+### Streaming and marker-screen measurements (2026-10-21)
+
+Measured on dandycomp08fl with 32 threads, `k=21`, `c=125`, the same accession
+lists and pack as the earlier reference, and fresh Python timing processes
+(`resource.getrusage(RUSAGE_CHILDREN)`, decimal GB):
+
+| Genomes | Screen | Minimum AF | Wall (s) | Peak RSS (GB) | Reported pairs |
+|---|---:|---:|---:|---:|---:|
+| 1,189 | 0 | 0 | 11.553 | 1.722 | 706,266 |
+| 1,189 | 80 | 0 | 8.902 | 1.816 | 89,942 |
+| 5,000 | 80 | 0.27 | 122.199 | 1.671 | 3,153 |
+| 35,000 | 80 | 0.27 | 273.843 | 6.500 | 158,629 |
+
+The isolated `origin/main` reference, rebuilt against the same existing genopack
+library, took 12.211 s / 5.399 GB for 1,189 genomes. Sorted screen-0 rows match it
+byte for byte. Screen 80 retains all 12,016 pairs at ANI >=85 and all 4,995 pairs
+at ANI >=90 with identical values. For 5,000 genomes, all 3,126 pairs at ANI >=94
+match the earlier exhaustive output. For 35,000 genomes, all 157,285 pairs at
+ANI >=94 match, and both targets (wall <300 s, peak RSS <15 GB) pass.
+
+Earlier timings above are historical comparisons; filesystem cache and node
+conditions are not controlled across runs. These changes do not cache sketches
+in the pack, and the skani comparison still uses precomputed sketches.
 
 ### GTDB r232 representative validation (measured)
 
@@ -105,16 +148,17 @@ Computes pairwise FracMinHash ANI between genomes in a pack.
 
 ### What it does
 
-1. **Load sequences in-memory.** The union of `--ql` and `--rl` accessions is
-   read from the pack via the shard-batch reader. FASTA bytes stay in RAM; no
-   extraction step.
+1. **Stream sequence batches.** The union of `--ql` and `--rl` accessions is
+   read via the shard-batch reader. Each batch is sketched before the next is
+   read, and each FASTA is released immediately after sketching.
 2. **Build FracMinHash sketches.** For each genome, every position is encoded as
    a canonical k-mer (2 bits/base, forward vs. reverse-complement minimum) and
    hashed with an ntHash-style rolling hash. A k-mer is kept in the sketch when
    `hash % c == 0` — Lemire fast-divisibility selection — giving a sketch whose
    size scales with `genome_length / c`. This is the same compression model as
    skani's `-c` parameter.
-3. **All-pairs intersection.** Each sketch is a sorted set of 64-bit hashes;
+3. **Screen and intersect candidates.** Shared sketch markers select candidates
+   (default `--screen 80`; `--screen 0` is exhaustive). Each sketch is a sorted set of 64-bit hashes;
    ANI is computed from the size of the sorted-set intersection (AVX2-accelerated
    merge) between query and reference sketches. Alignment fraction (`af`) and the
    two directional containments (`c_ab`, `c_ba`) fall out of the same
@@ -123,7 +167,8 @@ Computes pairwise FracMinHash ANI between genomes in a pack.
 
 When `--rl` is omitted, the reference list defaults to the query list and
 geodesic computes self all-pairs: each unordered pair is emitted once
-(`query < ref`), self-pairs skipped.
+(orientation follows internal sketch order), self-pairs skipped. Output row
+order is unspecified; sort rows when comparing runs.
 
 ### Usage
 
@@ -158,7 +203,9 @@ geodesic ani \
 | `--pack` | required | genopack archive (single `.gpk` or directory of `part_*.gpk`) |
 | `-o, --output` | `ani_results.tsv` | Output TSV path |
 | `-t, --threads` | 4 | Threads for parallel sketch building and pair computation |
-| `--min-af` | 0 | Minimum alignment fraction to report a pair |
+| `--min-af` | 0 | Minimum k-mer containment fraction to report a pair |
+| `--screen` | 80 | Marker screen ANI percent; 0 = exhaustive |
+| `--max-marker-df` | 0 | Skip markers present in more than N reference genomes; 0 = no cap |
 | `--ani-k` | 21 | k-mer size |
 | `-c, --compression` | 125 | Compression factor: keep k-mer if `hash % c == 0` (matches skani `-c`) |
 
