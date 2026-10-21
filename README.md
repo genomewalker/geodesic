@@ -36,6 +36,8 @@ geodesic update -g new.txt --lock run1.lock --pack mydb.gpk --threads 16
 | `<prefix>_outliers.tsv` | flagged candidates: category, nn_outlier, isolation_score, kmer_div_zscore, flag_reason, excluded |
 | `<prefix>_failed.tsv` | accession, taxonomy, file, reason (resolve/embed failures; sketch-less-but-resolvable genomes are kept as self-reps) |
 
+Genomes without a species name (bare `s__` or `s__<accession>`) are clustered into species by ANI with the GTDB rule (`--unnamed-species cluster`, default); see [docs/unnamed-species.md](docs/unnamed-species.md).
+
 `--emit-gpd <path>` writes the derep archive (`.gpd`) with per-genome cluster and embedding data (see [Derep-Output](wiki/Derep-Output.md)). `--grd-output`, `--geodf-output`, `--lock-output` are needed for distributed/incremental runs.
 
 ## Distributed

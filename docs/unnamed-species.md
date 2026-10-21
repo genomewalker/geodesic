@@ -1,5 +1,7 @@
 # Clustering genomes without a species name
 
+> Status as of 2026-10-21: merged to main. `--unnamed-species cluster` is the default; `singleton` restores the previous one-species-per-genome behaviour. Matches the S2 reference clustering at ARI 1.000 on three families with `--ordering-tsv` and `--anchor-skani-db`, and 140/140 GTDB anchors.
+
 `geodesic derep` clusters unnamed genomes by default. This includes bare `s__`
 (and species-only `S__`) ranks and older accession-filled species ranks. A strain
 `S__` does not override an existing `s__` species.
@@ -70,4 +72,4 @@ also supply the GTDB neighbour ANI used for de novo representative radii.
 records search wall time separately from extraction and clustering. Singleton mode
 without these options retains its existing behavior.
 
-If the final representative independence check fails, `final_rep_conflicts.tsv` records each conflicting pair with ANI, maximum AF and both radii. `failed_assignments.tsv` retains provisional representative assignments and ANI/AF evidence for diagnosis. These files do not bypass the check: the command still exits with an error.
+The final check rejects any two representatives that share an edge (ANI >= 95, max AF >= 50), with one exception: a re-check singleton (ANI >= 95 but below its former representative's radius) keeps its edge to that representative. `final_rep_conflicts.tsv` lists every such pair with ANI, maximum AF, both radii and a `status` of `split_off` (logged, allowed) or `conflict`. Any `conflict` row fails the run, and `failed_assignments.tsv` then retains provisional assignments and ANI/AF evidence for diagnosis.
