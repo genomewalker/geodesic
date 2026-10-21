@@ -10,6 +10,7 @@ using Edges = std::map<std::pair<size_t, size_t>, Hit>;
 Hit hit(const Edges&, size_t, size_t);
 std::map<size_t,size_t> greedy(const std::vector<size_t>& ordered, const Edges&);
 bool unresolved(const Genome&);
+bool ncbi_accession(std::string);
 std::string rank(const std::string&, char);
 std::string replace_rank(const std::string&, char, const std::string&);
 std::string synthetic_digits(const std::string&);

@@ -30,3 +30,10 @@ TEST_CASE("Synthetic names use SHA1 modulo and rank replacement preserves bare r
     REQUIRE(synthetic_digits("abc")=="966479517");
     REQUIRE(replace_rank("d__Bacteria;g__;s__;S__",'g',"Foo")=="d__Bacteria;g__Foo;s__;S__");
 }
+
+TEST_CASE("NCBI ordering excludes GCMeta catalogue accessions", "[unnamed]") {
+    REQUIRE(ncbi_accession("GCA_000000001.1"));
+    REQUIRE(ncbi_accession("RS_GCF_000000001.1"));
+    REQUIRE_FALSE(ncbi_accession("GCMeta_00778976"));
+    REQUIRE_FALSE(ncbi_accession("custom_genome"));
+}

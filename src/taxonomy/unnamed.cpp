@@ -49,6 +49,10 @@ bool unresolved(const Genome& g) {
     const auto& value = has_lower ? species : upper;
     return value.empty() || value == taxonomy::species_stem(g.accession);
 }
+bool ncbi_accession(std::string a) {
+    if (a.starts_with("RS_") || a.starts_with("GB_")) a.erase(0,3);
+    return a.starts_with("GCA_") || a.starts_with("GCF_");
+}
 Hit hit(const Edges& e, size_t a, size_t b) {
     if (a == b) return {100,100};
     auto it = e.find(std::minmax(a,b)); return it == e.end() ? Hit{} : it->second;
@@ -229,7 +233,7 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
         auto tier=pack.quality_tier_for_accession(g.accession).value_or(1);
         double completeness=pack.completeness_effective_for_accession(g.accession).value_or(g.completeness.value_or(meta ? meta->completeness_x10/10. : 0)/100.);
         keys[i]={!prior.contains(g.accession),3-std::clamp(int(tier),1,3),-completeness,
-            meta?meta->n_contigs:UINT32_MAX, !canonical(g.accession).starts_with("GC"),g.accession};
+            meta?meta->n_contigs:UINT32_MAX, !ncbi_accession(g.accession),g.accession};
     }
     auto ordered=[&](std::vector<size_t> ids){std::sort(ids.begin(),ids.end(),[&](auto a,auto b){return keys.at(a)<keys.at(b);});return ids;};
     Skani skani(pack,cfg,genomes);
