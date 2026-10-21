@@ -33,6 +33,13 @@ struct Config {
     // Max concurrent NFS file readers (0 = auto: threads)
     int io_threads = 0;
 
+    std::string unnamed_species = "cluster";
+    std::string skani_bin = "skani";
+    std::optional<std::filesystem::path> species_radii;
+    std::optional<std::filesystem::path> ordering_tsv;
+    std::optional<std::filesystem::path> anchor_skani_db;
+    std::string anchor_skani_bin = "skani";
+
     // Thresholds
     double z_threshold = 2.0;
     double ani_threshold = 95.0;

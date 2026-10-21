@@ -151,6 +151,7 @@ add_executable(geodesic
     src/core/kmer_probe.cpp
     src/core/preloaded_pack_reader.cpp
     src/taxonomy/species.cpp
+    src/taxonomy/unnamed.cpp
     src/core/geodesic/geodesic.cpp
     src/parallel/taxon_processor.cpp
     src/validate_ani.cpp
