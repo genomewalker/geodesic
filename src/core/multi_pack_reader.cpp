@@ -1,5 +1,7 @@
 #include "multi_pack_reader.hpp"
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <charconv>
 #include <fcntl.h>
 #include <filesystem>
@@ -228,6 +230,66 @@ void MultiPackReader::visit_shard_batches(
                 cb(remapped);
             });
     }
+}
+
+void MultiPackReader::visit_shard_batches_parallel(
+    const std::vector<std::string>& accessions, int n_readers,
+    const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const
+{
+    if (n_readers <= 1) { visit_shard_batches(accessions, cb); return; }
+    struct Slice {
+        size_t archive;
+        std::vector<std::string> accs;
+        std::vector<size_t> indices;
+        int readers = 1;
+    };
+    std::vector<Slice> slices;
+    std::vector<size_t> positions(archives_.size(), archives_.size());
+    for (size_t i = 0; i < accessions.size(); ++i) {
+        auto it = acc_to_arch_.find(accessions[i]);
+        if (it == acc_to_arch_.end()) continue;
+        auto& pos = positions[it->second];
+        if (pos == archives_.size()) {
+            pos = slices.size();
+            slices.push_back({it->second, {}, {}, 1});
+        }
+        slices[pos].accs.push_back(accessions[i]);
+        slices[pos].indices.push_back(i);
+    }
+    if (slices.empty()) return;
+    // At least one reader per active archive when possible, then distribute
+    // remaining slots by accession weight (largest current count per slot).
+    for (int used = static_cast<int>(slices.size()); used < n_readers; ++used) {
+        auto best = std::max_element(slices.begin(), slices.end(), [](const auto& a, const auto& b) {
+            return a.accs.size() * size_t(b.readers) < b.accs.size() * size_t(a.readers);
+        });
+        ++best->readers;
+    }
+    std::atomic<size_t> next{0};
+    std::mutex error_mutex;
+    std::exception_ptr error;
+    auto work = [&] {
+        try {
+            for (size_t i; (i = next.fetch_add(1)) < slices.size();) {
+                const auto& sl = slices[i];
+                archives_[sl.archive].reader->visit_shard_batches_parallel(sl.accs, sl.readers,
+                    [&](genopack::ArchiveReader::ShardBatch& batch) {
+                        for (auto& entry : batch) entry.first = sl.indices[entry.first];
+                        cb(batch);
+                    });
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(error_mutex);
+            if (!error) error = std::current_exception();
+        }
+    };
+    // jthread also joins already-started workers if thread creation fails.
+    {
+        std::vector<std::jthread> workers;
+        const size_t count = std::min(slices.size(), size_t(n_readers));
+        for (size_t i = 0; i < count; ++i) workers.emplace_back(work);
+    }
+    if (error) std::rethrow_exception(error);
 }
 
 void MultiPackReader::visit_sketch_batches(
