@@ -69,3 +69,5 @@ also supply the GTDB neighbour ANI used for de novo representative radii.
 `anchor_hits.tsv` records the top AF-passing evidence and `anchor_search_seconds.txt`
 records search wall time separately from extraction and clustering. Singleton mode
 without these options retains its existing behavior.
+
+If the final representative independence check fails, `final_rep_conflicts.tsv` records each conflicting pair with ANI, maximum AF and both radii. `failed_assignments.tsv` retains provisional representative assignments and ANI/AF evidence for diagnosis. These files do not bypass the check: the command still exits with an error.

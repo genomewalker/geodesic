@@ -392,7 +392,19 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
     Block final_reps;
     for(auto [x,r]:assigned) if(x==r) final_reps[block_key(genomes[r],'p')].push_back(r);
     size_t conflicts=0;
-    for(auto& [p,ids]:final_reps) for(auto [pair,h]:skani.compare(ids,ids,true)) if(h.ani>=95&&h.af>=50) ++conflicts;
+    std::ofstream conflict_out(cfg.results_dir/"final_rep_conflicts.tsv");
+    conflict_out<<"rep_a\trep_b\tani\tmax_af\tradius_a\tradius_b\n";
+    for(auto& [p,ids]:final_reps) for(auto [pair,h]:skani.compare(ids,ids,true)) if(h.ani>=95&&h.af>=50) {
+        ++conflicts;
+        conflict_out<<genomes[pair.first].accession<<'\t'<<genomes[pair.second].accession<<'\t'<<h.ani<<'\t'<<h.af<<'\t'<<cluster_radius.at(pair.first)<<'\t'<<cluster_radius.at(pair.second)<<'\n';
+    }
+    if(conflicts) {
+        std::ofstream diagnostic(cfg.results_dir/"failed_assignments.tsv");
+        diagnostic<<"accession\trep\tradius\tani_to_rep\taf_to_rep\tsource\n";
+        for(auto [x,r]:assigned) diagnostic<<genomes[x].accession<<'\t'<<genomes[r].accession<<'\t'<<cluster_radius.at(r)<<'\t'<<evidence[x].ani<<'\t'<<evidence[x].af<<"\tcluster\n";
+        for(auto [x,r]:anchors) diagnostic<<genomes[x].accession<<'\t'<<genomes[r].accession<<'\t'<<radius(r)<<'\t'<<evidence[x].ani<<'\t'<<evidence[x].af<<"\tanchor\n";
+        for(auto& [x,h]:database_anchors) diagnostic<<genomes[x].accession<<'\t'<<h.ref<<'\t'<<h.radius<<'\t'<<h.ani<<'\t'<<h.af()<<"\tanchor\n";
+    }
     spdlog::info("Unnamed species final check: {} representative edges; cross-phylum pairs not searched",conflicts);
     if(conflicts) throw std::runtime_error("Unnamed species final representatives share species-rule edges");
     std::map<size_t,std::vector<size_t>> members;
