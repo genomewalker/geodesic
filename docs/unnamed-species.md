@@ -43,3 +43,29 @@ assigned genus have no rows in this file.
 
 Use `--unnamed-species singleton` to retain the previous taxonomy-string
 grouping behavior. This option also avoids invoking skani.
+
+### Matched S2 ordering and external GTDB anchors
+
+With `--unnamed-species cluster`, `--ordering-tsv FILE` reads a header TSV keyed
+by `accession`. Its required columns are `quality_tier` (`HQ`, `MQ`, `LQ`),
+`completeness_effective`, `n_contigs`, and `ncbi` (0 or 1). Listed genomes use
+these values verbatim, including effective completeness above 1; unlisted genomes
+use pack metadata. Representatives sort by prior representative status, tier,
+descending effective completeness, contig count, descending NCBI flag, accession.
+A prior representative can be replaced by a better tier, or the same tier with
+at least 0.05 greater effective completeness.
+
+`--anchor-skani-db DIR --species-radii FILE` searches an external skani sketch
+database instead of packed named representatives. `--anchor-skani-bin BIN`
+(default `skani`) selects the search executable independently of `--skani-bin`,
+which continues to run clustering triangles and distances. The search command is
+`skani search -d DIR --ql LIST -t THREADS --min-af 0`.
+The radii TSV has species, reference accession (optionally prefixed `RS_`/`GB_`),
+and ANI radius columns. Unknown references and hits with both AF values below 50
+are ignored. Among remaining hits, the greatest (ANI, maximum AF) wins; an exact
+tie retains the first hit. Only that reference's radius decides anchoring.
+Accepted genomes leave clustering and receive its GTDB species. AF-passing hits
+also supply the GTDB neighbour ANI used for de novo representative radii.
+`anchor_hits.tsv` records the top AF-passing evidence and `anchor_search_seconds.txt`
+records search wall time separately from extraction and clustering. Singleton mode
+without these options retains its existing behavior.
