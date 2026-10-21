@@ -33,9 +33,11 @@ for mode, opts in [("self", []), ("rect", ["--rl", str(r)])]:
     assert not screened - exhaustive, "screen changed values or added pairs"
     assert collections.Counter({k: v for k, v in exhaustive.items() if float(k.split("\t")[2]) >= 90}) == collections.Counter({k: v for k, v in screened.items() if float(k.split("\t")[2]) >= 90})
 # Repeated reference entries count once for document frequency. A cap of one
-# keeps genome-specific markers and therefore exact query/ref self matches.
-capped = run(new, "cap", ["--rl", str(r), "--screen", "100", "--max-marker-df", "1"])
-assert sum(v for k, v in capped.items() if k.split("\t")[0] == k.split("\t")[1]) == 7
+# keeps all markers when the references contain only one distinct genome.
+cap_r = d / "cap-r"
+cap_r.write_text((acc[0] + "\n") * 2)
+capped = run(new, "cap", ["--rl", str(cap_r), "--screen", "100", "--max-marker-df", "1"])
+assert sum(v for k, v in capped.items() if k.split("\t")[0] == k.split("\t")[1]) == 4
 for flag, value in [("--screen", "-1"), ("--screen", "101"), ("--max-marker-df", "-1")]:
     result = subprocess.run([new, "ani", "--pack", pack, "--ql", str(q), flag, value], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     assert result.returncode != 0, (flag, value)
