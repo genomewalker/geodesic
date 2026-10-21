@@ -3,6 +3,7 @@
 #include <exception>
 #include <map>
 #include <mutex>
+#include <thread>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -10,16 +11,14 @@
 namespace derep {
 
 inline int ani_reader_count(int threads, int requested) {
-    const int automatic = std::max(1, std::min(8, threads / 4));
-    return std::clamp(requested ? requested : automatic, 1, std::max(1, threads - 1));
+    const int automatic = std::max(1, std::min(4, threads / 8));
+    return std::clamp(requested ? requested : automatic, 1, std::max(1, threads / 8));
 }
 
-// One shared OpenMP team: reader tasks own disjoint contiguous shard bands;
-// sketch tasks share the rest of the team. A taskgroup retains each callback's
-// batch until every genome is consumed, so at most R decoded batches are live.
-// Each band calls the parallel API with one reader: genopack's internal decode
-// regions then nest in our team and are serialized, rather than spawning 8R
-// additional decoding threads. Its compressed prefetch buffers remain bounded.
+// Each reader owns a fixed CPU share, reused for decode and sketch phases.
+// genopack explicitly requests up to eight decode threads, so admit a reader
+// only when eight CPUs are available. Below eight CPUs its decode is serial.
+// Reader lifetimes also bound compressed double buffers and decoded batches.
 template<class Visitor>
 void visit_shard_genomes(IPackReader& pack, const std::vector<std::string>& accessions,
                         int threads, int requested_readers, const Visitor& visit) {
@@ -47,50 +46,43 @@ void visit_shard_genomes(IPackReader& pack, const std::vector<std::string>& acce
         std::lock_guard<std::mutex> lock(error_mutex);
         if (!error) error = std::current_exception();
     };
+    auto work = [&](int b) {
 #ifdef _OPENMP
-    const int previous_levels = omp_get_max_active_levels();
-    const int previous_dynamic = omp_get_dynamic();
-    omp_set_dynamic(0);
-    // A one-thread outer region is inactive, so disable all nested regions there.
-    omp_set_max_active_levels(threads > 1 ? 1 : 0);
-    #pragma omp parallel num_threads(threads)
-    #pragma omp single
+        const int previous_levels = omp_get_max_active_levels();
+        const int previous_dynamic = omp_get_dynamic();
+        omp_set_dynamic(0);
+        omp_set_max_active_levels(threads >= 8 ? 1 : 0);
 #endif
-    {
-        for (int b = 0; b < readers; ++b) {
+        try {
+            const auto& band = bands[b];
+            pack.visit_shard_batches_parallel(band.accs, 1,
+                [&](genopack::ArchiveReader::ShardBatch& batch) {
 #ifdef _OPENMP
-            #pragma omp task firstprivate(b)
+                    omp_set_max_active_levels(1);
+                    #pragma omp parallel for num_threads(threads / readers) schedule(dynamic, 1)
 #endif
-            {
-                try {
-                    const auto& band = bands[b];
-                    pack.visit_shard_batches_parallel(band.accs, 1,
-                        [&](genopack::ArchiveReader::ShardBatch& batch) {
+                    for (size_t i = 0; i < batch.size(); ++i) {
+                        auto& entry = batch[i];
+                        try { visit(band.indices[entry.first], entry.second); }
+                        catch (...) { record_error(); }
+                        // Release consumed FASTAs even when a visitor doesn't move them.
+                        std::string().swap(entry.second.fasta);
+                    }
 #ifdef _OPENMP
-                            #pragma omp taskgroup
+                    omp_set_max_active_levels(threads >= 8 ? 1 : 0);
 #endif
-                            {
-                                for (auto& entry : batch) {
-                                    auto* genome = &entry.second;
-                                    const size_t idx = band.indices[entry.first];
+                });
+        } catch (...) { record_error(); }
 #ifdef _OPENMP
-                                    #pragma omp task firstprivate(genome, idx)
+        omp_set_max_active_levels(previous_levels);
+        omp_set_dynamic(previous_dynamic);
 #endif
-                                    {
-                                        try { visit(idx, *genome); }
-                                        catch (...) { record_error(); }
-                                    }
-                                }
-                            }
-                        });
-                } catch (...) { record_error(); }
-            }
-        }
+    };
+    if (readers == 1) work(0);
+    else {
+        std::vector<std::jthread> workers;
+        for (int b = 0; b < readers; ++b) workers.emplace_back(work, b);
     }
-#ifdef _OPENMP
-    omp_set_max_active_levels(previous_levels);
-    omp_set_dynamic(previous_dynamic);
-#endif
     if (error) std::rethrow_exception(error);
 }
 } // namespace derep

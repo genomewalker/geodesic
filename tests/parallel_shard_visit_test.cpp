@@ -12,6 +12,7 @@ class FakePack : public derep::SinglePackReader {
 public:
     FakePack() : SinglePackReader(nullptr) {}
     bool fail_reader = false;
+    int decode_budget = 8;
     mutable std::atomic<int> live{0}, peak{0};
     std::optional<genopack::GenomeMeta> genome_meta_by_accession(std::string_view a) const override {
         if (a == "missing") return std::nullopt;
@@ -27,14 +28,14 @@ public:
         if (readers != 1) throw std::runtime_error("unbudgeted genopack readers");
         if (fail_reader) throw std::runtime_error("reader error");
         for (size_t i = 0; i < accs.size(); ++i) {
-            // Reproduce genopack's explicit nested decode team.
+            // Reproduce genopack's explicit decode team.
             int decode_team = 1;
 #ifdef _OPENMP
             #pragma omp parallel num_threads(8)
             #pragma omp single
             decode_team = omp_get_num_threads();
 #endif
-            if (decode_team != 1) throw std::runtime_error("nested decode oversubscribed");
+            if (decode_team > decode_budget) throw std::runtime_error("decode oversubscribed");
             genopack::ArchiveReader::ShardBatch batch(1);
             batch[0].first = i;
             batch[0].second.accession = accs[i];
@@ -48,20 +49,29 @@ public:
     }
 };
 }
-TEST_CASE("ANI reader budgets reserve sketch capacity", "[parallel-pack]") {
-    REQUIRE(derep::ani_reader_count(32, 0) == 8);
-    REQUIRE(derep::ani_reader_count(8, 0) == 2);
+TEST_CASE("ANI reader budgets cover explicit genopack decode teams", "[parallel-pack]") {
+    REQUIRE(derep::ani_reader_count(32, 0) == 4);
+    REQUIRE(derep::ani_reader_count(8, 0) == 1);
     REQUIRE(derep::ani_reader_count(1, 0) == 1);
     REQUIRE(derep::ani_reader_count(2, 99) == 1);
-    REQUIRE(derep::ani_reader_count(8, 99) == 7);
+    REQUIRE(derep::ani_reader_count(8, 99) == 1);
+    REQUIRE(derep::ani_reader_count(32, 99) == 4);
+    REQUIRE(derep::ani_reader_count(16, 2) == 2);
 }
-TEST_CASE("Shard tasks preserve caller indices and serialize nested decoding", "[parallel-pack]") {
-    for (int threads : {1, 2, 8}) {
+TEST_CASE("Shard readers preserve caller indices and bound decoding", "[parallel-pack]") {
+    for (int threads : {1, 2, 8, 16, 32}) {
         FakePack pack;
+        pack.decode_budget = threads < 8 ? 1 : 8;
         std::vector<std::string> accs{"7", "0", "missing", "2", "7", "1", "6", "3", "4", "5"};
         std::vector<std::string> results(accs.size());
         derep::visit_shard_genomes(pack, accs, threads, 2,
-            [&](size_t i, genopack::ExtractedGenome& g) { results[i] = g.fasta; });
+            [&](size_t i, genopack::ExtractedGenome& g) {
+#ifdef _OPENMP
+                if (omp_get_num_threads() > threads / derep::ani_reader_count(threads, 2))
+                    throw std::runtime_error("sketch oversubscribed");
+#endif
+                results[i] = g.fasta;
+            });
         for (size_t i = 0; i < accs.size(); ++i)
             REQUIRE(results[i] == (accs[i] == "missing" ? "" : accs[i]));
         REQUIRE(pack.live == 0);

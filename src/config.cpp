@@ -266,7 +266,7 @@ Config parse_args(int argc, char** argv) {
     ani_cmd->add_option("-t,--threads", cfg.threads,
         "Total CPU threads for reading, sketching and pairs")->default_val(4)->check(CLI::PositiveNumber);
     ani_cmd->add_option("--io-threads", cfg.io_threads,
-        "Concurrent shard readers (0=auto: max(1,min(8,threads/4)); capped at threads-1)")
+        "Concurrent shard readers (0=auto: max(1,min(4,threads/8)); capped at max(1,threads/8))")
         ->default_val(0)->check(CLI::NonNegativeNumber);
     ani_cmd->add_option("--min-af", cfg.ani_min_af,
         "Minimum alignment fraction to report a pair")->default_val(0.0);
