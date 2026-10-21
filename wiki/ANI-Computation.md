@@ -18,9 +18,11 @@ materialise genomes on disk.
 
 ## Implementation
 
-`geodesic ani` computes FracMinHash ANI directly from a genopack archive. It uses
-the same k-mer Jaccard core as [skani](https://github.com/bluenote-1577/skani), but
-reads sketches from the pack in memory with no FASTA extraction to disk.
+`geodesic ani` computes FracMinHash containment ANI directly from a genopack archive.
+It uses the same FracMinHash subsampling (`-c`) as [skani](https://github.com/bluenote-1577/skani)'s
+sketches, but skani uses those only to screen pairs and estimates ANI and alignment fraction
+from chained k-mer matches (approximate alignment); `geodesic ani` reports the k-mer estimate itself. FASTAs are read
+from the pack in memory (no extraction to disk) and sketched on every run.
 
 ### k-mer encoding and hashing
 
@@ -59,7 +61,7 @@ intersection size, union size, and both directional containments in a single pas
 | Input | Accession list; FASTAs read from genopack archive | FASTA files on disk |
 | Disk I/O | None (in-memory shard reader) | Reads and decompresses every input file |
 | Temp files | None | Optional sketch cache |
-| AF semantics | `af = intersection / min(sketch_a, sketch_b)` — same as skani | Same |
+| AF semantics | `af = intersection / min(sketch_a, sketch_b)`: shared sampled k-mers (containment), and `ani = af^(1/k)` is derived from the same number, so partial overlap lowers both | Alignment fraction: share of the genome covered by chained k-mer matches (approximate alignment), with ANI estimated separately on those regions |
 | Parallelism | Per-pair work-stealing thread pool | Per-genome thread pool |
 | Pack integration | Direct; accessions not in the pack are silently skipped with a count | Requires file paths |
 
@@ -67,6 +69,20 @@ Eliminating disk I/O is the main throughput advantage for archive-resident genom
 On a shared-filesystem cluster where FASTA decompression is I/O bound, `geodesic ani`
 avoids the decompression bottleneck: the shard reader returns raw FASTA bytes from
 the mmap'd archive in ~1 µs per genome regardless of genome count.
+
+> **The speed gain applies only when no precomputed sketches exist.** Returning the
+> FASTA bytes is ~1 µs per genome, but `geodesic ani` then builds every FracMinHash
+> sketch in memory on each run; skani reading its own `.sketch` files skips both steps.
+> Measured on dandycomp08fl, 32 threads, random GTDB r232 self-named reps from one phylum
+> (2026-10-21): 5,000 genomes, skani triangle on existing sketches 6 s / 4.5 GB versus
+> `geodesic ani` 450 s / 10.4 GB; 35,000 genomes, 72 s / 31.8 GB versus 1,468 s / 68.7 GB
+> (about half loading and sketching, half the exhaustive all-pairs merge). On 1,189 genomes
+> the pair merge alone took ~4 s against 4.6 s for the whole skani run.
+>
+> Because `af` is k-mer containment rather than alignment fraction, `ani >= 95` and
+> `af >= 0.5` is not GTDB's species rule: on that 1,189-genome family it missed 344 of
+> 3,302 skani pairs with ANI >= 95 and alignment fraction >= 50 %. As a candidate filter
+> it works: containment ANI >= 94 recovered all 3,302.
 
 ### GTDB r232 representative validation (measured)
 
