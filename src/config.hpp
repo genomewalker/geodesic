@@ -30,7 +30,7 @@ struct Config {
     // Parallelism
     int workers = 2;
     int threads = 4;
-    // Max concurrent NFS file readers (0 = auto: threads)
+    // Max concurrent readers (0 = auto: derep threads; ani max(1,min(8,threads/4)))
     int io_threads = 0;
 
     std::string unnamed_species = "cluster";

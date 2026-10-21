@@ -1,6 +1,8 @@
 #include "run_ani.hpp"
 #include "core/multi_pack_reader.hpp"
 #include "core/pack_reader.hpp"
+#include "core/parallel_shard_visit.hpp"
+#include <chrono>
 #include "core/skani.hpp"
 #include <genopack/archive.hpp>
 #include <spdlog/spdlog.h>
@@ -63,18 +65,23 @@ int run_ani(const Config& cfg) {
     needed_set.insert(rl.begin(), rl.end());
     std::vector<std::string> needed(needed_set.begin(), needed_set.end());
 
-    // Keep only sketches between callbacks; each worker owns and releases its FASTA.
+    using Clock = std::chrono::steady_clock;
+    auto phase_start = Clock::now();
+    auto phase = [&](const char* name) {
+        const auto now = Clock::now();
+        spdlog::info("ani: {} wall: {:.3f} seconds", name,
+                     std::chrono::duration<double>(now - phase_start).count());
+        phase_start = now;
+    };
+    spdlog::info("ani: {} total threads, up to {} shard readers", cfg.threads,
+                 ani_reader_count(cfg.threads, cfg.io_threads));
     std::vector<SkaniSketch> sketches(needed.size());
-    pack->visit_shard_batches(needed, [&](genopack::ArchiveReader::ShardBatch& batch) {
-#ifdef _OPENMP
-        #pragma omp parallel for schedule(dynamic) num_threads(cfg.threads)
-#endif
-        for (size_t i = 0; i < batch.size(); ++i) {
-            auto& [idx, genome] = batch[i];
+    visit_shard_genomes(*pack, needed, cfg.threads, cfg.io_threads,
+        [&](size_t idx, genopack::ExtractedGenome& genome) {
             auto fasta = std::move(genome.fasta);
             sketches[idx] = build_sketch(needed[idx], fasta, cfg.ani_k, cfg.ani_c);
-        }
-    });
+        });
+    phase("read+sketch");
 
     std::unordered_map<std::string, const SkaniSketch*> sketch_idx;
     sketch_idx.reserve(sketches.size());
@@ -141,6 +148,7 @@ int run_ani(const Config& cfg) {
         spdlog::info("ani: marker screen {}%, {} indexed marker occurrences",
                      cfg.ani_screen, index.size());
     }
+    phase("index");
     const double threshold = std::pow(cfg.ani_screen / 100.0, cfg.ani_k);
     const int nthreads = cfg.threads;
     std::vector<std::vector<Row>> trows(nthreads);
@@ -200,12 +208,16 @@ int run_ani(const Config& cfg) {
     for (auto& v : trows)
         rows.insert(rows.end(), v.begin(), v.end());
 
+    phase("pairs");
     out << std::fixed << std::setprecision(4);
     for (auto& r : rows) {
         out << qsks[r.qi]->accession << '\t' << rsks[r.ri]->accession << '\t'
             << r.ani << '\t' << r.af << '\t' << r.c_ab << '\t' << r.c_ba << '\n';
     }
 
+    out.close();
+    if (!out) throw std::runtime_error("cannot write output: " + out_path.string());
+    phase("write");
     spdlog::info("ani: wrote {} pairs → {}", rows.size(), out_path.string());
     return 0;
 }
