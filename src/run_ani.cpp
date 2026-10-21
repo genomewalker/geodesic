@@ -5,6 +5,8 @@
 #include <genopack/archive.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -61,26 +63,18 @@ int run_ani(const Config& cfg) {
     needed_set.insert(rl.begin(), rl.end());
     std::vector<std::string> needed(needed_set.begin(), needed_set.end());
 
-    // Load raw FASTA sequences from pack — fully in memory, no disk I/O
-    std::unordered_map<std::string, std::string> fastas;
-    fastas.reserve(needed.size());
-    pack->visit_shard_batches(needed, [&](genopack::ArchiveReader::ShardBatch& batch) {
-        for (auto& [idx, genome] : batch)
-            fastas[genome.accession] = std::move(genome.fasta);
-    });
-    spdlog::info("ani: loaded {}/{} FASTAs", fastas.size(), needed.size());
-
-    // Build sketches for all needed accessions in parallel
+    // Keep only sketches between callbacks; each worker owns and releases its FASTA.
     std::vector<SkaniSketch> sketches(needed.size());
+    pack->visit_shard_batches(needed, [&](genopack::ArchiveReader::ShardBatch& batch) {
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(dynamic) num_threads(cfg.threads)
+        #pragma omp parallel for schedule(dynamic) num_threads(cfg.threads)
 #endif
-    for (int i = 0; i < (int)needed.size(); ++i) {
-        auto it = fastas.find(needed[i]);
-        if (it == fastas.end()) continue;
-        sketches[i] = build_sketch(needed[i], it->second, cfg.ani_k, cfg.ani_c);
-    }
-    fastas.clear();
+        for (size_t i = 0; i < batch.size(); ++i) {
+            auto& [idx, genome] = batch[i];
+            auto fasta = std::move(genome.fasta);
+            sketches[idx] = build_sketch(needed[idx], fasta, cfg.ani_k, cfg.ani_c);
+        }
+    });
 
     std::unordered_map<std::string, const SkaniSketch*> sketch_idx;
     sketch_idx.reserve(sketches.size());
@@ -90,6 +84,14 @@ int run_ani(const Config& cfg) {
     std::vector<const SkaniSketch*> qsks, rsks;
     for (const auto& a : ql) { auto it = sketch_idx.find(a); if (it != sketch_idx.end()) qsks.push_back(it->second); }
     for (const auto& a : rl) { auto it = sketch_idx.find(a); if (it != sketch_idx.end()) rsks.push_back(it->second); }
+
+    spdlog::info("ani: sketched {}/{} FASTAs", sketch_idx.size(), needed.size());
+    if (self_pairs) {
+        // Main oriented pairs by their address in sketches. Preserve that orientation
+        // (including c_ab/c_ba), but traverse only qi < ri in this order.
+        std::sort(qsks.begin(), qsks.end());
+        rsks = qsks;
+    }
 
     spdlog::info("ani: computing {} × {} pairs …", qsks.size(), rsks.size());
 
@@ -104,26 +106,90 @@ int run_ani(const Config& cfg) {
     struct Row { int qi, ri; double ani, af, c_ab, c_ba; };
     std::vector<Row> rows;
 
-    // Per-thread row storage avoids a shared critical section on every push_back.
+    // A flat inverted index avoids a hash table allocation for every distinct
+    // marker. Sorting (hash, index) also sorts each marker's reference list.
+    struct Marker { uint64_t hash; int ri; };
+    std::vector<Marker> index;
+    std::vector<size_t> nm_ref(nr);
+    if (cfg.ani_screen > 0) {
+        size_t count = 0;
+        for (const auto* sk : rsks)
+            for (auto h : sk->hashes) count += (h % 8 == 0);
+        index.reserve(count);
+        for (int ri = 0; ri < nr; ++ri)
+            for (auto h : rsks[ri]->hashes)
+                if (h % 8 == 0) { index.push_back({h, ri}); ++nm_ref[ri]; }
+        std::sort(index.begin(), index.end(), [](const Marker& a, const Marker& b) {
+            return a.hash < b.hash || (a.hash == b.hash && a.ri < b.ri);
+        });
+        if (cfg.ani_max_marker_df) {
+            size_t dst = 0;
+            for (size_t begin = 0; begin < index.size();) {
+                size_t end = begin + 1;
+                std::unordered_set<const SkaniSketch*> genomes{rsks[index[begin].ri]};
+                while (end < index.size() && index[end].hash == index[begin].hash) {
+                    // Duplicate list entries still represent just one genome.
+                    genomes.insert(rsks[index[end].ri]);
+                    ++end;
+                }
+                if (genomes.size() <= cfg.ani_max_marker_df)
+                    for (size_t i = begin; i < end; ++i) index[dst++] = index[i];
+                begin = end;
+            }
+            index.resize(dst);
+        }
+        spdlog::info("ani: marker screen {}%, {} indexed marker occurrences",
+                     cfg.ani_screen, index.size());
+    }
+    const double threshold = std::pow(cfg.ani_screen / 100.0, cfg.ani_k);
     const int nthreads = cfg.threads;
     std::vector<std::vector<Row>> trows(nthreads);
-    for (auto& v : trows) v.reserve((size_t)nq * nr / nthreads + 64);
-
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(dynamic, 16) num_threads(nthreads)
+    #pragma omp parallel num_threads(nthreads)
 #endif
-    for (int qi = 0; qi < nq; ++qi) {
+    {
 #ifdef _OPENMP
         auto& local = trows[omp_get_thread_num()];
 #else
         auto& local = trows[0];
 #endif
-        for (int ri = 0; ri < nr; ++ri) {
-            if (self_pairs && qsks[qi] == rsks[ri]) continue;
-            if (self_pairs && qsks[qi] > rsks[ri]) continue;
-            auto res = compute_ani(*qsks[qi], *rsks[ri], cfg.ani_k);
-            if (res.af < cfg.ani_min_af) continue;
-            local.push_back({qi, ri, res.ani, res.af, res.c_ab, res.c_ba});
+        std::vector<uint32_t> counts(cfg.ani_screen > 0 ? nr : 0);
+        std::vector<int> touched;
+#ifdef _OPENMP
+        #pragma omp for schedule(dynamic, 16)
+#endif
+        for (int qi = 0; qi < nq; ++qi) {
+            auto emit = [&](int ri) {
+                if (self_pairs && qsks[qi] == rsks[ri]) return;
+                auto res = compute_ani(*qsks[qi], *rsks[ri], cfg.ani_k);
+                if (res.af >= cfg.ani_min_af)
+                    local.push_back({qi, ri, res.ani, res.af, res.c_ab, res.c_ba});
+            };
+            if (cfg.ani_screen == 0) {
+                for (int ri = self_pairs ? qi + 1 : 0; ri < nr; ++ri) emit(ri);
+                continue;
+            }
+            size_t nm_q = 0;
+            for (auto h : qsks[qi]->hashes) {
+                if (h % 8 != 0) continue;
+                ++nm_q;
+                auto begin = std::lower_bound(index.begin(), index.end(), h,
+                    [](const Marker& m, uint64_t hash) { return m.hash < hash; });
+                auto end = std::upper_bound(begin, index.end(), h,
+                    [](uint64_t hash, const Marker& m) { return hash < m.hash; });
+                if (self_pairs)
+                    begin = std::upper_bound(begin, end, qi,
+                        [](int q, const Marker& m) { return q < m.ri; });
+                for (auto it = begin; it != end; ++it) {
+                    if (counts[it->ri]++ == 0) touched.push_back(it->ri);
+                }
+            }
+            for (int ri : touched) {
+                const size_t denom = std::min(nm_q, nm_ref[ri]);
+                if (denom && double(counts[ri]) / double(denom) >= threshold) emit(ri);
+                counts[ri] = 0;
+            }
+            touched.clear();
         }
     }
 

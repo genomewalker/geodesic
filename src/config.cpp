@@ -258,6 +258,10 @@ Config parse_args(int argc, char** argv) {
         "Threads for parallel sketch building")->default_val(4);
     ani_cmd->add_option("--min-af", cfg.ani_min_af,
         "Minimum alignment fraction to report a pair")->default_val(0.0);
+    ani_cmd->add_option("--screen", cfg.ani_screen,
+        "Marker screen ANI percent (0 = exhaustive)")->default_val(80.0)->check(CLI::Range(0.0, 100.0));
+    ani_cmd->add_option("--max-marker-df", cfg.ani_max_marker_df,
+        "Skip markers present in more than this many reference genomes (0 = no cap)")->default_val(0);
     ani_cmd->add_option("--ani-k", cfg.ani_k,
         "k-mer size")->default_val(21);
     ani_cmd->add_option("-c,--compression", cfg.ani_c,

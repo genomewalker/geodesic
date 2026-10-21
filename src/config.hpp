@@ -106,6 +106,8 @@ struct Config {
     int    ani_k   = 21;
     int    ani_c   = 125;   // compression factor: keep k-mer if hash % c == 0
     double ani_min_af = 0.0;
+    double ani_screen = 80.0;
+    uint32_t ani_max_marker_df = 0;
 };
 
 Config parse_args(int argc, char** argv);
