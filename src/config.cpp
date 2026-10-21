@@ -25,6 +25,10 @@ Config parse_args(int argc, char** argv) {
     derep->add_option("--skani-bin", cfg.skani_bin, "skani executable for unnamed species clustering");
     derep->add_option("--species-radii", cfg.species_radii, "GTDB species radii TSV")->check(CLI::ExistingFile);
 
+    derep->add_option("--ordering-tsv", cfg.ordering_tsv, "S2 representative ordering metadata TSV")->check(CLI::ExistingFile);
+    derep->add_option("--anchor-skani-db", cfg.anchor_skani_db, "GTDB skani sketch database for unnamed species anchors")->check(CLI::ExistingDirectory)->needs("--species-radii");
+    derep->add_option("--anchor-skani-bin", cfg.anchor_skani_bin, "skani executable for database anchor search");
+
     derep->add_option("--references", cfg.references_file,
         "Accessions to pin as representatives (one per line)")
         ->check(CLI::ExistingFile);

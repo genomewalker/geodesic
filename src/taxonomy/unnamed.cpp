@@ -14,8 +14,42 @@
 #include <set>
 #include <sstream>
 #include <unistd.h>
+#include <chrono>
+#include <cmath>
 
 namespace derep::unnamed {
+std::map<std::string,Ordering> read_ordering(std::istream& in) {
+    auto split=[](const std::string& line) {
+        std::vector<std::string> cells; std::istringstream row(line); std::string cell;
+        while(std::getline(row,cell,'\t')) cells.push_back(cell);
+        if(!cells.empty() && !cells.back().empty() && cells.back().back()=='\r') cells.back().pop_back();
+        return cells;
+    };
+    std::string line; if(!std::getline(in,line)) throw std::runtime_error("Empty ordering TSV");
+    auto header=split(line); std::map<std::string,size_t> col;
+    for(size_t i=0;i<header.size();++i) col[header[i]]=i;
+    for(auto name:{"accession","quality_tier","completeness_effective","n_contigs","ncbi"})
+        if(!col.contains(name)) throw std::runtime_error("Missing ordering TSV column: "+std::string(name));
+    std::map<std::string,Ordering> result;
+    while(std::getline(in,line)) {
+        if(line.empty()) continue;
+        auto cells=split(line);
+        auto value=[&](const char* name)->const std::string& {return cells.at(col.at(name));};
+        auto tier=value("quality_tier");
+        if(tier!="HQ" && tier!="MQ" && tier!="LQ") throw std::runtime_error("Invalid ordering quality tier: "+tier);
+        auto number=[&](const char* name) {size_t end; auto v=std::stod(value(name),&end); if(end!=value(name).size() || !std::isfinite(v)) throw std::runtime_error("Invalid ordering number"); return v;};
+        auto contigs=number("n_contigs"), ncbi=number("ncbi");
+        if(contigs<0 || contigs>UINT32_MAX || std::floor(contigs)!=contigs || (ncbi!=0 && ncbi!=1)) throw std::runtime_error("Invalid ordering contigs/ncbi");
+        Ordering o{tier=="HQ"?0:tier=="MQ"?1:2,number("completeness_effective"),static_cast<uint32_t>(contigs),static_cast<int>(ncbi)};
+        if(value("accession").empty() || !result.emplace(value("accession"),o).second) throw std::runtime_error("Empty or duplicate ordering accession");
+    }
+    return result;
+}
+OrderKey order_key(const std::string& a,bool prior,const Ordering& o) {return {!prior,o.tier,-o.completeness,o.contigs,-o.ncbi,a};}
+bool replace_prior(const Ordering& b,const Ordering& c) {return b.tier<c.tier || (b.tier==c.tier && b.completeness-c.completeness>=0.05);}
+void consider_anchor(std::optional<AnchorHit>& best,const AnchorHit& h) {
+    if(h.af()>=50 && (!best || std::pair{h.ani,h.af()}>std::pair{best->ani,best->af()})) best=h;
+}
 std::string rank(const std::string& tax, char r) {
     std::istringstream in(tax); std::string part;
     while (std::getline(in, part, ';')) {
@@ -197,18 +231,21 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
         Genome g;g.accession=a;g.taxonomy=t;
         if(!unresolved(g)) {
             used_names.insert(rank(g.taxonomy,'s'));
-            if(needed_families.contains(block_key(g,'f')) && seen.insert(g.accession).second) genomes.push_back(std::move(g));
+            if(!cfg.anchor_skani_db && needed_families.contains(block_key(g,'f')) && seen.insert(g.accession).second) genomes.push_back(std::move(g));
         }
     });
     std::sort(genomes.begin(),genomes.end(),[](auto& a,auto& b){return a.accession<b.accession;});
     std::map<std::string,double> radii;
+    std::map<std::string,std::string> ref_species;
     if(cfg.species_radii) {
         std::ifstream in(*cfg.species_radii); std::string line;
         if(!in) throw std::runtime_error("Cannot read species radii");
         while(std::getline(in,line)) {
             auto last=line.rfind('\t'), first=line.find('\t');
             if(first==std::string::npos || first==last) throw std::runtime_error("Invalid species radii row");
-            radii[canonical(line.substr(first+1,last-first-1))]=std::stod(line.substr(last+1));
+            auto ref=canonical(line.substr(first+1,last-first-1));
+            radii[ref]=std::stod(line.substr(last+1));
+            ref_species[ref]=line.substr(0,first);
         }
     }
     auto radius=[&](size_t r){auto it=radii.find(canonical(genomes[r].accession));return it==radii.end()?95.:it->second;};
@@ -226,14 +263,17 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
     std::set<std::string> prior;
     if(cfg.references_file) {std::ifstream in(*cfg.references_file);std::string s;while(std::getline(in,s)) prior.insert(s);}
     for(auto& [t,a]:fixed) prior.insert(a);
-    using Key=std::tuple<bool,int,double,uint32_t,bool,std::string>;
-    std::map<size_t,Key> keys;
+    std::map<std::string,Ordering> overrides;
+    if(cfg.ordering_tsv) {std::ifstream in(*cfg.ordering_tsv); if(!in) throw std::runtime_error("Cannot read ordering TSV"); overrides=read_ordering(in);}
+    std::map<size_t,OrderKey> keys;
+    std::map<size_t,Ordering> ordering;
     for(auto& [f,ids]:families) for(auto i:ids) {
         auto& g=genomes[i]; auto meta=pack.genome_meta_by_accession(g.accession);
         auto tier=pack.quality_tier_for_accession(g.accession).value_or(1);
         double completeness=pack.completeness_effective_for_accession(g.accession).value_or(g.completeness.value_or(meta ? meta->completeness_x10/10. : 0)/100.);
-        keys[i]={!prior.contains(g.accession),3-std::clamp(int(tier),1,3),-completeness,
-            meta?meta->n_contigs:UINT32_MAX, !ncbi_accession(g.accession),g.accession};
+        Ordering o{3-std::clamp(int(tier),1,3),completeness,meta?meta->n_contigs:UINT32_MAX,int(ncbi_accession(g.accession))};
+        if(overrides.contains(g.accession)) o=overrides.at(g.accession);
+        ordering[i]=o; keys[i]=order_key(g.accession,prior.contains(g.accession),o);
     }
     auto ordered=[&](std::vector<size_t> ids){std::sort(ids.begin(),ids.end(),[&](auto a,auto b){return keys.at(a)<keys.at(b);});return ids;};
     Skani skani(pack,cfg,genomes);
@@ -241,9 +281,54 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
     std::map<size_t,Hit> evidence;
     std::map<size_t,double> nearest,cluster_radius;
     Block centroids;
+    std::map<size_t,AnchorHit> database_anchors;
+    if(cfg.anchor_skani_db) {
+        if(!cfg.species_radii) throw std::runtime_error("--anchor-skani-db requires --species-radii");
+        Scratch tmp(cfg.temp_dir);
+        std::unordered_map<std::string,size_t> index;
+        std::vector<std::string> accessions;
+        for(auto& [f,ids]:families) for(auto x:ids) {index[genomes[x].accession]=x;accessions.push_back(genomes[x].accession);}
+        std::mutex mutex; std::set<size_t> written;
+        pack.visit_shard_batches(accessions,[&](genopack::ArchiveReader::ShardBatch& batch) {
+            for(auto& [bi,g]:batch) {auto it=index.find(g.accession);if(it==index.end()) continue;
+                std::ofstream out(tmp.path/(std::to_string(it->second)+".fna"));out<<g.fasta;
+                if(!out) throw std::runtime_error("Cannot write anchor FASTA");
+                std::lock_guard<std::mutex> lock(mutex);written.insert(it->second);
+            }
+        });
+        if(written.size()!=index.size()) throw std::runtime_error("Missing anchor FASTA");
+        auto list=tmp.path/"query.list";
+        {std::ofstream out(list);for(auto x:written) out<<(tmp.path/(std::to_string(x)+".fna")).string()<<'\n';if(!out) throw std::runtime_error("Cannot write anchor list");}
+        SubprocessOptions opts;opts.stdout_file=tmp.path/"hits.tsv";
+        auto start=std::chrono::steady_clock::now();
+        if(!written.empty()) {
+            auto result=run_subprocess({cfg.anchor_skani_bin,"search","-d",cfg.anchor_skani_db->string(),"--ql",list.string(),"-t",std::to_string(cfg.threads),"--min-af","0"},opts);
+            if(!result.ok()) throw std::runtime_error("Anchor skani search failed: "+result.stderr_output);
+        }
+        double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+        spdlog::info("Anchor skani search wall: {} seconds",seconds);
+        {std::ofstream out(cfg.results_dir/"anchor_search_seconds.txt");out<<std::setprecision(12)<<seconds<<'\n';}
+        std::map<size_t,std::optional<AnchorHit>> top;
+        std::ifstream in(*opts.stdout_file);std::string line;std::getline(in,line);
+        std::regex accession("GC[AF]_[0-9]+\\.[0-9]+");
+        while(std::getline(in,line)) {
+            std::istringstream row(line);std::string ref,q;AnchorHit h;
+            if(!(row>>ref>>q>>h.ani>>h.af_ref>>h.af_query)) throw std::runtime_error("Malformed anchor skani row");
+            std::smatch match;auto basename=fs::path(ref).filename().string();
+            if(!std::regex_search(basename,match,accession) || !radii.contains(match.str())) continue;
+            h.ref=match.str();h.species=ref_species.at(h.ref);h.radius=radii.at(h.ref);
+            auto x=std::stoull(fs::path(q).stem().string());if(!written.contains(x)) throw std::runtime_error("Unexpected anchor query");
+            consider_anchor(top[x],h);
+        }
+        std::ofstream out(cfg.results_dir/"anchor_hits.tsv");out<<"accession\tref\tspecies\tani\taf_ref\taf_query\tradius\tanchored\n";
+        for(auto& [x,h]:top) if(h) {
+            nearest[x]=h->ani;if(h->anchored()) database_anchors[x]=*h;
+            out<<genomes[x].accession<<'\t'<<h->ref<<'\t'<<h->species<<'\t'<<h->ani<<'\t'<<h->af_ref<<'\t'<<h->af_query<<'\t'<<h->radius<<'\t'<<h->anchored()<<'\n';
+        }
+    }
     for(auto& [family,ids]:families) {
         spdlog::info("Unnamed species family: {} genomes, {} named references",ids.size(),named[family].size());
-        auto hits=skani.compare(ids,named[family],false);
+        auto hits=cfg.anchor_skani_db ? Edges{} : skani.compare(ids,named[family],false);
         std::map<size_t,std::pair<Hit,size_t>> top;
         for(auto& [pair,h]:hits) {
             auto [a,b]=pair; if(!keys.contains(a)) std::swap(a,b);
@@ -252,6 +337,7 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
         }
         std::vector<size_t> remaining;
         for(auto x:ids) {
+            if(database_anchors.contains(x)) continue;
             auto it=top.find(x);
             if(it!=top.end() && it->second.first.ani>=radius(it->second.second)) {
                 anchors[x]=it->second.second; evidence[x]=it->second.first;
@@ -272,6 +358,15 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
         }
         for(auto r:reps) cluster_radius[r]=std::clamp(nearest[r],95.,97.);
         for(auto [x,c]:family_assignment) if(ga.contains(c)) assigned[x]=ga.at(c);
+        for(auto r:reps) if(cfg.ordering_tsv && prior.contains(genomes[r].accession)) {
+            std::vector<size_t> members;for(auto [x,c]:assigned) if(c==r) members.push_back(x);
+            auto best=*std::min_element(members.begin(),members.end(),[&](auto a,auto b){return order_key(genomes[a].accession,false,ordering.at(a))<order_key(genomes[b].accession,false,ordering.at(b));});
+            if(best!=r && replace_prior(ordering.at(best),ordering.at(r))) {
+                cluster_radius[best]=std::clamp(std::max(nearest[r],nearest[best]),95.,97.);
+                for(auto x:members) assigned[x]=best;
+                cluster_radius.erase(r);
+            }
+        }
     }
     // S2 re-check batches: members grouped by the family of their assigned rep.
     Block queries,refs;
@@ -329,7 +424,13 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
     std::map<std::string,Taxon> groups;
     for(size_t x=0;x<genomes.size();++x) if(selected.contains(genomes[x].accession)) {
         auto g=genomes[x]; std::string key=g.taxonomy;
-        if(anchors.contains(x)) {
+        if(database_anchors.contains(x)) {
+            const auto& h=database_anchors.at(x);
+            auto sp=h.species.starts_with("s__")?h.species.substr(3):h.species;
+            auto genus=sp.substr(0,sp.find(' '));
+            g.taxonomy=replace_rank(replace_rank(replace_rank(g.taxonomy,'s',sp),'g',genus),'S',"");key=g.taxonomy;
+            out<<g.accession<<"\ts__"<<sp<<'\t'<<g.taxonomy<<"\tanchor_"<<h.ref<<'\t'<<h.ref<<"\tg__"<<genus<<'\t'<<h.radius<<'\t'<<h.ani<<'\t'<<h.af()<<"\tanchor\n";
+        } else if(anchors.contains(x)) {
             auto r=anchors.at(x);g.taxonomy=genomes[r].taxonomy;key=g.taxonomy;
             out<<g.accession<<"\ts__"<<rank(g.taxonomy,'s')<<'\t'<<g.taxonomy<<"\tanchor_"<<genomes[r].accession<<'\t'<<genomes[r].accession<<"\tg__"<<rank(g.taxonomy,'g')<<'\t'<<radius(r)<<'\t'<<evidence[x].ani<<'\t'<<evidence[x].af<<"\tanchor\n";
         } else if(assigned.contains(x)) {
@@ -344,7 +445,7 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
     std::vector<Taxon> taxa;
     for(auto& [key,t]:groups) {if(auto it=fixed.find(t.taxonomy);it!=fixed.end()) t.forced_representative=it->second;taxa.push_back(std::move(t));}
     std::sort(taxa.begin(),taxa.end(),[](auto& a,auto& b){return a.size()>b.size();});
-    spdlog::info("Unnamed species: {} anchors, {} clusters, {} genus-unresolved clusters held out of naming",anchors.size(),members.size(),unresolved_clusters);
+    spdlog::info("Unnamed species: {} anchors, {} clusters, {} genus-unresolved clusters held out of naming",anchors.size()+database_anchors.size(),members.size(),unresolved_clusters);
     return taxa;
 }
 } // namespace derep
