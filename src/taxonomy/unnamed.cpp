@@ -373,6 +373,7 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
     for(auto [x,r]:assigned) {auto f=block_key(genomes[r],'f');queries[f].push_back(x);if(x==r) refs[f].push_back(r);}
     auto initial=assigned;
     const auto initial_radii=cluster_radius;
+    std::map<size_t,size_t> split_from;
     for(auto& [family,ids]:queries) {
         auto hits=skani.compare(ids,refs[family],false);
         std::map<size_t,std::vector<std::pair<size_t,Hit>>> nb;
@@ -386,18 +387,23 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
                 if(v.ani>=initial_radii.at(other)&&v.af>=50) best=std::max(best,std::pair{v,other});
             }
             if(best.first.ani) {assigned[x]=best.second;evidence[x]=best.first;}
-            else {assigned[x]=x;cluster_radius[x]=std::clamp(nr,95.,97.);evidence[x]={100,100};}
+            else {assigned[x]=x;split_from[x]=r;cluster_radius[x]=std::clamp(nr,95.,97.);evidence[x]={100,100};}
         }
     }
     Block final_reps;
     for(auto [x,r]:assigned) if(x==r) final_reps[block_key(genomes[r],'p')].push_back(r);
     size_t conflicts=0;
     std::ofstream conflict_out(cfg.results_dir/"final_rep_conflicts.tsv");
-    conflict_out<<"rep_a\trep_b\tani\tmax_af\tradius_a\tradius_b\n";
+    conflict_out<<"rep_a\trep_b\tani\tmax_af\tradius_a\tradius_b\tstatus\n";
+    // A re-check singleton below its former rep's radius keeps its edge to that rep (S2 reval_fail): logged, not a conflict.
+    size_t split_off=0;
     for(auto& [p,ids]:final_reps) for(auto [pair,h]:skani.compare(ids,ids,true)) if(h.ani>=95&&h.af>=50) {
-        ++conflicts;
-        conflict_out<<genomes[pair.first].accession<<'\t'<<genomes[pair.second].accession<<'\t'<<h.ani<<'\t'<<h.af<<'\t'<<cluster_radius.at(pair.first)<<'\t'<<cluster_radius.at(pair.second)<<'\n';
+        auto [a,b]=pair;
+        bool split=(split_from.contains(a)&&split_from.at(a)==b)||(split_from.contains(b)&&split_from.at(b)==a);
+        split?++split_off:++conflicts;
+        conflict_out<<genomes[a].accession<<'\t'<<genomes[b].accession<<'\t'<<h.ani<<'\t'<<h.af<<'\t'<<cluster_radius.at(a)<<'\t'<<cluster_radius.at(b)<<'\t'<<(split?"split_off":"conflict")<<'\n';
     }
+    spdlog::info("Unnamed species final check: {} split-off singleton edges to their former rep logged",split_off);
     if(conflicts) {
         std::ofstream diagnostic(cfg.results_dir/"failed_assignments.tsv");
         diagnostic<<"accession\trep\tradius\tani_to_rep\taf_to_rep\tsource\n";
