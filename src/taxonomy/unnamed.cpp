@@ -279,7 +279,7 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
     Skani skani(pack,cfg,genomes);
     std::map<size_t,size_t> assigned,anchors,family_assignment;
     std::map<size_t,Hit> evidence;
-    std::map<size_t,double> nearest,cluster_radius;
+    std::map<size_t,double> nearest,residual_nearest,cluster_radius;
     Block centroids;
     std::map<size_t,AnchorHit> database_anchors;
     if(cfg.anchor_skani_db) {
@@ -353,16 +353,16 @@ std::vector<Taxon> cluster_unnamed_species(std::vector<Genome>& input,
         auto ga=greedy(ordered(ids),edges);
         std::set<size_t> reps; for(auto [x,r]:ga) reps.insert(r);
         for(auto [pair,h]:edges) if(reps.contains(pair.first)&&reps.contains(pair.second)) {
-            nearest[pair.first]=std::max(nearest[pair.first],h.ani);
-            nearest[pair.second]=std::max(nearest[pair.second],h.ani);
+            residual_nearest[pair.first]=std::max(residual_nearest[pair.first],h.ani);
+            residual_nearest[pair.second]=std::max(residual_nearest[pair.second],h.ani);
         }
-        for(auto r:reps) cluster_radius[r]=std::clamp(nearest[r],95.,97.);
+        for(auto r:reps) cluster_radius[r]=std::clamp(std::max(residual_nearest[r],nearest[r]),95.,97.);
         for(auto [x,c]:family_assignment) if(ga.contains(c)) assigned[x]=ga.at(c);
         for(auto r:reps) if(cfg.ordering_tsv && prior.contains(genomes[r].accession)) {
             std::vector<size_t> members;for(auto [x,c]:assigned) if(c==r) members.push_back(x);
             auto best=*std::min_element(members.begin(),members.end(),[&](auto a,auto b){return order_key(genomes[a].accession,false,ordering.at(a))<order_key(genomes[b].accession,false,ordering.at(b));});
             if(best!=r && replace_prior(ordering.at(best),ordering.at(r))) {
-                cluster_radius[best]=std::clamp(std::max(nearest[r],nearest[best]),95.,97.);
+                cluster_radius[best]=std::clamp(std::max(residual_nearest[r],nearest[best]),95.,97.);
                 for(auto x:members) assigned[x]=best;
                 cluster_radius.erase(r);
             }
