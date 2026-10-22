@@ -1,5 +1,7 @@
 add_executable(tests
     test_main.cpp
+    parallel_shard_visit_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/multi_pack_reader.cpp
     unnamed_species_test.cpp
     ${CMAKE_SOURCE_DIR}/src/taxonomy/unnamed.cpp
     ${CMAKE_SOURCE_DIR}/src/taxonomy/species.cpp

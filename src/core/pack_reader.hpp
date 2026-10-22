@@ -46,6 +46,20 @@ struct IPackReader {
         const std::vector<std::string>& accessions,
         const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const = 0;
 
+    // Callbacks may run concurrently. Batch indices refer to the caller's list;
+    // the batch and its genomes remain valid only until the callback returns.
+    virtual void visit_shard_batches_parallel(
+        const std::vector<std::string>& accessions, int n_readers,
+        const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const = 0;
+
+    struct ShardLocation {
+        uint16_t archive;
+        uint32_t shard;
+        int fd; // borrowed; the pack outlives the visit
+        uint64_t offset, size;
+    };
+    virtual std::vector<ShardLocation> shard_locations() const = 0;
+
     // Sketch batch visitor: groups accessions by archive, decompresses each SKCH
     // section once, delivers all sketches from it, then releases. Eliminates thrashing
     // when accessions interleave across multiple archive parts.
@@ -312,6 +326,20 @@ public:
         const std::vector<std::string>& accessions,
         const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const override {
         reader_->visit_shard_batches(accessions, cb);
+    }
+
+    void visit_shard_batches_parallel(
+        const std::vector<std::string>& accessions, int n_readers,
+        const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const override {
+        reader_->visit_shard_batches_parallel(accessions, n_readers, cb);
+    }
+
+    std::vector<ShardLocation> shard_locations() const override {
+        std::vector<ShardLocation> locations;
+        reader_->scan_shards([&](const uint8_t*, uint64_t offset, uint64_t size, uint32_t shard) {
+            locations.push_back({0, shard, reader_->fd(), offset, size});
+        });
+        return locations;
     }
 
     void visit_sketch_batches(

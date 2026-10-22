@@ -63,10 +63,20 @@ public:
     std::vector<uint32_t> available_kmer_sizes() const override {
         return inner_->available_kmer_sizes();
     }
+    std::vector<ShardLocation> shard_locations() const override {
+        return inner_->shard_locations();
+    }
+
     void visit_shard_batches(
         const std::vector<std::string>& accessions,
         const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const override {
         inner_->visit_shard_batches(accessions, cb);
+    }
+
+    void visit_shard_batches_parallel(
+        const std::vector<std::string>& accessions, int n_readers,
+        const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const override {
+        inner_->visit_shard_batches_parallel(accessions, n_readers, cb);
     }
 
     // Hot path: serves preloaded hits from RAM, delegates misses.

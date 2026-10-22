@@ -264,7 +264,10 @@ Config parse_args(int argc, char** argv) {
     ani_cmd->add_option("-o,--output", cfg.ani_output,
         "Output TSV path")->default_val("ani_results.tsv");
     ani_cmd->add_option("-t,--threads", cfg.threads,
-        "Threads for parallel sketch building")->default_val(4);
+        "Total CPU threads for reading, sketching and pairs")->default_val(4)->check(CLI::PositiveNumber);
+    ani_cmd->add_option("--io-threads", cfg.io_threads,
+        "Concurrent I/O readers, independent of CPU threads (0=auto: max(1,min(8,threads/4)); max 64)")
+        ->default_val(0)->check(CLI::NonNegativeNumber);
     ani_cmd->add_option("--min-af", cfg.ani_min_af,
         "Minimum alignment fraction to report a pair")->default_val(0.0);
     ani_cmd->add_option("--screen", cfg.ani_screen,

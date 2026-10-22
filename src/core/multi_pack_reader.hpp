@@ -70,6 +70,21 @@ public:
         const std::vector<std::string>& accessions,
         const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const override;
 
+    void visit_shard_batches_parallel(
+        const std::vector<std::string>& accessions, int n_readers,
+        const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const override;
+
+    std::vector<ShardLocation> shard_locations() const override {
+        std::vector<ShardLocation> locations;
+        for (size_t i = 0; i < archives_.size(); ++i) {
+            const auto& reader = archives_[i].reader;
+            reader->scan_shards([&](const uint8_t*, uint64_t offset, uint64_t size, uint32_t shard) {
+                locations.push_back({static_cast<uint16_t>(i), shard, reader->fd(), offset, size});
+            });
+        }
+        return locations;
+    }
+
     // Sketch batch visitor: groups accessions by archive, decompresses each archive's
     // SKCH section exactly once, delivers all sketches from it, then releases.
     // Eliminates SKCH thrashing when n_archives > max_hot_archives_.
