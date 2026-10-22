@@ -5,88 +5,123 @@
 #include <cstdlib>
 #include <fstream>
 #include <atomic>
+#include <cstdio>
+#include <set>
 #include <stdexcept>
 
 namespace {
 class FakePack : public derep::SinglePackReader {
 public:
-    FakePack() : SinglePackReader(nullptr) {}
+    FakePack() : SinglePackReader(nullptr), file(std::tmpfile()) {
+        if (!file) throw std::runtime_error("tmpfile failed");
+        for (uint32_t shard = 0; shard < 4; ++shard) {
+            genopack::ShardWriterConfig cfg;
+            cfg.train_dict = false;
+            cfg.compress_threads = 1;
+            genopack::ShardWriter writer(shard, 0, cfg);
+            for (int id = shard * 2; id < int(shard * 2 + 2); ++id) {
+                auto fasta = std::to_string(id);
+                writer.add_genome(id, 0, fasta.data(), fasta.size());
+            }
+            // Tiny fixtures should not depend on an external spill directory.
+            struct InMemory {
+                std::string previous;
+                bool had_value;
+                InMemory() : had_value(std::getenv("GENOPACK_SPILL_DIR") != nullptr) {
+                    if (had_value) previous = std::getenv("GENOPACK_SPILL_DIR");
+                    ::unsetenv("GENOPACK_SPILL_DIR");
+                }
+                ~InMemory() {
+                    if (had_value) ::setenv("GENOPACK_SPILL_DIR", previous.c_str(), 1);
+                }
+            } in_memory;
+            auto frozen = writer.freeze();
+            if (frozen.bytes.empty() && !frozen.tmp_path.empty()) {
+                std::ifstream in(frozen.tmp_path, std::ios::binary);
+                frozen.bytes.assign(std::istreambuf_iterator<char>(in), {});
+                ::unlink(frozen.tmp_path.c_str()); // exact file created by this fixture
+            }
+            auto offset = std::ftell(file);
+            if (std::fwrite(frozen.bytes.data(), 1, frozen.bytes.size(), file) != frozen.bytes.size())
+                throw std::runtime_error("fixture write failed");
+            for (uint16_t archive : {0, 1})
+                locations.push_back({archive, shard, fileno(file), uint64_t(offset), frozen.bytes.size()});
+        }
+        std::fflush(file);
+    }
+    ~FakePack() { std::fclose(file); }
     bool fail_reader = false;
-    int decode_budget = 8;
-    mutable std::atomic<int> live{0}, peak{0};
+    std::FILE* file;
+    std::vector<ShardLocation> locations;
     std::optional<genopack::GenomeMeta> genome_meta_by_accession(std::string_view a) const override {
         if (a == "missing") return std::nullopt;
         genopack::GenomeMeta m;
         m.shard_id = std::stoi(std::string(a)) / 2;
+        m.genome_id = (uint64_t(archive_idx_for_accession(a)) << 48) | std::stoi(std::string(a));
         return m;
     }
     uint16_t archive_idx_for_accession(std::string_view a) const override {
         return std::stoi(std::string(a)) % 2;
     }
-    void visit_shard_batches_parallel(const std::vector<std::string>& accs, int readers,
-        const std::function<void(genopack::ArchiveReader::ShardBatch&)>& cb) const override {
-        if (readers != 1) throw std::runtime_error("unbudgeted genopack readers");
-        if (fail_reader) throw std::runtime_error("reader error");
-        for (size_t i = 0; i < accs.size(); ++i) {
-            // Reproduce genopack's explicit decode team.
-            int decode_team = 1;
-#ifdef _OPENMP
-            #pragma omp parallel num_threads(8)
-            #pragma omp single
-            decode_team = omp_get_num_threads();
-#endif
-            if (decode_team > decode_budget) throw std::runtime_error("decode oversubscribed");
-            genopack::ArchiveReader::ShardBatch batch(1);
-            batch[0].first = i;
-            batch[0].second.accession = accs[i];
-            batch[0].second.fasta = accs[i];
-            int current = ++live;
-            int old = peak.load();
-            while (old < current && !peak.compare_exchange_weak(old, current)) {}
-            cb(batch);
-            --live;
-        }
+    std::vector<ShardLocation> shard_locations() const override {
+        auto result = locations;
+        if (fail_reader) for (auto& loc : result) loc.fd = -1;
+        return result;
     }
 };
 }
-TEST_CASE("ANI reader budgets cover explicit genopack decode teams", "[parallel-pack]") {
-    REQUIRE(derep::ani_reader_count(32, 0) == 4);
-    REQUIRE(derep::ani_reader_count(8, 0) == 1);
+TEST_CASE("ANI I/O concurrency is independent of the compute budget", "[parallel-pack]") {
+    REQUIRE(derep::ani_reader_count(32, 0) == 8);
+    REQUIRE(derep::ani_reader_count(8, 0) == 2);
     REQUIRE(derep::ani_reader_count(1, 0) == 1);
-    REQUIRE(derep::ani_reader_count(2, 99) == 1);
-    REQUIRE(derep::ani_reader_count(8, 99) == 1);
-    REQUIRE(derep::ani_reader_count(32, 99) == 4);
-    REQUIRE(derep::ani_reader_count(16, 2) == 2);
+    REQUIRE(derep::ani_reader_count(2, 16) == 16);
+    REQUIRE(derep::ani_reader_count(8, 2) == 2);
+    REQUIRE(derep::ani_reader_count(32, 16) == 16);
+    REQUIRE(derep::ani_reader_count(32, 99) == 64);
 }
-TEST_CASE("Shard readers preserve caller indices and bound decoding", "[parallel-pack]") {
-    for (int threads : {1, 2, 8, 16, 32}) {
-        FakePack pack;
-        pack.decode_budget = threads < 8 ? 1 : 8;
+TEST_CASE("Shard readers preserve caller indices and bound compute", "[parallel-pack]") {
+    FakePack pack;
+    for (int threads : {1, 2, 8, 16, 32}) for (int readers : {1, 2, 16}) {
         std::vector<std::string> accs{"7", "0", "missing", "2", "7", "1", "6", "3", "4", "5"};
         std::vector<std::string> results(accs.size());
-        derep::visit_shard_genomes(pack, accs, threads, 2,
+        std::atomic<int> live{0}, peak{0};
+        std::mutex ids_mutex;
+        std::set<std::thread::id> ids;
+        derep::visit_shard_genomes(pack, accs, threads, readers,
             [&](size_t i, genopack::ExtractedGenome& g) {
+                int current = ++live;
+                int old = peak.load();
+                while (old < current && !peak.compare_exchange_weak(old, current)) {}
+                {
+                    std::lock_guard lock(ids_mutex);
+                    ids.insert(std::this_thread::get_id());
+                }
 #ifdef _OPENMP
-                if (omp_get_num_threads() > threads / derep::ani_reader_count(threads, 2))
-                    throw std::runtime_error("sketch oversubscribed");
+                int team = 0;
+                #pragma omp parallel num_threads(8)
+                #pragma omp single
+                team = omp_get_num_threads();
+                if (team != 1) throw std::runtime_error("nested compute team");
 #endif
                 results[i] = g.fasta;
+                --live;
             });
         for (size_t i = 0; i < accs.size(); ++i)
-            REQUIRE(results[i] == (accs[i] == "missing" ? "" : accs[i]));
-        REQUIRE(pack.live == 0);
-        REQUIRE(pack.peak <= derep::ani_reader_count(threads, 2));
+            // ShardReader::fetch_genome returns FASTA; the fixture stores header-less "<id>".
+            REQUIRE(results[i] == (accs[i] == "missing" ? "" : ">\n" + accs[i] + "\n"));
+        REQUIRE(live == 0);
+        REQUIRE(peak <= threads);
+        REQUIRE(ids.size() <= size_t(threads));
     }
 }
 TEST_CASE("Shard task errors reach the caller after all tasks finish", "[parallel-pack]") {
     FakePack pack;
-    std::vector<std::string> accs{"0", "1", "2", "3"};
-    REQUIRE_THROWS_WITH(derep::visit_shard_genomes(pack, accs, 8, 2,
+    std::vector<std::string> accs{"0", "1", "2", "3", "4", "5", "6", "7"};
+    REQUIRE_THROWS_WITH(derep::visit_shard_genomes(pack, accs, 2, 1,
         [](size_t, genopack::ExtractedGenome&) { throw std::runtime_error("sketch error"); }), "sketch error");
-    REQUIRE(pack.live == 0);
     pack.fail_reader = true;
-    REQUIRE_THROWS_WITH(derep::visit_shard_genomes(pack, accs, 8, 2,
-        [](size_t, genopack::ExtractedGenome&) {}), "reader error");
+    REQUIRE_THROWS_WITH(derep::visit_shard_genomes(pack, accs, 2, 16,
+        [](size_t, genopack::ExtractedGenome&) {}), "ANI shard pread failed or unexpected EOF");
 }
 
 TEST_CASE("Parallel multi-pack batches match serial caller indices", "[parallel-pack][integration]") {
@@ -114,6 +149,12 @@ TEST_CASE("Parallel multi-pack batches match serial caller indices", "[parallel-
     pack->visit_shard_batches(accs, [&](auto& batch) {
         for (auto& [i, genome] : batch) expected.at(i) = genome.fasta;
     });
+    for (int readers : {1, 2, 16}) {
+        std::vector<std::string> actual(accs.size());
+        derep::visit_shard_genomes(*pack, accs, 8, readers,
+            [&](size_t i, genopack::ExtractedGenome& genome) { actual.at(i) = genome.fasta; });
+        REQUIRE(actual == expected);
+    }
     for (int readers : {1, 2, 8}) {
         std::vector<std::string> actual(accs.size());
         pack->visit_shard_batches_parallel(accs, readers, [&](auto& batch) {

@@ -1,25 +1,31 @@
-# ANI reader threads
+# ANI shard I/O and CPU threads
 
-`geodesic ani --io-threads R` controls concurrent shard readers within the total
-CPU budget `-t`. Zero (the default) selects `max(1, min(4, t/8))`; explicit values
-are capped at `max(1, t/8)`. At eight CPUs or fewer, one reader uses the full
-budget for sketching, with no CPUs reserved for waiting readers.
+Status as of 2026-10-22: readers only `pread`; decoding and sketching run on the `-t` pool. On 815 Bacteroidaceae genomes (`-t 32`, default 8 readers) the pack ANI took 22.3 s warm vs 46.8 s for skani on sketches, and 75.7 s cold vs 83.3 s for skani cold (dandycomp02fl, fincore < 1 GB cached), with output identical to main.
 
-Readers traverse contiguous bands of requested archive/shard IDs. Each reader
-reuses its CPU share for decoding and sketching in successive OpenMP regions.
-Genopack explicitly requests up to eight decode threads, so each concurrent
-reader needs at least eight CPUs; below eight CPUs decoding runs serially.
-Sketching uses `floor(t/R)` threads per reader. These teams never nest.
+`geodesic ani --io-threads R` controls concurrent compressed-shard readers,
+independently of `-t`. Explicit values are capped at 64 and at the number of
+requested shards, so `-t 32 --io-threads 16` runs sixteen readers. Zero chooses
+`max(1, min(8, t/4))` readers.
 
-Each callback finishes sketching before its reader advances. Consumed FASTAs
-are released immediately; at most R decoded batches and 2R compressed prefetch
-buffers are retained, along with per-thread decoder caches. The automatic
-four-reader cap reduces compressed-buffer memory compared with eight readers.
-With multiple readers, their threads exit after read+sketch and release their
-decoder caches.
-Pair computation then uses the full `-t` budget. Output values and pair
-orientation are unchanged.
+Readers perform only allocation and `pread`, traversing contiguous bands of
+requested shards across archives. A separate pool of exactly `t` workers opens
+shards, decodes individual genomes, and builds sketches. OpenMP teams are disabled
+inside these workers, including explicit teams requested by library code.
+Waiting I/O readers consume no compute slots; decode and sketch work together
+never exceed `t` workers. The pair phase subsequently uses the full CPU budget.
 
-The log reports wall seconds for read+sketch, index, pairs, and write.
-The optional derep FASTA extraction call sites retain their existing reader;
-sharing this CPU-budget design there requires restructuring their callbacks.
+A shared semaphore bounds all compressed buffers, including reads in progress,
+queued shards, and shards still referenced by workers, to `2R`. A compressed
+buffer is released after its last genome finishes. At most `t` decoded genomes
+are live, rather than one decoded batch per reader; per-worker decoder caches
+also contribute to memory. The bound scales with shard size, and explicit high
+reader counts can increase RSS. Missing accessions are ignored and duplicate
+requests retain their caller indices. Reader and callback errors are joined and
+reported to the caller.
+
+The pack adapters expose borrowed file descriptors and shard offsets from
+public genopack APIs. The pack must outlive the visit. Genopack is unchanged.
+The existing batch visitors and derep FASTA extraction retain their behavior.
+ANI logs read+sketch, index, pairs, and write phase wall times.
+
+Measured defaults and RSS results are recorded in the round-3 checks report.

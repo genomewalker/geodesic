@@ -32,6 +32,7 @@ for mode, opts in [("self", []), ("rect", ["--rl", str(r)])]:
     assert exhaustive == expected, (mode, "screen 0 differs from main")
     for label, budget in [("serial", ["-t", "1"]), ("two", ["-t", "2"]),
                           ("io2", ["-t", "8", "--io-threads", "2"]),
+                          ("io16", ["-t", "32", "--io-threads", "16"]),
                           ("clamped", ["-t", "8", "--io-threads", "99"])]:
         # Avoid duplicate -t options in CLI11.
         # run() uses 32 unless an explicit budget is supplied.
