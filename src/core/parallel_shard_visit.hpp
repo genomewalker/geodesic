@@ -23,12 +23,51 @@ inline int ani_reader_count(int, int requested) {
     return requested ? std::clamp(requested, 1, 64) : 8;
 }
 
+// Byte ranges [begin, end) of a shard that ShardReader touches to fetch the
+// local genome `ids`: header, directory, dictionary, codec reference blobs, and
+// each wanted blob with its checkpoints. Sorted, merged across gaps <= `gap`.
+// `head` holds the shard's first bytes, through the end of the directory.
+inline std::vector<std::pair<uint64_t, uint64_t>>
+shard_read_ranges(const uint8_t* head, uint64_t size, std::vector<uint64_t> ids, uint64_t gap = 1 << 20) {
+    using genopack::GenomeDirEntry, genopack::CheckpointEntry;
+    const auto& h = *reinterpret_cast<const genopack::ShardHeader*>(head);
+    if (h.magic != genopack::GPKS_MAGIC || h.codec > 4) return {{0, size}}; // ShardReader reports it.
+    const auto* dir = reinterpret_cast<const GenomeDirEntry*>(head + h.genome_dir_offset);
+    std::vector<std::pair<uint64_t, uint64_t>> ranges{{0, h.genome_dir_offset + uint64_t(h.n_genomes) * sizeof(GenomeDirEntry)}};
+    auto add = [&](const GenomeDirEntry& e) {
+        const uint64_t blob = h.blob_area_offset + e.blob_offset;
+        ranges.emplace_back(blob, blob + e.blob_len_cmp);
+        if (!h.checkpoint_area_offset || !e.n_checkpoints) return;
+        const uint64_t cps = h.checkpoint_area_offset + uint64_t(e.checkpoint_idx) * sizeof(CheckpointEntry);
+        ranges.emplace_back(cps, cps + uint64_t(e.n_checkpoints) * sizeof(CheckpointEntry));
+    };
+    if (h.dict_size && (h.codec == 1 || h.codec == 2)) ranges.emplace_back(h.dict_offset, h.dict_offset + h.dict_size);
+    if (h.codec == 3 && h.n_genomes) {
+        add(dir[0]);
+        if (h.version >= 4 && h.flags < h.n_genomes) add(dir[h.flags]);
+    }
+    if (h.codec == 4) for (uint32_t i = 0; i < std::min(h.dict_size ? h.dict_size : 1u, h.n_genomes); ++i) add(dir[i]);
+    std::sort(ids.begin(), ids.end());
+    for (uint32_t i = 0; i < h.n_genomes; ++i)
+        if (std::binary_search(ids.begin(), ids.end(), dir[i].genome_id)) add(dir[i]);
+    for (auto& [begin, end] : ranges) end = std::min(end, size), begin = std::min(begin, end);
+    std::sort(ranges.begin(), ranges.end());
+    std::vector<std::pair<uint64_t, uint64_t>> merged;
+    for (auto [begin, end] : ranges) {
+        if (!merged.empty() && begin <= merged.back().second + gap) merged.back().second = std::max(merged.back().second, end);
+        else merged.emplace_back(begin, end);
+    }
+    return merged;
+}
+
 // Readers only copy compressed bytes. A separate fixed pool performs all
 // shard initialisation, decoding and sketching, without nested OpenMP teams.
 // Slots cover reads, queued shards AND shards currently used by workers.
+// Unneeded byte runs longer than `read_gap` are skipped, not read.
 template<class Visitor>
 void visit_shard_genomes(IPackReader& pack, const std::vector<std::string>& accessions,
-                        int threads, int requested_readers, const Visitor& visit) {
+                        int threads, int requested_readers, const Visitor& visit,
+                        uint64_t read_gap = 1 << 20) {
     using Key = std::pair<uint16_t, uint32_t>;
     struct Request { size_t index; genopack::GenomeMeta meta; };
     std::map<Key, std::vector<Request>> requests;
@@ -50,7 +89,8 @@ void visit_shard_genomes(IPackReader& pack, const std::vector<std::string>& acce
         ~Job() { slots.release(); }
         std::counting_semaphore<>& slots;
         const std::vector<Request>* requests;
-        std::vector<uint8_t> bytes;
+        std::unique_ptr<uint8_t[]> bytes; // Only the ranges ShardReader touches are read.
+        size_t size = 0;
         genopack::ShardReader shard;
         std::once_flag opened;
         size_t next = 0;
@@ -77,14 +117,28 @@ void visit_shard_genomes(IPackReader& pack, const std::vector<std::string>& acce
                 catch (...) { slots.release(); throw; }
                 job->requests = sources[i].requests;
                 const auto& loc = sources[i].location;
-                job->bytes.resize(loc.size);
-                size_t done = 0;
-                while (done < job->bytes.size()) {
-                    ssize_t n = ::pread(loc.fd, job->bytes.data() + done,
-                                        job->bytes.size() - done, loc.offset + done);
-                    if (n < 0 && errno == EINTR) continue;
-                    if (n <= 0) throw std::runtime_error("ANI shard pread failed or unexpected EOF");
-                    done += static_cast<size_t>(n);
+                job->bytes = std::make_unique_for_overwrite<uint8_t[]>(loc.size);
+                job->size = loc.size;
+                auto pread_all = [&](uint64_t begin, uint64_t end) {
+                    while (begin < end) {
+                        ssize_t n = ::pread(loc.fd, job->bytes.get() + begin, end - begin, loc.offset + begin);
+                        if (n < 0 && errno == EINTR) continue;
+                        if (n <= 0) throw std::runtime_error("ANI shard pread failed or unexpected EOF");
+                        begin += static_cast<uint64_t>(n);
+                    }
+                };
+                // Header, then the directory that follows it, then the planned ranges.
+                uint64_t have = std::min<uint64_t>(loc.size, sizeof(genopack::ShardHeader));
+                pread_all(0, have);
+                if (have >= sizeof(genopack::ShardHeader)) {
+                    const auto& h = *reinterpret_cast<const genopack::ShardHeader*>(job->bytes.get());
+                    const uint64_t dir_end = std::min<uint64_t>(loc.size,
+                        h.genome_dir_offset + uint64_t(h.n_genomes) * sizeof(genopack::GenomeDirEntry));
+                    if (dir_end > have) pread_all(have, dir_end), have = dir_end;
+                    std::vector<uint64_t> ids;
+                    for (const auto& req : *job->requests) ids.push_back(req.meta.genome_id & ((uint64_t(1) << 48) - 1));
+                    for (auto [begin, end] : shard_read_ranges(job->bytes.get(), loc.size, std::move(ids), read_gap))
+                        pread_all(std::max(begin, have), end);
                 }
                 {
                     std::lock_guard lock(mutex);
@@ -117,7 +171,7 @@ void visit_shard_genomes(IPackReader& pack, const std::vector<std::string>& acce
             }
             if (failed) continue; // Drain slots so producers can always finish.
             try {
-                std::call_once(job->opened, [&] { job->shard.open(job->bytes.data(), 0, job->bytes.size()); });
+                std::call_once(job->opened, [&] { job->shard.open(job->bytes.get(), 0, job->size); });
                 const auto& req = job->requests->at(index);
                 genopack::ExtractedGenome genome;
                 genome.meta = req.meta;
