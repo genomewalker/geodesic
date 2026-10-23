@@ -269,7 +269,7 @@ Config parse_args(int argc, char** argv) {
         "Concurrent I/O readers, independent of CPU threads (0=auto: 16 at any -t; max 64)")
         ->default_val(0)->check(CLI::NonNegativeNumber);
     ani_cmd->add_option("--min-af", cfg.ani_min_af,
-        "Minimum alignment fraction to report a pair")->default_val(0.0);
+        "Minimum estimated aligned fraction to report a pair (containment scaled so 0.5 matches skani's GTDB cut)")->default_val(0.0);
     ani_cmd->add_option("--screen", cfg.ani_screen,
         "Marker screen ANI percent (0 = exhaustive)")->default_val(80.0)->check(CLI::Range(0.0, 100.0));
     ani_cmd->add_option("--max-marker-df", cfg.ani_max_marker_df,
