@@ -18,9 +18,10 @@
 
 namespace derep {
 
-// Auto is a flat 8 readers: they only pread, and cold pack reads need 8 whatever -t is.
+// Auto is a flat 16 readers whatever -t is: they only pread, and the small ranged
+// reads of partial shards are latency-bound, so 8 readers leave -t 32 short of data.
 inline int ani_reader_count(int, int requested) {
-    return requested ? std::clamp(requested, 1, 64) : 8;
+    return requested ? std::clamp(requested, 1, 64) : 16;
 }
 
 // Byte ranges [begin, end) of a shard that ShardReader touches to fetch the

@@ -77,7 +77,7 @@ public:
 };
 }
 TEST_CASE("ANI I/O concurrency is independent of the compute budget", "[parallel-pack]") {
-    for (int threads : {1, 4, 8, 16, 32, 64}) REQUIRE(derep::ani_reader_count(threads, 0) == 8);
+    for (int threads : {1, 4, 8, 16, 32, 64}) REQUIRE(derep::ani_reader_count(threads, 0) == 16);
     REQUIRE(derep::ani_reader_count(2, 16) == 16);
     REQUIRE(derep::ani_reader_count(8, 2) == 2);
     REQUIRE(derep::ani_reader_count(32, 16) == 16);
