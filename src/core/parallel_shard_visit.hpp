@@ -18,8 +18,9 @@
 
 namespace derep {
 
-inline int ani_reader_count(int threads, int requested) {
-    return requested ? std::clamp(requested, 1, 64) : std::max(1, std::min(8, threads / 4));
+// Auto is a flat 8 readers: they only pread, and cold pack reads need 8 whatever -t is.
+inline int ani_reader_count(int, int requested) {
+    return requested ? std::clamp(requested, 1, 64) : 8;
 }
 
 // Readers only copy compressed bytes. A separate fixed pool performs all
