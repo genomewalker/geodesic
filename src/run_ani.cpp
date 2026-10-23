@@ -2,6 +2,7 @@
 #include "core/multi_pack_reader.hpp"
 #include "core/pack_reader.hpp"
 #include "core/parallel_shard_visit.hpp"
+#include "core/ani_index.hpp"
 #include <chrono>
 #include "core/skani.hpp"
 #include <genopack/archive.hpp>
@@ -115,20 +116,10 @@ int run_ani(const Config& cfg) {
 
     // A flat inverted index avoids a hash table allocation for every distinct
     // marker. Sorting (hash, index) also sorts each marker's reference list.
-    struct Marker { uint64_t hash; int ri; };
-    std::vector<Marker> index;
+    std::vector<AniMarker> index;
     std::vector<size_t> nm_ref(nr);
     if (cfg.ani_screen > 0) {
-        size_t count = 0;
-        for (const auto* sk : rsks)
-            for (auto h : sk->hashes) count += (h % 8 == 0);
-        index.reserve(count);
-        for (int ri = 0; ri < nr; ++ri)
-            for (auto h : rsks[ri]->hashes)
-                if (h % 8 == 0) { index.push_back({h, ri}); ++nm_ref[ri]; }
-        std::sort(index.begin(), index.end(), [](const Marker& a, const Marker& b) {
-            return a.hash < b.hash || (a.hash == b.hash && a.ri < b.ri);
-        });
+        index = build_marker_index(rsks, nm_ref, cfg.threads);
         if (cfg.ani_max_marker_df) {
             size_t dst = 0;
             for (size_t begin = 0; begin < index.size();) {
@@ -182,12 +173,12 @@ int run_ani(const Config& cfg) {
                 if (h % 8 != 0) continue;
                 ++nm_q;
                 auto begin = std::lower_bound(index.begin(), index.end(), h,
-                    [](const Marker& m, uint64_t hash) { return m.hash < hash; });
+                    [](const AniMarker& m, uint64_t hash) { return m.hash < hash; });
                 auto end = std::upper_bound(begin, index.end(), h,
-                    [](uint64_t hash, const Marker& m) { return hash < m.hash; });
+                    [](uint64_t hash, const AniMarker& m) { return hash < m.hash; });
                 if (self_pairs)
                     begin = std::upper_bound(begin, end, qi,
-                        [](int q, const Marker& m) { return q < m.ri; });
+                        [](int q, const AniMarker& m) { return q < m.ri; });
                 for (auto it = begin; it != end; ++it) {
                     if (counts[it->ri]++ == 0) touched.push_back(it->ri);
                 }
