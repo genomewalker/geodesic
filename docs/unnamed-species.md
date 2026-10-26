@@ -1,6 +1,6 @@
 # Clustering genomes without a species name
 
-> Status as of 2026-10-21: merged to main. `--unnamed-species cluster` is the default; `singleton` restores the previous one-species-per-genome behaviour. Matches the S2 reference clustering at ARI 1.000 on three families with `--ordering-tsv` and `--anchor-skani-db`, and 140/140 GTDB anchors.
+> `--unnamed-species cluster` is the default; `singleton` restores the previous one-species-per-genome behaviour.
 
 `geodesic derep` clusters unnamed genomes by default. This includes bare `s__`
 (and species-only `S__`) ranks and older accession-filled species ranks. A strain
